@@ -5,12 +5,13 @@ from decimal import Decimal
 from django.core.cache import cache
 from moralis import evm_api, sol_api
 from .api_config import APIConfig, Chain, APIEndpoints
-from .models import Wallet
+from .models import Wallet, Token
 from .constants import QUICKNODE_COIN_IDS, SOLANA_TOKEN_LIST
 import logging
 import requests
 from django.conf import settings
 import json
+from django.db.models import Q
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +63,47 @@ class TokenService:
                 return cached_data
             
         try:
+            tokens = []
+            
+            # 获取数据库中的代币列表
+            db_tokens = Token.objects.filter(chain=wallet.chain).order_by('rank')
+            
             if wallet.chain == 'SOL':
                 logger.info("Fetching Solana tokens")
                 tokens = await TokenService._get_solana_tokens(wallet)
-                # 获取价格
-                await TokenService._update_token_prices(tokens)
+            elif wallet.chain == 'BTC':
+                logger.info("Fetching Bitcoin tokens")
+                tokens = await TokenService._get_btc_tokens(wallet.address)
             else:
                 logger.info(f"Fetching {wallet.chain} tokens")
                 tokens = await TokenService._get_evm_tokens(wallet)
                 
+            # 补充代币信息
+            for token in tokens:
+                try:
+                    db_token = db_tokens.filter(
+                        Q(address__iexact=token.get('contract')) | 
+                        Q(symbol__iexact=token.get('symbol'))
+                    ).first()
+                    
+                    if db_token:
+                        token.update({
+                            'name': db_token.name,
+                            'symbol': db_token.symbol,
+                            'logo': db_token.logo or token.get('logo', ''),
+                            'decimals': db_token.decimals,
+                            'website': db_token.website,
+                            'explorer': db_token.explorer,
+                            'twitter': db_token.twitter,
+                            'telegram': db_token.telegram
+                        })
+                except Exception as e:
+                    logger.error(f"Error updating token info from DB: {str(e)}")
+                    continue
+            
+            # 获取价格数据
+            await TokenService._update_token_prices(tokens)
+            
             # 缓存结果
             cache_config = APIConfig.get_cache_config()
             cache.set(cache_key, tokens, cache_config['TIMEOUT'])
@@ -199,81 +232,87 @@ class TokenService:
                 logger.error(f"Unsupported chain: {wallet.chain}")
                 return []
 
-            # 获取原生代币余额
-            native_params = {
-                "address": wallet.address,
-                "chain": chain
-            }
-            
-            logger.info(f"Getting native balance for chain {chain}")
-            native_balance = evm_api.balance.get_native_balance(
-                api_key=TokenService.MORALIS_API_KEY,
-                params=native_params
-            )
-            
             token_list = []
             
-            # 添加原生代币
-            if native_balance and float(native_balance.get('balance', '0')) > 0:
-                chain_info = TokenService.NATIVE_TOKEN_MAPPING.get(chain, {'id': None, 'decimals': 18})
-                balance = float(native_balance.get('balance', '0')) / (10 ** chain_info['decimals'])
-                
-                # 获取原生代币价格
-                native_price = 0
-                price_change_24h = 0
-                try:
-                    if chain_info['id']:
-                        url = f"https://api.coingecko.com/api/v3/simple/price?ids={chain_info['id']}&vs_currencies=usd&include_24hr_change=true"
-                        logger.info(f"Fetching native token price from CoinGecko: {url}")
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(url) as response:
-                                if response.status == 200:
-                                    price_data = await response.json()
-                                    if chain_info['id'] in price_data:
-                                        native_price = float(price_data[chain_info['id']].get('usd', 0))
-                                        price_change_24h = price_data[chain_info['id']].get('usd_24h_change', 0)
-                                        logger.info(f"Got native token price: ${native_price} (24h change: {price_change_24h}%)")
-                except Exception as e:
-                    logger.error(f"Error getting native token price: {str(e)}")
-
-                value = balance * native_price
-                
-                # 获取原生代币信息
-                native_token = {
-                    'symbol': wallet.chain,  # ETH, BNB, MATIC 等
-                    'name': f'{wallet.chain} Token',  # Ethereum, BNB, Polygon 等
-                    'balance': str(balance),
-                    'decimals': chain_info['decimals'],
-                    'price_usd': str(native_price),
-                    'price_change_24h': str(price_change_24h),
-                    'value_usd': str(value),
-                    'chain': wallet.chain,
-                    'is_native': True
+            # 获取原生代币余额
+            try:
+                native_params = {
+                    "address": wallet.address,
+                    "chain": chain
                 }
-                token_list.append(native_token)
-                logger.info(f"Added native token {wallet.chain} with balance {balance}")
+                
+                logger.info(f"Getting native balance for chain {chain}")
+                native_balance = evm_api.balance.get_native_balance(
+                    api_key=TokenService.MORALIS_API_KEY,
+                    params=native_params
+                )
+                
+                # 添加原生代币
+                if native_balance and float(native_balance.get('balance', '0')) > 0:
+                    chain_info = TokenService.NATIVE_TOKEN_MAPPING.get(chain, {'id': None, 'decimals': 18})
+                    balance = float(native_balance.get('balance', '0')) / (10 ** chain_info['decimals'])
+                    
+                    # 获取原生代币价格
+                    native_price = 0
+                    price_change_24h = 0
+                    try:
+                        if chain_info['id']:
+                            url = f"https://api.coingecko.com/api/v3/simple/price?ids={chain_info['id']}&vs_currencies=usd&include_24hr_change=true"
+                            logger.info(f"Fetching native token price from CoinGecko: {url}")
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(url) as response:
+                                    if response.status == 200:
+                                        price_data = await response.json()
+                                        if chain_info['id'] in price_data:
+                                            native_price = float(price_data[chain_info['id']].get('usd', 0))
+                                            price_change_24h = price_data[chain_info['id']].get('usd_24h_change', 0)
+                                            logger.info(f"Got native token price: ${native_price} (24h change: {price_change_24h}%)")
+                    except Exception as e:
+                        logger.error(f"Error getting native token price: {str(e)}")
+                    
+                    value = balance * native_price
+                    
+                    # 获取原生代币信息
+                    native_token = {
+                        'symbol': wallet.chain,  # ETH, BNB, MATIC 等
+                        'name': f'{wallet.chain} Token',  # Ethereum, BNB, Polygon 等
+                        'balance': str(balance),
+                        'decimals': chain_info['decimals'],
+                        'price_usd': str(native_price),
+                        'price_change_24h': str(price_change_24h),
+                        'value_usd': str(value),
+                        'chain': wallet.chain,
+                        'is_native': True
+                    }
+                    token_list.append(native_token)
+                    logger.info(f"Added native token {wallet.chain} with balance {balance}")
+            except Exception as e:
+                logger.error(f"Error getting native token balance: {str(e)}")
 
             # 获取 ERC20 代币
-            params = {
-                "address": wallet.address,
-                "chain": chain
-            }
+            try:
+                params = {
+                    "address": wallet.address,
+                    "chain": chain
+                }
 
-            logger.info(f"Calling Moralis EVM API for chain {chain}")
-            result = evm_api.token.get_wallet_token_balances(
-                api_key=TokenService.MORALIS_API_KEY,
-                params=params
-            )
+                logger.info(f"Calling Moralis EVM API for chain {chain}")
+                result = evm_api.token.get_wallet_token_balances(
+                    api_key=TokenService.MORALIS_API_KEY,
+                    params=params
+                )
 
-            logger.info(f"Got {len(result)} raw tokens from Moralis")
+                logger.info(f"Got {len(result)} raw tokens from Moralis")
 
-            for token in result:
-                try:
-                    balance = float(token.get('balance', 0)) / (10 ** int(token.get('decimals', 18)))
-                    price = float(token.get('usd_price') or 0)
-                    value = balance * price
+                for token in result:
+                    try:
+                        balance = float(token.get('balance', 0)) / (10 ** int(token.get('decimals', 18)))
+                        if balance <= 0:
+                            continue
+                            
+                        price = float(token.get('usd_price') or 0)
+                        value = balance * price
 
-                    if balance > 0:
                         token_data = {
                             'symbol': token.get('symbol', 'Unknown'),
                             'name': token.get('name', 'Unknown Token'),
@@ -288,9 +327,11 @@ class TokenService:
                         }
                         token_list.append(token_data)
                         logger.info(f"Processed token {token.get('symbol')} with balance {balance}")
-                except Exception as e:
-                    logger.error(f"Error processing token data: {str(e)}, token: {token}")
-                    continue
+                    except Exception as e:
+                        logger.error(f"Error processing token data: {str(e)}, token: {token}")
+                        continue
+            except Exception as e:
+                logger.error(f"Error getting ERC20 tokens: {str(e)}")
 
             logger.info(f"Returning {len(token_list)} processed tokens")
             return token_list

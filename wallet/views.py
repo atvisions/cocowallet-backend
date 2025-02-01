@@ -586,10 +586,21 @@ class WalletViewSet(viewsets.ModelViewSet):
                 private_key = private_key.strip()
                 
                 try:
-                    # 尝试 base58 解码
-                    decoded_bytes = base58.b58decode(private_key)
+                    # 如果是长字符串格式，先尝试截取为标准长度
+                    if len(private_key) > 88:  # 标准Solana keypair的base58编码长度约为88
+                        # 取前88个字符
+                        private_key = private_key[:88]
                     
-                    # 如果是完整的 keypair（64字节）
+                    # 尝试 base58 解码
+                    try:
+                        decoded_bytes = base58.b58decode(private_key)
+                    except Exception:
+                        return Response({
+                            'error': '无效的Solana私钥格式',
+                            'detail': '私钥必须是有效的Base58格式'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                    
+                    # 检查长度
                     if len(decoded_bytes) == 64:
                         # 前32字节是私钥
                         private_key_bytes = decoded_bytes[:32]
@@ -597,7 +608,6 @@ class WalletViewSet(viewsets.ModelViewSet):
                         public_key_bytes = decoded_bytes[32:]
                         # 验证公钥
                         address = base58.b58encode(public_key_bytes).decode()
-                    # 如果是纯私钥（32字节）
                     elif len(decoded_bytes) == 32:
                         private_key_bytes = decoded_bytes
                         # 使用 ed25519 生成公钥
@@ -610,11 +620,23 @@ class WalletViewSet(viewsets.ModelViewSet):
                         )
                         address = base58.b58encode(public_key_bytes).decode()
                     else:
-                        raise ValueError("Invalid private key length")
+                        # 如果解码后长度不对，尝试直接使用nacl.signing
+                        try:
+                            # 使用nacl.signing直接处理
+                            signing_key = nacl.signing.SigningKey(private_key_bytes)
+                            verify_key = signing_key.verify_key
+                            public_key_bytes = bytes(verify_key)
+                            address = base58.b58encode(public_key_bytes).decode()
+                            private_key_bytes = bytes(signing_key)
+                        except Exception:
+                            return Response({
+                                'error': '无效的Solana私钥格式',
+                                'detail': f'私钥长度必须是32字节（纯私钥）或64字节（keypair），当前长度为{len(decoded_bytes)}字节'
+                            }, status=status.HTTP_400_BAD_REQUEST)
                         
                     # 保存私钥
                     private_key = base58.b58encode(private_key_bytes).decode()
-
+                    
                 except Exception as e:
                     return Response({
                         'error': '无效的Solana私钥格式',
