@@ -1,6 +1,6 @@
 from django.shortcuts import render
 from rest_framework import viewsets, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 from rest_framework.request import Request
 from django.conf import settings
@@ -27,7 +27,8 @@ import json
 import re
 import base58
 import nacl.signing
-from .services import TokenService, NFTService
+from .token_services.balance_service import TokenBalanceService
+from .token_services.price_service import TokenPriceService
 import asyncio
 from asgiref.sync import sync_to_async
 import logging
@@ -54,7 +55,7 @@ class WalletViewSet(viewsets.ModelViewSet):
     queryset = Wallet.objects.all()
 
     def get_queryset(self):
-        request: Request = self.request
+        request: Request = self.request # type: ignore
         # 从 query_params 或 data 中获取 device_id
         device_id = request.query_params.get('device_id') or request.data.get('device_id')
         if not device_id:
@@ -905,32 +906,37 @@ class WalletViewSet(viewsets.ModelViewSet):
         })
 
     @action(detail=True, methods=['get'])
-    def tokens(self, request, pk=None):
-        """获取钱包代币列表和总价值"""
+    def tokens(self, request: Request, pk=None):
+        """获取钱包的代币元数据"""
         try:
+            # 获取device_id参数
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({'error': '缺少device_id参数'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # 获取钱包实例
             wallet = self.get_object()
-        except:
-            return Response({'error': '钱包不存在'}, status=status.HTTP_404_NOT_FOUND)
+            if not wallet:
+                return Response({'error': '钱包不存在'}, status=status.HTTP_404_NOT_FOUND)
 
-        device_id = request.query_params.get('device_id')
-        if not device_id:
-            return Response({'error': '请提供device_id'}, status=status.HTTP_400_BAD_REQUEST)
-        if device_id != wallet.device_id:
-            return Response({'error': '无权访问此钱包'}, status=status.HTTP_403_FORBIDDEN)
+            # 验证device_id
+            if wallet.device_id != device_id:
+                return Response({'error': '设备ID不匹配'}, status=status.HTTP_403_FORBIDDEN)
 
-        try:
-            # 使用同步方式调用异步函数
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(TokenService().get_wallet_tokens(wallet))
-            loop.close()
-            return Response(result)
+            # 获取代币余额
+            token_balances = asyncio.run(TokenBalanceService.get_token_balances(wallet))
+            if not token_balances:
+                return Response([])
+
+            # 更新代币价格
+            asyncio.run(TokenPriceService.update_token_prices(token_balances))
+
+            # 返回代币数据
+            return Response(token_balances)
+
         except Exception as e:
-            print(f"Error in tokens view: {str(e)}")  # 添加错误日志
-            return Response({
-                'error': '获取代币列表失败',
-                'detail': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
+            logger.error(f"获取代币元数据时出错: {str(e)}")
+            return Response({'error': '获取代币数据失败'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'])
     def value(self, request, pk=None):
@@ -1042,6 +1048,50 @@ class WalletViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+    @action(detail=True, methods=['get'], url_path='tokens/(?P<chain>[^/.]+)/(?P<address>[^/.]+)/detail')
+    def token_detail(self, request, pk=None, chain=None, address=None):
+        """获取代币详情"""
+        try:
+            # 使用filter而不是get_object来获取钱包
+            wallet = Wallet.objects.filter(pk=pk).first()
+            if not wallet:
+                return Response({'error': '钱包不存在'}, status=status.HTTP_404_NOT_FOUND)
+            
+            # 验证device_id
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({'error': '请提供device_id'}, status=status.HTTP_400_BAD_REQUEST)
+            if device_id != wallet.device_id:
+                return Response({'error': '无权访问此钱包'}, status=status.HTTP_403_FORBIDDEN)
+            
+            if not chain:
+                return Response({'error': '请提供链类型'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if not address:
+                return Response({'error': '请提供代币地址'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 同步方式调用get_token_details函数
+            token_detail = TokenPriceService.get_token_details(chain, address)
+            if not token_detail:
+                return Response({'error': '代币不存在'}, status=status.HTTP_404_NOT_FOUND)
+            
+            # 使用同步方式调用异步函数
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            price_history = loop.run_until_complete(TokenPriceService.get_token_price_history(chain, address))
+            loop.close()
+            
+            if price_history:
+                token_detail['price_history'] = price_history
+            
+            return Response(token_detail)
+        except ValueError as e:
+            logger.warning(f"Token detail value error: {str(e)}")
+            return Response({'error': str(e)}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error in token_detail view: {str(e)}")
+            return Response({'error': '获取代币详情失败'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=True, methods=['get'], url_path='nft-collections/(?P<collection_id>[^/.]+)/nfts/(?P<mint>[^/.]+)')
     def nft_detail(self, request, pk=None, collection_id=None, mint=None):
         """获取 NFT 详情"""
@@ -1097,3 +1147,26 @@ class MnemonicBackupViewSet(viewsets.ModelViewSet):
         if device_id:
             return MnemonicBackup.objects.filter(device_id=device_id)
         return MnemonicBackup.objects.none()
+
+@api_view(['GET'])
+async def get_wallet_tokens(request, wallet_id):
+    """获取钱包代币列表"""
+    try:
+        device_id = request.query_params.get('device_id')
+        if not device_id:
+            return Response({'error': '缺少device_id参数'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 获取钱包
+        try:
+            wallet = await Wallet.objects.aget(id=wallet_id)
+        except Wallet.DoesNotExist:
+            return Response({'error': '钱包不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        # 获取代币列表
+        result = await TokenBalanceService.get_wallet_tokens(wallet)
+        
+        # 返回结果
+        return Response(result)
+    except Exception as e:
+        logger.error(f"获取代币列表时出错: {str(e)}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

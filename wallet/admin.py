@@ -10,65 +10,29 @@ import re
 
 @admin.register(Token)
 class TokenAdmin(admin.ModelAdmin):
-    def logo_display(self, obj):
-        """显示代币logo"""
-        if obj.logo:
-            return format_html('<img src="{}" style="width: 32px; height: 32px; border-radius: 50%;" />', obj.logo)
-        return format_html('<div style="width: 32px; height: 32px; border-radius: 50%; background-color: #f0f0f0; display: flex; align-items: center; justify-content: center;">{}</div>', obj.symbol[0] if obj.symbol else '?')
-    logo_display.short_description = 'Logo'
-
-    list_display = [
-        'logo_display', 'name', 'symbol', 'chain', 'address', 'type',
-        'rank', 'is_active', 'is_new', 'open_source',
-        'development_status'
-    ]
-    list_filter = [
-        'chain', 'type', 'is_active', 'is_new',
-        'open_source', 'hardware_wallet'
-    ]
-    search_fields = ['name', 'symbol', 'address', 'coin_id']
-    readonly_fields = [
-        'coin_id', 'rank', 'first_data_at', 'last_data_at',
-        'created_at', 'updated_at'
-    ]
-    fieldsets = [
+    """代币管理"""
+    list_display = ('chain', 'name', 'symbol', 'address', 'decimals', 'type', 'contract_type', 'verified', 'possible_spam', 'updated_at')
+    list_filter = ('chain', 'type', 'contract_type', 'verified', 'possible_spam')
+    search_fields = ('name', 'symbol', 'address')
+    readonly_fields = ('updated_at',)
+    ordering = ('-updated_at',)
+    fieldsets = (
         ('基本信息', {
-            'fields': [
-                'chain', 'name', 'symbol', 'address', 'decimals',
-                'logo', 'coin_id', 'rank', 'type'
-            ]
+            'fields': ('chain', 'name', 'symbol', 'address', 'decimals', 'logo', 'type', 'contract_type', 'description')
         }),
-        ('状态', {
-            'fields': [
-                'is_new', 'is_active', 'open_source',
-                'hardware_wallet'
-            ]
+        ('状态信息', {
+            'fields': ('verified', 'possible_spam', 'is_native', 'security_score', 'created_at')
         }),
-        ('项目信息', {
-            'fields': [
-                'description', 'tags', 'team', 'started_at',
-                'development_status', 'proof_type',
-                'org_structure', 'hash_algorithm'
-            ]
+        ('链接信息', {
+            'fields': ('website', 'twitter', 'telegram', 'reddit', 'discord', 'github', 'medium')
         }),
-        ('链接', {
-            'fields': [
-                'website', 'explorer', 'reddit', 'source_code',
-                'technical_doc', 'twitter', 'telegram',
-                'links_extended'
-            ]
+        ('供应信息', {
+            'fields': ('total_supply', 'total_supply_formatted')
         }),
-        ('白皮书', {
-            'fields': ['whitepaper_link', 'whitepaper_thumbnail']
-        }),
-        ('时间信息', {
-            'fields': [
-                'first_data_at', 'last_data_at',
-                'created_at', 'updated_at'
-            ]
+        ('缓存数据', {
+            'fields': ('last_balance', 'last_price', 'last_price_change', 'last_value', 'updated_at')
         })
-    ]
-    ordering = ['rank', '-is_active']
+    )
 
 @admin.register(Wallet)
 class WalletAdmin(admin.ModelAdmin):

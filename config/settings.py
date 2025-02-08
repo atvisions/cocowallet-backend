@@ -57,7 +57,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'coco_wallet.wsgi.application'
+WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database
 DATABASES = {
@@ -204,4 +204,43 @@ SUPPORTED_CHAINS = {
 
 # Moralis API配置
 MORALIS_API_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IjZiNGRlNzlkLTc3YzctNGM1Ny04MDE4LTNmYzk1OGUxOTBiYSIsIm9yZ0lkIjoiNDI4MzE0IiwidXNlcklkIjoiNDQwNTc1IiwidHlwZUlkIjoiNDE4MjdjY2UtYmNhMi00YjZiLTgzMmUtMDE1ZWNmZGMwODZkIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3MzgyNDY2NDYsImV4cCI6NDg5NDAwNjY0Nn0.fj9LXbkQcSLMLIjoeD6IXkLLVigPQx3wNaSiUzfQkl8'  # 请替换为您的实际API密钥
-MORALIS_API_URL = 'https://deep-index.moralis.io/api/v2' 
+MORALIS_API_URL = 'https://deep-index.moralis.io/api/v2'
+
+# 日志配置
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+        'file': {
+            'class': 'logging.FileHandler',
+            'filename': 'logs/debug.log',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'wallet': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': True,
+        },
+    },
+}

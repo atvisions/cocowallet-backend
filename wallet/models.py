@@ -50,61 +50,46 @@ class Wallet(models.Model):
 class Token(models.Model):
     """代币模型"""
     chain = models.CharField(max_length=10, verbose_name='链')
-    name = models.CharField(max_length=100, verbose_name='名称')
-    symbol = models.CharField(max_length=20, verbose_name='符号')
-    address = models.CharField(max_length=100, verbose_name='合约地址')
+    address = models.CharField(max_length=255, verbose_name='合约地址')
+    name = models.CharField(max_length=255, verbose_name='名称')
+    symbol = models.CharField(max_length=50, verbose_name='符号')
     decimals = models.IntegerField(default=18, verbose_name='小数位数')
-    logo = models.URLField(max_length=500, null=True, blank=True, verbose_name='Logo URL')
-    
-    # 基本信息
-    coin_id = models.CharField(max_length=100, verbose_name='币种ID')
-    rank = models.IntegerField(null=True, blank=True, verbose_name='排名')
-    is_new = models.BooleanField(default=False, verbose_name='是否新币')
-    is_active = models.BooleanField(default=True, verbose_name='是否活跃')
+    logo = models.URLField(max_length=500, null=True, blank=True, verbose_name='Logo')
     type = models.CharField(max_length=20, default='token', verbose_name='类型')
-    contract_type = models.CharField(max_length=20, null=True, blank=True, verbose_name='合约类型')
-    
-    # 扩展信息
+    contract_type = models.CharField(max_length=20, default='ERC20', verbose_name='合约类型')
     description = models.TextField(null=True, blank=True, verbose_name='描述')
-    tags = models.JSONField(default=list, blank=True, verbose_name='标签')
-    team = models.JSONField(default=list, blank=True, verbose_name='团队')
-    open_source = models.BooleanField(default=True, verbose_name='是否开源')
-    started_at = models.DateTimeField(null=True, blank=True, verbose_name='项目开始时间')
-    development_status = models.CharField(max_length=50, null=True, blank=True, verbose_name='开发状态')
-    hardware_wallet = models.BooleanField(default=False, verbose_name='是否支持硬件钱包')
-    proof_type = models.CharField(max_length=50, null=True, blank=True, verbose_name='共识机制')
-    org_structure = models.CharField(max_length=50, null=True, blank=True, verbose_name='组织结构')
-    hash_algorithm = models.CharField(max_length=50, null=True, blank=True, verbose_name='哈希算法')
-    
-    # 链接
-    website = models.URLField(max_length=500, null=True, blank=True, verbose_name='官网')
-    explorer = models.JSONField(default=list, blank=True, verbose_name='区块浏览器')
-    reddit = models.JSONField(default=list, blank=True, verbose_name='Reddit链接')
-    source_code = models.JSONField(default=list, blank=True, verbose_name='源代码')
-    technical_doc = models.URLField(max_length=500, null=True, blank=True, verbose_name='技术文档')
+    website = models.URLField(max_length=500, null=True, blank=True, verbose_name='网站')
     twitter = models.URLField(max_length=500, null=True, blank=True, verbose_name='Twitter')
     telegram = models.URLField(max_length=500, null=True, blank=True, verbose_name='Telegram')
+    reddit = models.JSONField(default=list, null=True, blank=True, verbose_name='Reddit')
+    discord = models.URLField(max_length=500, null=True, blank=True, verbose_name='Discord')
+    github = models.URLField(max_length=500, null=True, blank=True, verbose_name='GitHub')
+    medium = models.URLField(max_length=500, null=True, blank=True, verbose_name='Medium')
+    total_supply = models.CharField(max_length=255, null=True, blank=True, verbose_name='总供应量')
+    total_supply_formatted = models.CharField(max_length=255, null=True, blank=True, verbose_name='格式化总供应量')
+    security_score = models.IntegerField(null=True, blank=True, verbose_name='安全评分')
+    verified = models.BooleanField(default=False, verbose_name='是否验证')
+    created_at = models.DateTimeField(null=True, blank=True, verbose_name='创建时间')
+    possible_spam = models.BooleanField(default=False, verbose_name='是否可能是垃圾代币')
+    is_native = models.BooleanField(default=False, verbose_name='是否原生代币')
     
-    # 扩展链接数据
-    links_extended = models.JSONField(default=list, blank=True, verbose_name='扩展链接')
-    
-    # 白皮书
-    whitepaper_link = models.URLField(max_length=500, null=True, blank=True, verbose_name='白皮书链接')
-    whitepaper_thumbnail = models.URLField(max_length=500, null=True, blank=True, verbose_name='白皮书缩略图')
-    
-    # 时间信息
-    first_data_at = models.DateTimeField(null=True, blank=True, verbose_name='首次数据时间')
-    last_data_at = models.DateTimeField(null=True, blank=True, verbose_name='最后数据时间')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    # 缓存字段
+    last_balance = models.CharField(max_length=255, null=True, blank=True, verbose_name='最后余额')
+    last_price = models.CharField(max_length=255, null=True, blank=True, verbose_name='最后价格')
+    last_price_change = models.CharField(max_length=255, null=True, blank=True, verbose_name='最后24h价格变化')
+    last_value = models.CharField(max_length=255, null=True, blank=True, verbose_name='最后价值')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
 
     class Meta:
         verbose_name = '代币'
         verbose_name_plural = '代币'
-        unique_together = ('coin_id', 'chain', 'address')
+        unique_together = ('chain', 'address')
+        indexes = [
+            models.Index(fields=['chain', 'address']),
+        ]
 
     def __str__(self):
-        return f"{self.name} ({self.symbol}) on {self.chain}"
+        return f"{self.chain} - {self.symbol} ({self.address})"
 
 class NFTCollection(models.Model):
     """NFT合集模型"""
