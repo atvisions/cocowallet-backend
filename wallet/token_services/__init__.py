@@ -17,7 +17,9 @@ class BaseTokenService:
         'ARBITRUM': 'arbitrum',
         'OPTIMISM': 'optimism',
         'AVALANCHE': 'avalanche',
-        'BASE': 'base'
+        'BASE': 'base',
+        'BTC': 'bitcoin',
+        'SOL': 'solana'
     }
 
     NATIVE_TOKEN_MAPPING = {
@@ -27,7 +29,9 @@ class BaseTokenService:
         'arbitrum': {'decimals': 18},
         'optimism': {'decimals': 18},
         'avalanche': {'decimals': 18},
-        'base': {'decimals': 18}
+        'base': {'decimals': 18},
+        'bitcoin': {'decimals': 8},
+        'solana': {'decimals': 9}
     }
 
     @staticmethod

@@ -55,11 +55,17 @@ class MnemonicBackupSerializer(serializers.ModelSerializer):
 
 class WalletCreateSerializer(serializers.Serializer):
     """钱包创建序列化器"""
-    chain = serializers.ChoiceField(choices=[(key, value['name']) for key, value in settings.SUPPORTED_CHAINS.items()])
+    chain = serializers.CharField(max_length=10)  # 改为 CharField，不使用 ChoiceField
     name = serializers.CharField(max_length=50)
     mnemonic = serializers.CharField(write_only=True, required=False)
     password = serializers.CharField(write_only=True)
     device_id = serializers.CharField(max_length=100)
+
+    def validate_chain(self, value):
+        """验证链类型"""
+        if value not in settings.SUPPORTED_CHAINS:
+            raise serializers.ValidationError('不支持的链类型')
+        return value
 
 class WalletUpdateSerializer(serializers.Serializer):
     """钱包更新序列化器"""
@@ -68,11 +74,17 @@ class WalletUpdateSerializer(serializers.Serializer):
 
 class WalletImportSerializer(serializers.Serializer):
     """钱包导入序列化器"""
-    chain = serializers.ChoiceField(choices=[(key, value['name']) for key, value in settings.SUPPORTED_CHAINS.items()])
+    chain = serializers.CharField(max_length=10)  # 改为 CharField，不使用 ChoiceField
     name = serializers.CharField(max_length=50)
     mnemonic = serializers.CharField(write_only=True)
     password = serializers.CharField(write_only=True)
     device_id = serializers.CharField(max_length=100)
+
+    def validate_chain(self, value):
+        """验证链类型"""
+        if value not in settings.SUPPORTED_CHAINS:
+            raise serializers.ValidationError('不支持的链类型')
+        return value
 
 class PaymentPasswordSerializer(serializers.ModelSerializer):
     """支付密码序列化器"""

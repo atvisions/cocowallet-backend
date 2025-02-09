@@ -1,6 +1,26 @@
 from django.db import models
 from django.conf import settings
 from decimal import Decimal
+from cryptography.fernet import Fernet
+import base64
+import logging
+import hashlib
+import base58
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
+
+logger = logging.getLogger(__name__)
+
+def decrypt_string(encrypted_text: str, key: str) -> str:
+    """简单的字符串解密函数"""
+    try:
+        key_hash = hashlib.sha256(key.encode()).digest()
+        encrypted_bytes = base64.b64decode(encrypted_text)
+        decrypted = bytes(a ^ b for a, b in zip(encrypted_bytes, key_hash * (len(encrypted_bytes) // len(key_hash) + 1)))
+        return decrypted.decode()
+    except Exception as e:
+        logger.error(f"解密字符串失败: {str(e)}")
+        raise ValueError("解密失败")
 
 class TokenIndex(models.Model):
     """代币索引模型"""
@@ -47,6 +67,85 @@ class Wallet(models.Model):
     def __str__(self):
         return f"{self.name} ({self.address})"
 
+    def decrypt_private_key(self) -> bytes:
+        """解密私钥，返回字节格式"""
+        if not self.encrypted_private_key:
+            logger.error("钱包没有私钥")
+            raise ValueError("钱包没有私钥")
+        
+        if self.is_watch_only:
+            logger.error("观察者钱包没有私钥")
+            raise ValueError("观察者钱包没有私钥")
+            
+        try:
+            # 获取加密的私钥
+            encrypted_bytes = self.encrypted_private_key
+            logger.debug(f"加密私钥类型: {type(encrypted_bytes)}")
+            logger.debug(f"加密私钥原始内容: {encrypted_bytes[:10]}...")  # 只显示前10个字符
+            
+            # 如果是字符串类型，转换为字节
+            if isinstance(encrypted_bytes, str):
+                try:
+                    encrypted_bytes = base64.b64decode(encrypted_bytes)
+                    logger.debug(f"base64解码后长度: {len(encrypted_bytes)}")
+                except Exception as e:
+                    logger.error(f"私钥base64解码失败: {str(e)}")
+                    raise ValueError(f"私钥格式错误: {str(e)}")
+            
+            # 获取支付密码
+            if not hasattr(self, 'payment_password'):
+                raise ValueError("未提供支付密码")
+            
+            # 生成32字节的密钥
+            key_hash = hashlib.sha256(self.payment_password.encode()).digest()
+            
+            # 使用XOR解密
+            decrypted = bytes(a ^ b for a, b in zip(encrypted_bytes, key_hash * (len(encrypted_bytes) // len(key_hash) + 1)))
+            logger.debug(f"解密后的数据长度: {len(decrypted)}")
+            
+            # 对于Solana钱包，使用特殊处理
+            if self.chain == 'SOL':
+                try:
+                    # 如果解密后的数据是hex字符串，转换为字节
+                    try:
+                        decrypted_str = decrypted.decode('utf-8')
+                        if decrypted_str.startswith('0x'):
+                            decrypted_str = decrypted_str[2:]
+                        private_key_bytes = bytes.fromhex(decrypted_str)
+                    except (UnicodeDecodeError, ValueError):
+                        private_key_bytes = decrypted
+
+                    # 如果是64字节，取前32字节作为私钥
+                    if len(private_key_bytes) == 64:
+                        private_key_bytes = private_key_bytes[:32]
+                    elif len(private_key_bytes) != 32:
+                        raise ValueError(f"无效的私钥长度: {len(private_key_bytes)}，需要32字节")
+
+                    # 验证私钥是否正确
+                    private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+                    public_key_bytes = private_key_obj.public_key().public_bytes(
+                        encoding=serialization.Encoding.Raw,
+                        format=serialization.PublicFormat.Raw
+                    )
+                    generated_address = base58.b58encode(public_key_bytes).decode()
+                    
+                    if generated_address != self.address:
+                        logger.error(f"生成的公钥不匹配: 期望={self.address}, 实际={generated_address}")
+                        raise ValueError("私钥与钱包地址不匹配")
+                        
+                    return private_key_bytes
+                    
+                except Exception as e:
+                    logger.error(f"处理Solana私钥失败: {str(e)}")
+                    raise ValueError(f"无效的Solana私钥格式: {str(e)}")
+            
+            return decrypted
+            
+        except Exception as e:
+            logger.error(f"解密私钥失败，详细错误: {str(e)}")
+            logger.error(f"钱包ID: {self.id}, 地址: {self.address}")
+            raise ValueError(f"解密私钥失败: {str(e)}")
+
 class Token(models.Model):
     """代币模型"""
     chain = models.CharField(max_length=10, verbose_name='链')
@@ -72,6 +171,7 @@ class Token(models.Model):
     created_at = models.DateTimeField(null=True, blank=True, verbose_name='创建时间')
     possible_spam = models.BooleanField(default=False, verbose_name='是否可能是垃圾代币')
     is_native = models.BooleanField(default=False, verbose_name='是否原生代币')
+    is_visible = models.BooleanField(default=True, verbose_name='是否显示')
     
     # 缓存字段
     last_balance = models.CharField(max_length=255, null=True, blank=True, verbose_name='最后余额')
@@ -189,3 +289,14 @@ class PaymentPassword(models.Model):
 
     def __str__(self):
         return f"Payment password for device {self.device_id}"
+
+    def verify_password(self, password: str) -> bool:
+        """验证支付密码"""
+        try:
+            # 解密存储的密码
+            decrypted_password = decrypt_string(self.encrypted_password, self.device_id)
+            # 比较密码
+            return password == decrypted_password
+        except Exception as e:
+            logger.error(f"验证支付密码失败: {str(e)}")
+            return False

@@ -1,10 +1,10 @@
 import aiohttp
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 from decimal import Decimal
 from moralis import evm_api, sol_api
 from . import BaseTokenService
-from ..models import Wallet, Token
+from ..models import Wallet, Token, Transaction
 from ..api_config import MoralisConfig, APIConfig, Chain
 from ..constants import SOLANA_TOKEN_LIST
 import json
@@ -13,6 +13,7 @@ from django.utils import timezone
 from datetime import timedelta
 import asyncio
 import async_timeout
+from django.db.models import Q
 
 logger = logging.getLogger(__name__)
 
@@ -70,39 +71,14 @@ class TokenBalanceService(BaseTokenService):
             # 创建缓存映射以提高查找效率
             cached_token_map = {token['address']: token for token in cached_tokens}
 
-            # 检查缓存是否有效
-            has_valid_cache = bool(cached_tokens) and any(
-                token.get('is_native', False) and float(token.get('last_balance', '0') or '0') > 0
-                for token in cached_tokens
-            )
-
-            tokens = []
-            if has_valid_cache:
-                logger.info("使用缓存数据")
-                for token in cached_tokens:
-                    if float(token.get('last_balance', '0') or '0') > 0:
-                        token_data = {
-                            'symbol': token['symbol'],
-                            'name': token['name'],
-                            'balance': token.get('last_balance', '0'),
-                            'decimals': token['decimals'],
-                            'logo': token['logo'],
-                            'price_usd': token.get('last_price', '0'),
-                            'price_change_24h': token.get('last_price_change', '0'),
-                            'value_usd': token.get('last_value', '0'),
-                            'chain': wallet.chain,
-                            'contract': token['address'],
-                            'is_native': token.get('is_native', False)
-                        }
-                        tokens.append(token_data)
+            # 强制从API获取新数据
+            logger.info("从API获取最新数据")
+            if wallet.chain == 'SOL':
+                tokens = await TokenBalanceService._get_solana_balances(wallet, force_update=True)
+            elif wallet.chain == 'BTC':
+                tokens = await TokenBalanceService._get_btc_balances(wallet.address)
             else:
-                logger.info("从API获取最新数据")
-                if wallet.chain == 'SOL':
-                    tokens = await TokenBalanceService._get_solana_balances(wallet)
-                elif wallet.chain == 'BTC':
-                    tokens = await TokenBalanceService._get_btc_balances(wallet.address)
-                else:
-                    tokens = await TokenBalanceService._get_evm_balances(wallet)
+                tokens = await TokenBalanceService._get_evm_balances(wallet, force_update=True)
 
             # 计算总余额并排序
             total_usd_value = sum(float(token.get('value_usd', '0') or '0') for token in tokens)
@@ -225,31 +201,21 @@ class TokenBalanceService(BaseTokenService):
                     # 使用多个不同的API端点获取代币列表
                     tokens_data = []
                     
-                    # 1. 使用 /tokens 端点
-                    tokens_url = f"{MoralisConfig.SOLANA_URL}/account/mainnet/{wallet.address}/tokens"
-                    tokens_result = await TokenBalanceService.fetch_with_retry(session, tokens_url, headers=headers) or []
-                    if isinstance(tokens_result, list):
-                        tokens_data.extend(tokens_result)
-                    
-                    # 2. 使用 /spl 端点
-                    spl_tokens_url = f"{MoralisConfig.SOLANA_URL}/account/mainnet/{wallet.address}/spl"
-                    spl_tokens_result = await TokenBalanceService.fetch_with_retry(session, spl_tokens_url, headers=headers) or []
-                    if isinstance(spl_tokens_result, list):
-                        tokens_data.extend(spl_tokens_result)
-                    
-                    # 3. 使用 /portfolio 端点
+                    # 1. 使用 /portfolio 端点获取完整的代币列表
                     portfolio_url = f"{MoralisConfig.SOLANA_URL}/account/mainnet/{wallet.address}/portfolio"
                     portfolio_result = await TokenBalanceService.fetch_with_retry(session, portfolio_url, headers=headers)
                     if portfolio_result and isinstance(portfolio_result.get('tokens'), list):
                         tokens_data.extend(portfolio_result['tokens'])
                     
-                    # 4. 使用 /nft 端点（某些代币可能被错误分类为NFT）
-                    nft_url = f"{MoralisConfig.SOLANA_URL}/account/mainnet/{wallet.address}/nft"
-                    nft_result = await TokenBalanceService.fetch_with_retry(session, nft_url, headers=headers)
-                    if nft_result and isinstance(nft_result, list):
-                        for nft in nft_result:
-                            if nft.get('decimals', 0) > 0:  # 如果有小数位，可能是代币
-                                tokens_data.append(nft)
+                    # 2. 使用 /spl 端点补充数据
+                    spl_tokens_url = f"{MoralisConfig.SOLANA_URL}/account/mainnet/{wallet.address}/spl"
+                    spl_tokens_result = await TokenBalanceService.fetch_with_retry(session, spl_tokens_url, headers=headers) or []
+                    if isinstance(spl_tokens_result, list):
+                        for spl_token in spl_tokens_result:
+                            # 检查是否已存在
+                            mint = spl_token.get('mint')
+                            if mint and not any(t.get('mint') == mint for t in tokens_data):
+                                tokens_data.append(spl_token)
                     
                     # 合并所有代币数据，使用字典去重
                     all_tokens = {}
@@ -260,7 +226,7 @@ class TokenBalanceService(BaseTokenService):
                                token.get('address') or 
                                token.get('contract'))
                         
-                        if not mint:
+                        if not mint or mint == 'So11111111111111111111111111111111111111112':  # 跳过SOL代币
                             continue
                             
                         # 如果已存在，合并数据
@@ -275,7 +241,7 @@ class TokenBalanceService(BaseTokenService):
                     
                     if all_tokens:
                         # 使用信号量限制并发请求
-                        semaphore = asyncio.Semaphore(3)  # 降低并发数
+                        semaphore = asyncio.Semaphore(5)  # 增加并发数到5
                         
                         async def process_token(token):
                             try:
@@ -468,7 +434,7 @@ class TokenBalanceService(BaseTokenService):
                                     'decimals': 18,
                                     'logo': f"https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/{wallet.chain.lower()}/info/logo.png",
                                     'chain': wallet.chain,
-                                    'contract': None,
+                                    'contract': '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',  # WETH合约地址
                                     'is_native': True,
                                     'price_usd': '0',
                                     'price_change_24h': '0',
@@ -476,7 +442,7 @@ class TokenBalanceService(BaseTokenService):
                                 }
                                 
                                 # 获取原生代币价格和价格变化
-                                native_price_url = MoralisConfig.EVM_TOKEN_PRICE_BATCH_URL.format(chain)
+                                native_price_url = MoralisConfig.EVM_TOKEN_PRICE_URL.format('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2')  # WETH合约地址
                                 native_price_params = {
                                     "chain": chain,
                                     "include": "percent_change"
@@ -491,7 +457,7 @@ class TokenBalanceService(BaseTokenService):
                                             if price_data:
                                                 price_usd = price_data.get('usdPrice', 0)
                                                 native_token_data['price_usd'] = str(price_usd)
-                                                price_change = price_data.get('24hPercentChange', 0)
+                                                price_change = price_data.get('24hrPercentChange', 0)
                                                 native_token_data['price_change_24h'] = str(price_change)
                                                 value_usd = float(balance) * float(price_usd)
                                                 native_token_data['value_usd'] = str(value_usd)
@@ -499,7 +465,7 @@ class TokenBalanceService(BaseTokenService):
                                                 # 保存原生代币信息到数据库
                                                 await sync_to_async(Token.objects.update_or_create)(
                                                     chain=wallet.chain,
-                                                    address='native',
+                                                    address='0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',  # WETH合约地址
                                                     defaults={
                                                         'name': native_token_data['name'],
                                                         'symbol': native_token_data['symbol'],
@@ -518,6 +484,7 @@ class TokenBalanceService(BaseTokenService):
                                         except json.JSONDecodeError as e:
                                             logger.error(f"解析原生代币价格数据失败: {str(e)}")
                                 
+                                # 确保原生代币被添加到列表中，即使价格获取失败
                                 token_list.append(native_token_data)
                                 logger.info(f"添加原生代币: {native_token_data['symbol']}, 余额: {native_token_data['balance']}, 价格: {native_token_data['price_usd']}")
 
@@ -544,6 +511,50 @@ class TokenBalanceService(BaseTokenService):
 
                                 for token in tokens:
                                     try:
+                                        # 处理原生代币
+                                        if token.get('native_token', False):
+                                            # 如果已经添加过原生代币，跳过
+                                            if any(t.get('is_native', False) for t in token_list):
+                                                logger.info(f"跳过重复的原生代币: {token.get('symbol')}")
+                                                continue
+                                                
+                                            native_token_data = {
+                                                'symbol': token.get('symbol', wallet.chain),
+                                                'name': token.get('name', f"{wallet.chain} Token"),
+                                                'balance': token.get('balance_formatted', '0'),
+                                                'decimals': token.get('decimals', 18),
+                                                'logo': token.get('logo') or f"https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/{wallet.chain.lower()}/info/logo.png",
+                                                'chain': wallet.chain,
+                                                'contract': 'native',
+                                                'is_native': True,
+                                                'price_usd': str(token.get('usd_price', '0')),
+                                                'price_change_24h': str(token.get('usd_price_24hr_percent_change', '0')),
+                                                'value_usd': str(token.get('usd_value', '0'))
+                                            }
+                                            
+                                            # 保存原生代币信息到数据库
+                                            await sync_to_async(Token.objects.update_or_create)(
+                                                chain=wallet.chain,
+                                                address='native',
+                                                defaults={
+                                                    'name': native_token_data['name'],
+                                                    'symbol': native_token_data['symbol'],
+                                                    'decimals': native_token_data['decimals'],
+                                                    'logo': native_token_data['logo'],
+                                                    'type': 'token',
+                                                    'contract_type': 'NATIVE',
+                                                    'is_native': True,
+                                                    'last_balance': native_token_data['balance'],
+                                                    'last_price': native_token_data['price_usd'],
+                                                    'last_price_change': native_token_data['price_change_24h'],
+                                                    'last_value': native_token_data['value_usd'],
+                                                    'updated_at': timezone.now()
+                                                }
+                                            )
+                                            token_list.append(native_token_data)
+                                            logger.info(f"添加原生代币: {native_token_data['symbol']}, 余额: {native_token_data['balance']}, 价格: {native_token_data['price_usd']}")
+                                            continue
+
                                         # 跳过可能的垃圾代币和原生代币的包装代币
                                         if (token.get('possible_spam', False) or 
                                             token.get('token_address', '').lower() in [
@@ -559,17 +570,17 @@ class TokenBalanceService(BaseTokenService):
                                         
                                         # 构建代币数据
                                         token_data = {
-                                            'symbol': token.get('symbol', 'Unknown'),
-                                            'name': token.get('name', 'Unknown Token'),
+                                            'symbol': token.get('symbol', ''),
+                                            'name': token.get('name', ''),
                                             'balance': token.get('balance_formatted', '0'),
                                             'decimals': token.get('decimals', 18),
+                                            'logo': token.get('logo', ''),
+                                            'price_usd': str(token.get('usd_price', '0')),
+                                            'price_change_24h': str(token.get('usd_price_24hr_percent_change', '0')),
+                                            'value_usd': str(token.get('usd_value', '0')),
                                             'chain': wallet.chain,
-                                            'contract': token_address,
-                                            'logo': token.get('logo') or token.get('thumbnail'),
-                                            'is_native': False,
-                                            'price_usd': '0',
-                                            'price_change_24h': '0',
-                                            'value_usd': '0'
+                                            'contract': token.get('token_address', ''),
+                                            'is_native': token.get('native_token', False)
                                         }
 
                                         # 获取代币价格和价格变化
@@ -588,7 +599,7 @@ class TokenBalanceService(BaseTokenService):
                                                     if price_data:
                                                         price_usd = price_data.get('usdPrice', 0)
                                                         token_data['price_usd'] = str(price_usd)
-                                                        price_change = price_data.get('24hPercentChange', 0)
+                                                        price_change = price_data.get('24hrPercentChange', 0)
                                                         token_data['price_change_24h'] = str(price_change)
                                                         
                                                         try:
@@ -643,3 +654,354 @@ class TokenBalanceService(BaseTokenService):
         except Exception as e:
             logger.error(f"获取EVM代币时发生错误: {str(e)}，错误类型: {type(e).__name__}")
             return []
+
+    @staticmethod
+    async def _get_solana_token_transfers(
+        address: str,
+        token_address: Optional[str] = None,
+        transfer_type: str = 'all',
+        page: int = 1,
+        page_size: int = 20
+    ) -> Dict:
+        """获取 Solana 代币转账记录"""
+        try:
+            # 首先从本地数据库获取交易记录
+            db_transfers = []
+            try:
+                # 构建基础查询
+                query = Q(chain='SOL') & Q(status='SUCCESS')
+                
+                # 添加地址筛选
+                if transfer_type == 'in':
+                    query &= Q(to_address=address)
+                elif transfer_type == 'out':
+                    query &= Q(from_address=address)
+                else:
+                    # 对于 'all' 类型，获取所有相关交易
+                    query &= (Q(from_address=address) | Q(to_address=address))
+                
+                # 添加代币筛选
+                if token_address:
+                    if token_address.lower() == 'so11111111111111111111111111111111111111112':
+                        # 原生 SOL 转账
+                        query &= Q(token__isnull=True)
+                    else:
+                        # SPL 代币转账
+                        query &= Q(token__address=token_address.lower())
+                
+                # 从数据库获取交易记录
+                db_transactions = await sync_to_async(list)(
+                    Transaction.objects.filter(query)
+                    .select_related('token')
+                    .order_by('-block_timestamp')
+                    [(page - 1) * page_size:page * page_size]
+                )
+                
+                # 转换为统一格式
+                for tx in db_transactions:
+                    token_info = {
+                        'symbol': tx.token.symbol if tx.token else 'SOL',
+                        'name': tx.token.name if tx.token else 'Solana',
+                        'decimals': tx.token.decimals if tx.token else 9,
+                        'logo': tx.token.logo if tx.token else ''
+                    }
+                    
+                    transfer_data = {
+                        'transaction_hash': tx.tx_hash,
+                        'block_number': str(tx.block_number),
+                        'block_timestamp': str(tx.block_timestamp),
+                        'from_address': tx.from_address,
+                        'to_address': tx.to_address,
+                        'token_address': tx.token.address if tx.token else 'So11111111111111111111111111111111111111112',
+                        'amount': str(tx.amount),
+                        'amount_decimal': str(tx.amount),
+                        'token_symbol': token_info['symbol'],
+                        'token_name': token_info['name'],
+                        'token_decimals': token_info['decimals'],
+                        'token_logo': token_info['logo'],
+                        'value_usd': '0',  # 历史价值需要单独计算
+                        'type': 'in' if tx.to_address == address else 'out'
+                    }
+                    db_transfers.append(transfer_data)
+                
+                logger.info(f"从数据库获取到 {len(db_transfers)} 条交易记录")
+                
+            except Exception as e:
+                logger.error(f"从数据库获取交易记录失败: {str(e)}")
+            
+            # 然后从 Moralis API 获取交易记录
+            headers = {
+                "accept": "application/json",
+                "X-API-Key": MoralisConfig.API_KEY
+            }
+            
+            # 构建基础URL
+            base_url = f"{MoralisConfig.SOLANA_URL}/account/mainnet/{address}/transfers"
+            
+            # 构建查询参数
+            params = {
+                "limit": str(page_size),
+                "cursor": str((page - 1) * page_size) if page > 1 else None
+            }
+            
+            if token_address:
+                params["token_addresses"] = token_address
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(base_url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        api_transfers = []
+                        
+                        for transfer in data.get('result', []):
+                            # 跳过已存在于数据库中的交易
+                            if any(tx['transaction_hash'] == transfer.get('signature') for tx in db_transfers):
+                                continue
+                                
+                            # 根据转账方向筛选
+                            if transfer_type != 'all':
+                                is_incoming = transfer.get('to_wallet') == address
+                                if (transfer_type == 'in' and not is_incoming) or \
+                                   (transfer_type == 'out' and is_incoming):
+                                    continue
+                            
+                            # 构建转账记录
+                            transfer_data = {
+                                'transaction_hash': str(transfer.get('signature', '')),
+                                'block_number': str(transfer.get('block_number', '0')),
+                                'block_timestamp': str(transfer.get('block_timestamp', '')),
+                                'from_address': str(transfer.get('from_wallet', '')),
+                                'to_address': str(transfer.get('to_wallet', '')),
+                                'token_address': str(transfer.get('token_address', 'So11111111111111111111111111111111111111112')),
+                                'amount': str(transfer.get('amount', '0')),
+                                'amount_decimal': str(transfer.get('amount_decimal', '0')),
+                                'token_symbol': str(transfer.get('token_symbol', 'SOL')),
+                                'token_name': str(transfer.get('token_name', 'Solana')),
+                                'token_decimals': int(transfer.get('token_decimals', 9)),
+                                'token_logo': str(transfer.get('token_logo', '')),
+                                'value_usd': str(transfer.get('value_usd', '0')),
+                                'type': 'in' if transfer.get('to_wallet') == address else 'out'
+                            }
+                            api_transfers.append(transfer_data)
+                        
+                        # 合并并排序所有转账记录
+                        all_transfers = db_transfers + api_transfers
+                        all_transfers.sort(key=lambda x: x['block_timestamp'], reverse=True)
+                        
+                        # 分页处理
+                        start_idx = (page - 1) * page_size
+                        end_idx = start_idx + page_size
+                        paginated_transfers = all_transfers[start_idx:end_idx]
+                        
+                        return {
+                            'result': paginated_transfers,
+                            'total': len(all_transfers),
+                            'page': page,
+                            'page_size': page_size,
+                            'cursor': str(data.get('cursor', ''))
+                        }
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"获取Solana转账记录失败: {error_text}")
+                        # 如果API调用失败，至少返回数据库中的记录
+                        return {
+                            'result': db_transfers,
+                            'total': len(db_transfers),
+                            'page': page,
+                            'page_size': page_size,
+                            'cursor': None
+                        }
+                        
+        except Exception as e:
+            logger.error(f"获取Solana转账记录时出错: {str(e)}")
+            return {
+                'result': [],
+                'total': 0,
+                'page': page,
+                'page_size': page_size,
+                'cursor': None
+            }
+
+    @staticmethod
+    async def _get_evm_token_transfers(
+        chain: str,
+        address: str,
+        token_address: Optional[str] = None,
+        transfer_type: str = 'all',
+        page: int = 1,
+        page_size: int = 20
+    ) -> Dict:
+        """获取 EVM 链代币转账记录"""
+        try:
+            chain_id = TokenBalanceService.CHAIN_MAPPING.get(Chain(chain))
+            if not chain_id:
+                raise ValueError(f"不支持的链类型: {chain}")
+            
+            headers = {
+                "accept": "application/json",
+                "X-API-Key": MoralisConfig.API_KEY
+            }
+            
+            # 构建基础URL和参数
+            if token_address and token_address != 'native':
+                # ERC20代币转账
+                url = f"{MoralisConfig.BASE_URL}/wallets/{address}/erc20/transfers"
+                params = {
+                    "chain": str(chain_id),
+                    "contract_addresses": [str(token_address)]
+                }
+            else:
+                # 原生代币转账
+                url = f"{MoralisConfig.BASE_URL}/wallets/{address}/transfers"
+                params = {
+                    "chain": str(chain_id)
+                }
+            
+            # 添加分页参数
+            params["limit"] = str(page_size)
+            if page > 1:
+                params["cursor"] = str((page - 1) * page_size)
+            
+            logger.info(f"请求转账记录: URL={url}, Params={params}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, params=params) as response:
+                    response_text = await response.text()
+                    logger.info(f"API响应: {response_text}")
+                    
+                    if response.status == 200:
+                        data = json.loads(response_text)
+                        transfers = []
+                        
+                        for transfer in data.get('result', []):
+                            # 根据转账方向筛选
+                            if transfer_type != 'all':
+                                is_incoming = transfer.get('to_address', '').lower() == address.lower()
+                                if (transfer_type == 'in' and not is_incoming) or \
+                                   (transfer_type == 'out' and is_incoming):
+                                    continue
+                            
+                            # 获取代币信息
+                            token_data = await TokenBalanceService._get_token_info(
+                                session, chain_id, transfer.get('token_address', 'native')
+                            )
+                            
+                            # 构建转账记录，确保所有字段都有默认值
+                            transfer_data = {
+                                'transaction_hash': str(transfer.get('transaction_hash', '')),
+                                'block_number': str(transfer.get('block_number', '0')),
+                                'block_timestamp': str(transfer.get('block_timestamp', '')),
+                                'from_address': str(transfer.get('from_address', '')),
+                                'to_address': str(transfer.get('to_address', '')),
+                                'token_address': str(transfer.get('token_address', 'native')),
+                                'amount': str(transfer.get('value', '0')),
+                                'amount_decimal': str(float(transfer.get('value', '0')) / 10 ** int(token_data.get('decimals', 18))),
+                                'token_symbol': str(token_data.get('symbol', 'Unknown')),
+                                'token_name': str(token_data.get('name', 'Unknown Token')),
+                                'token_decimals': int(token_data.get('decimals', 18)),
+                                'token_logo': str(token_data.get('logo', '')),
+                                'gas_price': str(transfer.get('gas_price', '0')),
+                                'gas_used': str(transfer.get('receipt_gas_used', '0')),
+                                'type': 'in' if transfer.get('to_address', '').lower() == address.lower() else 'out'
+                            }
+                            transfers.append(transfer_data)
+                        
+                        return {
+                            'result': transfers,
+                            'total': int(data.get('total', 0)),
+                            'page': page,
+                            'page_size': page_size,
+                            'cursor': str(data.get('cursor', ''))
+                        }
+                    else:
+                        logger.error(f"获取EVM转账记录失败: {response_text}")
+                        return {
+                            'result': [],
+                            'total': 0,
+                            'page': page,
+                            'page_size': page_size,
+                            'cursor': None
+                        }
+                        
+        except Exception as e:
+            logger.error(f"获取EVM转账记录时出错: {str(e)}")
+            return {
+                'result': [],
+                'total': 0,
+                'page': page,
+                'page_size': page_size,
+                'cursor': None
+            }
+
+    @staticmethod
+    async def _get_token_info(session, chain: str, token_address: str) -> Dict:
+        """获取代币信息"""
+        try:
+            if token_address == 'native':
+                # 返回原生代币信息
+                chain_info = {
+                    'ETH': {'symbol': 'ETH', 'name': 'Ethereum', 'decimals': 18},
+                    'BSC': {'symbol': 'BNB', 'name': 'BNB', 'decimals': 18},
+                    'MATIC': {'symbol': 'MATIC', 'name': 'Polygon', 'decimals': 18},
+                    'AVAX': {'symbol': 'AVAX', 'name': 'Avalanche', 'decimals': 18}
+                }
+                chain_symbol = chain.upper()
+                return {
+                    'symbol': chain_info.get(chain_symbol, {}).get('symbol', chain_symbol),
+                    'name': chain_info.get(chain_symbol, {}).get('name', f"{chain_symbol} Token"),
+                    'decimals': chain_info.get(chain_symbol, {}).get('decimals', 18),
+                    'logo': f"https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/{chain.lower()}/info/logo.png"
+                }
+            
+            # 从数据库获取代币信息
+            token = await sync_to_async(Token.objects.filter(
+                chain=chain,
+                address=token_address.lower()
+            ).first)()
+            
+            if token:
+                return {
+                    'symbol': token.symbol,
+                    'name': token.name,
+                    'decimals': token.decimals,
+                    'logo': token.logo
+                }
+            
+            # 如果数据库中没有，从API获取
+            headers = {
+                "accept": "application/json",
+                "X-API-Key": MoralisConfig.API_KEY
+            }
+            url = f"{MoralisConfig.BASE_URL}/erc20/metadata"
+            params = {
+                "chain": chain,
+                "addresses": [token_address]
+            }
+            
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data and len(data) > 0:
+                        token_data = data[0]
+                        return {
+                            'symbol': token_data.get('symbol', 'Unknown'),
+                            'name': token_data.get('name', 'Unknown Token'),
+                            'decimals': int(token_data.get('decimals', '18')),
+                            'logo': token_data.get('logo')
+                        }
+            
+            return {
+                'symbol': 'Unknown',
+                'name': 'Unknown Token',
+                'decimals': 18,
+                'logo': None
+            }
+            
+        except Exception as e:
+            logger.error(f"获取代币信息时出错: {str(e)}")
+            return {
+                'symbol': 'Unknown',
+                'name': 'Unknown Token',
+                'decimals': 18,
+                'logo': None
+            }
