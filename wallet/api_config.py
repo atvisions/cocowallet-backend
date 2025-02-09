@@ -18,6 +18,55 @@ class Environment(str, Enum):
     PRODUCTION = 'production'
 
 @dataclass
+class RPCConfig:
+    """RPC 节点配置"""
+    
+    # EVM 链 RPC 节点
+    ETH_RPC_URL: str = os.getenv('ETH_RPC_URL', 'https://eth-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
+    BSC_RPC_URL: str = os.getenv('BSC_RPC_URL', 'https://bsc-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
+    POLYGON_RPC_URL: str = os.getenv('POLYGON_RPC_URL', 'https://polygon-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
+    AVAX_RPC_URL: str = os.getenv('AVAX_RPC_URL', 'https://avalanche-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
+    ARBITRUM_RPC_URL: str = os.getenv('ARBITRUM_RPC_URL', 'https://arb-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
+    OPTIMISM_RPC_URL: str = os.getenv('OPTIMISM_RPC_URL', 'https://opt-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
+    BASE_RPC_URL: str = os.getenv('BASE_RPC_URL', 'https://base-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
+    
+    # Solana RPC 节点
+    SOLANA_MAINNET_RPC_URL: str = os.getenv('SOLANA_MAINNET_RPC_URL', 'https://solana-mainnet.g.alchemy.com/v2/rs5H2pmXTs6Q8b4kmOQ47cgKii5GnEZl')
+    SOLANA_TESTNET_RPC_URL: str = os.getenv('SOLANA_TESTNET_RPC_URL', 'https://api.testnet.solana.com')
+    SOLANA_DEVNET_RPC_URL: str = os.getenv('SOLANA_DEVNET_RPC_URL', 'https://api.devnet.solana.com')
+    
+    # Solana 备用节点
+    @property
+    def SOLANA_BACKUP_NODES(self) -> List[str]:
+        """获取 Solana 备用节点列表"""
+        return [
+            'https://api.mainnet-beta.solana.com',
+            'https://solana-mainnet.g.alchemy.com/v2/rs5H2pmXTs6Q8b4kmOQ47cgKii5GnEZl',
+            'https://rpc.ankr.com/solana',
+            'https://solana-api.projectserum.com'
+        ]
+    
+    # RPC 节点映射
+    @classmethod
+    def get_rpc_endpoints(cls) -> Dict:
+        """获取所有 RPC 节点配置"""
+        return {
+            'ETH': cls.ETH_RPC_URL,
+            'BSC': cls.BSC_RPC_URL,
+            'MATIC': cls.POLYGON_RPC_URL,
+            'AVAX': cls.AVAX_RPC_URL,
+            'ARBITRUM': cls.ARBITRUM_RPC_URL,
+            'OPTIMISM': cls.OPTIMISM_RPC_URL,
+            'BASE': cls.BASE_RPC_URL,
+            'SOL': {
+                'mainnet': cls.SOLANA_MAINNET_RPC_URL,
+                'testnet': cls.SOLANA_TESTNET_RPC_URL,
+                'devnet': cls.SOLANA_DEVNET_RPC_URL,
+                'backup': cls.SOLANA_BACKUP_NODES
+            }
+        }
+
+@dataclass
 class MoralisConfig:
     """Moralis API 配置"""
     API_KEY: str = os.getenv('MORALIS_API_KEY', '')
@@ -91,3 +140,6 @@ class APIConfig:
         return {
             'TIMEOUT': 300  # 5分钟缓存时间
         }
+    
+    # RPC 配置实例
+    RPC = RPCConfig()

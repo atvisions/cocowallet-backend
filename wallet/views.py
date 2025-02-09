@@ -303,8 +303,8 @@ class WalletViewSet(viewsets.ModelViewSet):
             )
             address = base58.b58encode(public_key_bytes).decode()
 
-        # 加密私钥
-        encrypted_private_key = encrypt_string(hdwallet.private_key(), payment_password)
+        # 直接加密私钥字节，而不是十六进制字符串
+        encrypted_private_key = encrypt_string(private_key, payment_password)
 
         # 生成随机头像
         avatar = generate_avatar()
@@ -692,7 +692,7 @@ class WalletViewSet(viewsets.ModelViewSet):
                 )
                 address = base58.b58encode(public_key_bytes).decode()
 
-            # 加密私钥
+            # 直接加密私钥字节，而不是十六进制字符串
             encrypted_private_key = encrypt_string(private_key, payment_password)
 
             # 生成随机头像
@@ -788,7 +788,7 @@ class WalletViewSet(viewsets.ModelViewSet):
                     )
                     address = base58.b58encode(public_key_bytes).decode()
                     
-                    # 直接使用私钥字节进行加密存储，不需要额外的编码转换
+                    # 直接加密私钥字节，而不是十六进制字符串
                     encrypted_private_key = encrypt_string(private_key_bytes, payment_password)
                     logger.debug("私钥加密成功")
                     

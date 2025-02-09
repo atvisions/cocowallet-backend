@@ -83,64 +83,71 @@ class Wallet(models.Model):
             logger.debug(f"加密私钥类型: {type(encrypted_bytes)}")
             logger.debug(f"加密私钥原始内容: {encrypted_bytes[:10]}...")  # 只显示前10个字符
             
-            # 如果是字符串类型，转换为字节
-            if isinstance(encrypted_bytes, str):
-                try:
-                    encrypted_bytes = base64.b64decode(encrypted_bytes)
-                    logger.debug(f"base64解码后长度: {len(encrypted_bytes)}")
-                except Exception as e:
-                    logger.error(f"私钥base64解码失败: {str(e)}")
-                    raise ValueError(f"私钥格式错误: {str(e)}")
-            
             # 获取支付密码
             if not hasattr(self, 'payment_password'):
                 raise ValueError("未提供支付密码")
             
-            # 生成32字节的密钥
-            key_hash = hashlib.sha256(self.payment_password.encode()).digest()
-            
-            # 使用XOR解密
-            decrypted = bytes(a ^ b for a, b in zip(encrypted_bytes, key_hash * (len(encrypted_bytes) // len(key_hash) + 1)))
-            logger.debug(f"解密后的数据长度: {len(decrypted)}")
-            
-            # 对于Solana钱包，使用特殊处理
-            if self.chain == 'SOL':
-                try:
-                    # 如果解密后的数据是hex字符串，转换为字节
+            try:
+                # 使用与支付密码相同的解密方式
+                key_hash = hashlib.sha256(self.payment_password.encode()).digest()
+                encrypted_data = base64.b64decode(encrypted_bytes)
+                decrypted = bytes(a ^ b for a, b in zip(encrypted_data, key_hash * (len(encrypted_data) // len(key_hash) + 1)))
+                logger.debug(f"解密后的数据长度: {len(decrypted)}")
+                
+                # 对于Solana钱包，验证解密后的私钥
+                if self.chain == 'SOL':
                     try:
-                        decrypted_str = decrypted.decode('utf-8')
-                        if decrypted_str.startswith('0x'):
-                            decrypted_str = decrypted_str[2:]
-                        private_key_bytes = bytes.fromhex(decrypted_str)
-                    except (UnicodeDecodeError, ValueError):
-                        private_key_bytes = decrypted
+                        # 如果解密后的数据是64字节，取前32字节作为私钥
+                        if len(decrypted) == 64:
+                            logger.debug("检测到64字节数据，使用前32字节作为私钥")
+                            private_key_bytes = decrypted[:32]
+                            # 验证前32字节是否为有效私钥
+                            try:
+                                private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+                                public_key_bytes = private_key_obj.public_key().public_bytes(
+                                    encoding=serialization.Encoding.Raw,
+                                    format=serialization.PublicFormat.Raw
+                                )
+                                generated_address = base58.b58encode(public_key_bytes).decode()
+                                
+                                if generated_address == self.address:
+                                    logger.info("找到匹配的私钥（使用前32字节）")
+                                    return private_key_bytes
+                                else:
+                                    logger.debug("前32字节不匹配，尝试后32字节")
+                                    # 尝试后32字节
+                                    private_key_bytes = decrypted[32:]
+                            except Exception as e:
+                                logger.debug(f"使用前32字节失败: {str(e)}，尝试后32字节")
+                                private_key_bytes = decrypted[32:]
+                        else:
+                            private_key_bytes = decrypted
 
-                    # 如果是64字节，取前32字节作为私钥
-                    if len(private_key_bytes) == 64:
-                        private_key_bytes = private_key_bytes[:32]
-                    elif len(private_key_bytes) != 32:
-                        raise ValueError(f"无效的私钥长度: {len(private_key_bytes)}，需要32字节")
-
-                    # 验证私钥是否正确
-                    private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
-                    public_key_bytes = private_key_obj.public_key().public_bytes(
-                        encoding=serialization.Encoding.Raw,
-                        format=serialization.PublicFormat.Raw
-                    )
-                    generated_address = base58.b58encode(public_key_bytes).decode()
-                    
-                    if generated_address != self.address:
-                        logger.error(f"生成的公钥不匹配: 期望={self.address}, 实际={generated_address}")
-                        raise ValueError("私钥与钱包地址不匹配")
+                        # 使用私钥创建密钥对并验证
+                        private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+                        public_key_bytes = private_key_obj.public_key().public_bytes(
+                            encoding=serialization.Encoding.Raw,
+                            format=serialization.PublicFormat.Raw
+                        )
+                        generated_address = base58.b58encode(public_key_bytes).decode()
                         
-                    return private_key_bytes
-                    
-                except Exception as e:
-                    logger.error(f"处理Solana私钥失败: {str(e)}")
-                    raise ValueError(f"无效的Solana私钥格式: {str(e)}")
-            
-            return decrypted
-            
+                        if generated_address == self.address:
+                            logger.info("找到匹配的私钥")
+                            return private_key_bytes
+                        else:
+                            logger.error(f"私钥不匹配: 期望={self.address}, 实际={generated_address}")
+                            raise ValueError("私钥与钱包地址不匹配")
+                            
+                    except Exception as e:
+                        logger.error(f"处理Solana私钥失败: {str(e)}")
+                        raise ValueError(f"无效的Solana私钥格式: {str(e)}")
+                
+                return decrypted
+                
+            except Exception as e:
+                logger.error(f"解密私钥失败: {str(e)}")
+                raise ValueError(f"解密私钥失败: {str(e)}")
+                
         except Exception as e:
             logger.error(f"解密私钥失败，详细错误: {str(e)}")
             logger.error(f"钱包ID: {self.id}, 地址: {self.address}")
