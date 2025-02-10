@@ -333,19 +333,18 @@ class SolanaTokenInfoService(BaseTokenInfoService):
                 # 如果指定了日期范围，则使用指定的日期
                 if from_date:
                     try:
-                        # 将日期字符串转换为Unix时间戳（毫秒）
-                        dt = datetime.strptime(from_date, '%Y-%m-%d')
-                        params['fromDate'] = int(dt.timestamp() * 1000)
+                        datetime.strptime(from_date, '%Y-%m-%d')
                     except Exception as e:
                         logger.error(f"转换开始日期时出错: {str(e)}")
                         
                 if to_date:
                     try:
-                        # 将日期字符串转换为Unix时间戳（毫秒）
-                        dt = datetime.strptime(to_date, '%Y-%m-%d')
-                        params['toDate'] = int(dt.timestamp() * 1000)
+                        datetime.strptime(to_date, '%Y-%m-%d')
                     except Exception as e:
                         logger.error(f"转换结束日期时出错: {str(e)}")
+                
+                params['fromDate'] = from_date
+                params['toDate'] = to_date
                 
                 logger.debug(f"查询参数: {params}")
                 

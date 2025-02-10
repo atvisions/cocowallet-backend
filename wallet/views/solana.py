@@ -291,7 +291,6 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 获取并验证钱包
             wallet = await self.get_wallet_async(pk, device_id)
-            logger.info(f"查询代币余额 - 钱包: {wallet.address}, 代币: {token_address}")
             
             if wallet.chain != 'SOL':
                 return Response({
@@ -309,14 +308,12 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 获取指定代币余额
             balance = await balance_service.get_token_balance(wallet.address, token_address)
-            logger.info(f"获取到代币余额: {balance}")
             
             # 获取代币信息服务
             token_info_service = ChainServiceFactory.get_token_info_service('SOL')
             token_info = await token_info_service.get_token_info(token_address) if token_info_service else {}
-            logger.info(f"获取到代币信息: {token_info}")
             
-            response_data = {
+            return Response({
                 'status': 'success',
                 'data': {
                     'token_address': token_address,
@@ -327,9 +324,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                     'logo': token_info.get('logo', ''),
                     'is_native': False
                 }
-            }
-            logger.info(f"返回数据: {response_data}")
-            return Response(response_data)
+            })
             
         except ObjectDoesNotExist as e:
             return Response({

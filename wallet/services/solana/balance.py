@@ -5,6 +5,9 @@ from decimal import Decimal
 from typing import Dict, List
 from django.utils import timezone
 from asgiref.sync import sync_to_async
+from django.core.cache import cache
+from datetime import timedelta
+import time
 
 from ..base.balance import BaseBalanceService
 from ...models import Token, Wallet
@@ -14,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 class SolanaBalanceService(BaseBalanceService):
     """Solana 余额查询服务实现类"""
+
+    PRICE_CACHE_TTL = 300  # 价格缓存5分钟
+    TOKEN_CACHE_TTL = 86400  # 代币元数据缓存24小时
 
     def __init__(self):
         super().__init__()
@@ -56,39 +62,7 @@ class SolanaBalanceService(BaseBalanceService):
             try:
                 logger.info(f"开始获取代币余额 - 钱包地址: {address}, 代币地址: {token_address}")
                 
-                # 获取代币账户地址
-                token_account = await self._get_associated_token_address(address, token_address)
-                logger.info(f"获取到代币账户地址: {token_account}")
-                
-                # 检查代币账户是否存在
-                account_exists = await self._check_token_account_exists(token_account)
-                logger.info(f"代币账户是否存在: {account_exists}")
-                
-                if not account_exists:
-                    logger.warning(f"代币账户不存在: {token_account}")
-                    # 尝试创建代币账户
-                    try:
-                        # 获取钱包
-                        wallet = await Wallet.objects.aget(address=address, chain='SOL', is_active=True)
-                        # 获取转账服务
-                        transfer_service = await self._get_transfer_service()
-                        if transfer_service:
-                            # 创建代币账户
-                            await transfer_service._create_token_account(wallet, token_address, wallet.decrypt_private_key())
-                            logger.info("代币账户创建成功")
-                            # 重新检查账户是否存在
-                            account_exists = await self._check_token_account_exists(token_account)
-                            if not account_exists:
-                                logger.error("代币账户创建后仍不存在")
-                                return Decimal('0')
-                        else:
-                            logger.error("无法获取转账服务")
-                            return Decimal('0')
-                    except Exception as e:
-                        logger.error(f"创建代币账户失败: {str(e)}")
-                        return Decimal('0')
-                
-                # 获取代币余额
+                # 直接获取代币余额，不检查关联账户
                 url = MoralisConfig.SOLANA_ACCOUNT_TOKENS_URL.format(address)
                 logger.info(f"请求代币余额 URL: {url}")
                 tokens_data = await self._fetch_with_retry(session, url)
@@ -139,129 +113,175 @@ class SolanaBalanceService(BaseBalanceService):
             logger.error(f"检查代币账户是否存在时出错: {str(e)}")
             return False
 
+    async def _get_cached_price(self, token_address: str) -> Dict:
+        """获取缓存的价格数据"""
+        cache_key = f"solana_token_price_{token_address}"
+        price_data = cache.get(cache_key)
+        if price_data:
+            return price_data
+        return None
+
+    async def _cache_price(self, token_address: str, price_data: Dict):
+        """缓存价格数据"""
+        cache_key = f"solana_token_price_{token_address}"
+        cache.set(cache_key, price_data, self.PRICE_CACHE_TTL)
+
+    async def _get_or_create_token_metadata(self, token_address: str, token_data: Dict) -> Token:
+        """获取或创建代币元数据"""
+        try:
+            # 先从数据库获取
+            token = await sync_to_async(Token.objects.filter(
+                chain='SOL',
+                address=token_address
+            ).first)()
+            
+            if token:
+                # 检查是否需要更新缓存的价格数据
+                if token.last_price and token.updated_at > timezone.now() - timedelta(seconds=self.PRICE_CACHE_TTL):
+                    return token
+                    
+            if not token:
+                # 创建新的代币记录
+                token = await sync_to_async(Token.objects.create)(
+                    chain='SOL',
+                    address=token_address,
+                    name=token_data.get('name', 'Unknown Token'),
+                    symbol=token_data.get('symbol', 'Unknown'),
+                    decimals=token_data.get('decimals', 0),
+                    logo=token_data.get('logo', ''),
+                    type='token',
+                    contract_type='SPL',
+                    is_visible=True
+                )
+                logger.info(f"创建新代币记录: {token_address}")
+                
+            return token
+            
+        except Exception as e:
+            logger.error(f"获取或创建代币元数据失败: {str(e)}")
+            return None
+
+    async def _update_token_price(self, token: Token, price_data: Dict):
+        """更新代币价格信息"""
+        try:
+            if not price_data:
+                return
+                
+            token.last_price = str(price_data.get('usdPrice', '0'))
+            token.last_price_change = str(price_data.get('usdPrice24hrPercentChange', '0'))
+            token.updated_at = timezone.now()
+            await sync_to_async(token.save)()
+            
+        except Exception as e:
+            logger.error(f"更新代币价格失败: {str(e)}")
+
     async def get_all_token_balances(self, address: str) -> List[Dict]:
         """获取所有代币余额"""
         result = []
+        start_time = time.time()
         
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             try:
-                # 1. 获取SOL原生代币余额和代币列表（并发请求）
+                # 1. 先获取本地缓存的代币列表
+                cached_tokens = await sync_to_async(list)(
+                    Token.objects.filter(chain='SOL', is_visible=True)
+                    .values('address', 'name', 'symbol', 'decimals', 'logo', 'last_price', 'last_price_change', 'updated_at')
+                )
+                token_info_map = {token['address']: token for token in cached_tokens}
+                logger.info(f"从数据库获取代币信息耗时: {time.time() - start_time:.2f}秒")
+
+                # 2. 并发获取SOL余额和代币列表
                 sol_balance_task = self.get_native_balance(address)
                 tokens_task = self._fetch_with_retry(session, MoralisConfig.SOLANA_ACCOUNT_TOKENS_URL.format(address))
                 
-                # 同时获取关联账户的代币列表
-                associated_tokens_task = self._fetch_with_retry(
-                    session, 
-                    MoralisConfig.SOLANA_ACCOUNT_TOKENS_URL.format(address),
-                    params={'type': 'associated-token-account'}
-                )
+                sol_balance, tokens_data = await asyncio.gather(sol_balance_task, tokens_task)
+                logger.info(f"获取基础数据耗时: {time.time() - start_time:.2f}秒")
                 
-                sol_balance, tokens_data, associated_tokens_data = await asyncio.gather(
-                    sol_balance_task, tokens_task, associated_tokens_task
-                )
-                logger.info(f"SOL余额: {sol_balance}")
-
                 if not tokens_data:
                     tokens_data = []
-                if not associated_tokens_data:
-                    associated_tokens_data = []
-                    
-                # 合并主账户和关联账户的代币列表
-                all_tokens = tokens_data + [
-                    token for token in associated_tokens_data 
-                    if token.get('mint') not in [t.get('mint') for t in tokens_data]
-                ]
-                    
-                logger.info(f"获取到 {len(all_tokens)} 个SPL代币")
+                logger.info(f"获取到 {len(tokens_data)} 个SPL代币")
 
-                # 2. 获取所有代币的价格（并发请求）
-                price_tasks = []
-                # SOL价格
-                price_tasks.append((
-                    'So11111111111111111111111111111111111111112',
-                    self._fetch_with_retry(session, MoralisConfig.SOLANA_TOKEN_PRICE_URL.format('So11111111111111111111111111111111111111112'))
-                ))
-                
-                # 其他代币价格
-                token_addresses = [
-                    token['mint'] for token in all_tokens 
-                    if 'mint' in token and token['mint'] != 'So11111111111111111111111111111111111111112'
-                ]
-                for token_address in token_addresses:
-                    price_tasks.append((
-                        token_address,
-                        self._fetch_with_retry(session, MoralisConfig.SOLANA_TOKEN_PRICE_URL.format(token_address))
-                    ))
-
-                # 等待所有价格请求完成
-                price_results = await asyncio.gather(*(task[1] for task in price_tasks))
-                price_map = {task[0]: price_result for task, price_result in zip(price_tasks, price_results)}
-
-                # 3. 从数据库批量获取代币信息
-                cached_tokens = await sync_to_async(list)(
-                    Token.objects.filter(chain='SOL', address__in=token_addresses)
-                    .values('address', 'name', 'symbol', 'decimals', 'logo')
-                )
-                token_info_map = {token['address']: token for token in cached_tokens}
-
-                # 4. 处理SOL
-                sol_price_data = price_map.get('So11111111111111111111111111111111111111112')
-                if sol_price_data and isinstance(sol_price_data, dict):
+                # 3. 处理SOL代币
+                sol_price_data = await self._get_cached_price('So11111111111111111111111111111111111111112')
+                if sol_price_data:
                     sol_price = Decimal(str(sol_price_data.get('usdPrice', 0)))
                     price_change = Decimal(str(sol_price_data.get('usdPrice24hrPercentChange', 0)))
-                    sol_value = sol_balance * sol_price
-                    
-                    result.append({
-                        'token_address': 'So11111111111111111111111111111111111111112',
-                        'symbol': 'SOL',
-                        'name': 'Solana',
-                        'balance': str(sol_balance),
-                        'decimals': 9,
-                        'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png',
-                        'price_usd': str(sol_price),
-                        'price_change_24h': str(price_change),
-                        'value_usd': str(sol_value),
-                        'is_native': True
-                    })
+                else:
+                    # 如果缓存中没有，则获取SOL价格
+                    sol_price_response = await self._fetch_with_retry(
+                        session, 
+                        MoralisConfig.SOLANA_TOKEN_PRICE_URL.format('So11111111111111111111111111111111111111112')
+                    )
+                    if sol_price_response:
+                        sol_price = Decimal(str(sol_price_response.get('usdPrice', 0)))
+                        price_change = Decimal(str(sol_price_response.get('usdPrice24hrPercentChange', 0)))
+                        await self._cache_price('So11111111111111111111111111111111111111112', sol_price_response)
+                    else:
+                        sol_price = Decimal('0')
+                        price_change = Decimal('0')
+                
+                sol_value = sol_balance * sol_price
+                result.append({
+                    'token_address': 'So11111111111111111111111111111111111111112',
+                    'symbol': 'SOL',
+                    'name': 'Solana',
+                    'balance': str(sol_balance),
+                    'decimals': 9,
+                    'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png',
+                    'price_usd': str(sol_price),
+                    'price_change_24h': str(price_change),
+                    'value_usd': str(sol_value),
+                    'is_native': True
+                })
 
-                # 5. 处理其他代币
-                for token in all_tokens:
+                # 4. 处理其他代币
+                new_tokens = []  # 需要创建的新代币
+                price_update_needed = []  # 需要更新价格的代币
+                processed_tokens = set()  # 用于跟踪已处理的代币
+                
+                # 4.1 首先处理API返回的代币
+                for token_data in tokens_data:
                     try:
-                        mint = token.get('mint')
+                        mint = token_data.get('mint')
                         if not mint or mint == 'So11111111111111111111111111111111111111112':
                             continue
 
-                        amount = Decimal(str(token.get('amount', '0')))
-                        decimals = int(token.get('decimals', 0))
+                        processed_tokens.add(mint)
+                        amount = Decimal(str(token_data.get('amount', '0')))
+                        decimals = int(token_data.get('decimals', 0))
                         
-                        # 获取代币信息
+                        # 检查本地数据库中是否存在
                         token_info = token_info_map.get(mint)
                         if not token_info:
-                            token_info = {
-                                'name': token.get('name', 'Unknown Token'),
-                                'symbol': token.get('symbol', 'Unknown'),
+                            # 如果不存在，添加到待创建列表
+                            new_tokens.append({
+                                'address': mint,
+                                'name': token_data.get('name', 'Unknown Token'),
+                                'symbol': token_data.get('symbol', 'Unknown'),
                                 'decimals': decimals,
-                                'logo': token.get('logo', '')
-                            }
-
-                        # 获取价格
-                        price_data = price_map.get(mint)
-                        if isinstance(price_data, dict):
-                            price = Decimal(str(price_data.get('usdPrice', 0)))
-                            price_change = Decimal(str(price_data.get('usdPrice24hrPercentChange', 0)))
-                            value = amount * price
-                        else:
-                            price = Decimal('0')
-                            price_change = Decimal('0')
-                            value = Decimal('0')
+                                'logo': token_data.get('logo', ''),
+                                'data': token_data
+                            })
+                            continue
+                            
+                        # 检查价格是否需要更新
+                        if not token_info.get('last_price') or \
+                           not token_info.get('updated_at') or \
+                           token_info['updated_at'] < timezone.now() - timedelta(seconds=self.PRICE_CACHE_TTL):
+                            price_update_needed.append(mint)
+                            
+                        # 使用本地缓存的价格数据
+                        price = Decimal(token_info.get('last_price', '0'))
+                        price_change = Decimal(token_info.get('last_price_change', '0'))
+                        value = amount * price
 
                         result.append({
                             'token_address': mint,
-                            'symbol': token_info.get('symbol', 'Unknown'),
-                            'name': token_info.get('name', 'Unknown Token'),
+                            'symbol': token_info['symbol'],
+                            'name': token_info['name'],
                             'balance': str(amount),
                             'decimals': decimals,
-                            'logo': token_info.get('logo', ''),
+                            'logo': token_info['logo'],
                             'price_usd': str(price),
                             'price_change_24h': str(price_change),
                             'value_usd': str(value),
@@ -269,8 +289,67 @@ class SolanaBalanceService(BaseBalanceService):
                         })
                         logger.info(f"添加代币到列表: {mint}, 余额: {amount}, 价值: {value}")
                     except Exception as e:
-                        logger.error(f"处理代币 {token.get('mint')} 时出错: {str(e)}")
+                        logger.error(f"处理代币 {token_data.get('mint')} 时出错: {str(e)}")
                         continue
+
+                # 4.2 处理数据库中的代币（可能API没有返回但用户之前有余额）
+                tokens_data_map = {token.get('mint'): token for token in tokens_data if token.get('mint')}
+                db_tokens_to_check = [
+                    token_info for token_info in cached_tokens 
+                    if token_info['address'] not in processed_tokens 
+                    and token_info['address'] != 'So11111111111111111111111111111111111111112'
+                ]
+                
+                if db_tokens_to_check:
+                    # 批量获取所有代币余额
+                    tokens_response = await self._fetch_with_retry(session, MoralisConfig.SOLANA_ACCOUNT_TOKENS_URL.format(address))
+                    if tokens_response:
+                        tokens_data_map.update({
+                            token.get('mint'): token 
+                            for token in tokens_response 
+                            if token.get('mint')
+                        })
+                    
+                    for token_info in db_tokens_to_check:
+                        mint = token_info['address']
+                        try:
+                            token_data = tokens_data_map.get(mint)
+                            if token_data and Decimal(token_data.get('amount', '0')) > 0:
+                                amount = Decimal(token_data.get('amount', '0'))
+                                decimals = int(token_data.get('decimals', 0))
+                                balance = amount / Decimal(str(10 ** decimals))
+                                
+                                if balance > 0:
+                                    # 检查价格是否需要更新
+                                    if not token_info.get('last_price') or \
+                                       not token_info.get('updated_at') or \
+                                       token_info['updated_at'] < timezone.now() - timedelta(seconds=self.PRICE_CACHE_TTL):
+                                        price_update_needed.append(mint)
+                                        
+                                    price = Decimal(token_info.get('last_price', '0'))
+                                    price_change = Decimal(token_info.get('last_price_change', '0'))
+                                    value = balance * price
+
+                                    result.append({
+                                        'token_address': mint,
+                                        'symbol': token_info['symbol'],
+                                        'name': token_info['name'],
+                                        'balance': str(balance),
+                                        'decimals': token_info['decimals'],
+                                        'logo': token_info['logo'],
+                                        'price_usd': str(price),
+                                        'price_change_24h': str(price_change),
+                                        'value_usd': str(value),
+                                        'is_native': False
+                                    })
+                                    logger.info(f"从数据库添加代币到列表: {mint}, 余额: {balance}, 价值: {value}")
+                        except Exception as e:
+                            logger.error(f"处理数据库代币 {mint} 时出错: {str(e)}")
+                            continue
+
+                # 5. 异步处理新代币和价格更新
+                if new_tokens or price_update_needed:
+                    asyncio.create_task(self._async_update_tokens(new_tokens, price_update_needed))
 
                 # 按价值排序
                 result.sort(key=lambda x: Decimal(x['value_usd']), reverse=True)
@@ -284,11 +363,56 @@ class SolanaBalanceService(BaseBalanceService):
                 }
                 
                 logger.info(f"返回代币列表，总数: {len(result)}, 总价值: {total_value}")
+                logger.info(f"总耗时: {time.time() - start_time:.2f}秒")
                 return final_result
 
             except Exception as e:
                 logger.error(f"获取所有代币余额时出错: {str(e)}")
                 return {'total_value_usd': '0', 'tokens': []}
+
+    async def _async_update_tokens(self, new_tokens: List[Dict], price_update_needed: List[str]):
+        """异步更新代币信息和价格"""
+        try:
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                # 1. 创建新代币
+                for token_data in new_tokens:
+                    try:
+                        await sync_to_async(Token.objects.create)(
+                            chain='SOL',
+                            address=token_data['address'],
+                            name=token_data['name'],
+                            symbol=token_data['symbol'],
+                            decimals=token_data['decimals'],
+                            logo=token_data['logo'],
+                            type='token',
+                            contract_type='SPL',
+                            is_visible=True
+                        )
+                        logger.info(f"创建新代币记录: {token_data['address']}")
+                    except Exception as e:
+                        logger.error(f"创建代币记录失败: {str(e)}")
+
+                # 2. 更新价格
+                price_tasks = []
+                for token_address in price_update_needed:
+                    price_tasks.append((
+                        token_address,
+                        self._fetch_with_retry(session, MoralisConfig.SOLANA_TOKEN_PRICE_URL.format(token_address))
+                    ))
+
+                if price_tasks:
+                    price_results = await asyncio.gather(*(task[1] for task in price_tasks))
+                    for token_address, price_data in zip([task[0] for task in price_tasks], price_results):
+                        if price_data:
+                            try:
+                                token = await sync_to_async(Token.objects.get)(chain='SOL', address=token_address)
+                                await self._update_token_price(token, price_data)
+                                await self._cache_price(token_address, price_data)
+                            except Exception as e:
+                                logger.error(f"更新代币价格失败: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"异步更新代币信息失败: {str(e)}")
 
     async def _fetch_with_retry(self, session, url, method="get", **kwargs):
         """带重试的HTTP请求函数"""
