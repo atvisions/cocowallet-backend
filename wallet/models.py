@@ -8,6 +8,7 @@ import hashlib
 import base58
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
+from solana.keypair import Keypair
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,16 @@ class Wallet(models.Model):
     is_imported = models.BooleanField(default=False, verbose_name='是否导入的钱包')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+    
+    _payment_password = None  # 添加支付密码属性
+    
+    @property
+    def payment_password(self):
+        return self._payment_password
+        
+    @payment_password.setter
+    def payment_password(self, value):
+        self._payment_password = value
 
     class Meta:
         verbose_name = '钱包'
@@ -67,8 +78,8 @@ class Wallet(models.Model):
     def __str__(self):
         return f"{self.name} ({self.address})"
 
-    def decrypt_private_key(self) -> bytes:
-        """解密私钥，返回字节格式"""
+    def decrypt_private_key(self) -> str:
+        """解密私钥，返回64字节的完整密钥对格式"""
         if not self.encrypted_private_key:
             logger.error("钱包没有私钥")
             raise ValueError("钱包没有私钥")
@@ -78,80 +89,104 @@ class Wallet(models.Model):
             raise ValueError("观察者钱包没有私钥")
             
         try:
-            # 获取加密的私钥
-            encrypted_bytes = self.encrypted_private_key
-            logger.debug(f"加密私钥类型: {type(encrypted_bytes)}")
-            logger.debug(f"加密私钥原始内容: {encrypted_bytes[:10]}...")  # 只显示前10个字符
-            
             # 获取支付密码
-            if not hasattr(self, 'payment_password'):
+            if not self.payment_password:
                 raise ValueError("未提供支付密码")
             
+            # 解密私钥
+            logger.debug(f"开始解密私钥，加密数据长度: {len(self.encrypted_private_key)}")
+            key_hash = hashlib.sha256(self.payment_password.encode()).digest()
+            logger.debug(f"密钥哈希长度: {len(key_hash)}")
+            
             try:
-                # 使用与支付密码相同的解密方式
-                key_hash = hashlib.sha256(self.payment_password.encode()).digest()
-                encrypted_data = base64.b64decode(encrypted_bytes)
-                decrypted = bytes(a ^ b for a, b in zip(encrypted_data, key_hash * (len(encrypted_data) // len(key_hash) + 1)))
-                logger.debug(f"解密后的数据长度: {len(decrypted)}")
-                
-                # 对于Solana钱包，验证解密后的私钥
-                if self.chain == 'SOL':
-                    try:
-                        # 如果解密后的数据是64字节，取前32字节作为私钥
-                        if len(decrypted) == 64:
-                            logger.debug("检测到64字节数据，使用前32字节作为私钥")
-                            private_key_bytes = decrypted[:32]
-                            # 验证前32字节是否为有效私钥
-                            try:
-                                private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
-                                public_key_bytes = private_key_obj.public_key().public_bytes(
-                                    encoding=serialization.Encoding.Raw,
-                                    format=serialization.PublicFormat.Raw
-                                )
-                                generated_address = base58.b58encode(public_key_bytes).decode()
-                                
-                                if generated_address == self.address:
-                                    logger.info("找到匹配的私钥（使用前32字节）")
-                                    return private_key_bytes
-                                else:
-                                    logger.debug("前32字节不匹配，尝试后32字节")
-                                    # 尝试后32字节
-                                    private_key_bytes = decrypted[32:]
-                            except Exception as e:
-                                logger.debug(f"使用前32字节失败: {str(e)}，尝试后32字节")
-                                private_key_bytes = decrypted[32:]
-                        else:
-                            private_key_bytes = decrypted
-
-                        # 使用私钥创建密钥对并验证
-                        private_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
-                        public_key_bytes = private_key_obj.public_key().public_bytes(
-                            encoding=serialization.Encoding.Raw,
-                            format=serialization.PublicFormat.Raw
-                        )
-                        generated_address = base58.b58encode(public_key_bytes).decode()
-                        
-                        if generated_address == self.address:
-                            logger.info("找到匹配的私钥")
-                            return private_key_bytes
-                        else:
-                            logger.error(f"私钥不匹配: 期望={self.address}, 实际={generated_address}")
-                            raise ValueError("私钥与钱包地址不匹配")
-                            
-                    except Exception as e:
-                        logger.error(f"处理Solana私钥失败: {str(e)}")
-                        raise ValueError(f"无效的Solana私钥格式: {str(e)}")
-                
-                return decrypted
-                
+                encrypted_data = base64.b64decode(self.encrypted_private_key)
+                logger.debug(f"Base64解码后数据长度: {len(encrypted_data)}")
             except Exception as e:
-                logger.error(f"解密私钥失败: {str(e)}")
-                raise ValueError(f"解密私钥失败: {str(e)}")
-                
+                logger.error(f"Base64解码失败: {str(e)}")
+                raise ValueError("私钥格式错误：Base64解码失败")
+            
+            decrypted = bytes(a ^ b for a, b in zip(encrypted_data, key_hash * (len(encrypted_data) // len(key_hash) + 1)))
+            logger.debug(f"解密后数据长度: {len(decrypted)}")
+            
+            if self.chain == 'SOL':
+                # 验证解密后的数据是否为有效的私钥
+                try:
+                    # 将Base58格式的数据解码回字节
+                    decrypted_bytes = base58.b58decode(decrypted)
+                    
+                    # 如果是88字节的扩展格式，提取前64字节
+                    if len(decrypted_bytes) == 88:
+                        keypair_bytes = decrypted_bytes[:64]
+                    # 如果已经是64字节的格式，直接使用
+                    elif len(decrypted_bytes) == 64:
+                        keypair_bytes = decrypted_bytes
+                    # 如果是32字节的私钥，创建完整的密钥对
+                    elif len(decrypted_bytes) == 32:
+                        keypair = Keypair.from_seed(decrypted_bytes)
+                        keypair_bytes = keypair.seed + bytes(keypair.public_key)
+                    else:
+                        raise ValueError(f"无效的私钥长度: {len(decrypted_bytes)}")
+                    
+                    # 验证生成的地址
+                    keypair = Keypair.from_seed(keypair_bytes[:32])
+                    generated_address = str(keypair.public_key)
+                    logger.debug(f"生成的地址: {generated_address}")
+                    
+                    if not self._verify_address_match(generated_address):
+                        raise ValueError(f"私钥不匹配: 期望={self.address}, 实际={generated_address}")
+                    
+                    # 返回64字节密钥对的Base58编码
+                    return base58.b58encode(keypair_bytes).decode()
+                    
+                except Exception as e:
+                    logger.error(f"验证私钥失败: {str(e)}")
+                    raise ValueError(f"私钥验证失败: {str(e)}")
+            
+            return base58.b58encode(decrypted).decode()
+            
         except Exception as e:
-            logger.error(f"解密私钥失败，详细错误: {str(e)}")
-            logger.error(f"钱包ID: {self.id}, 地址: {self.address}")
+            logger.error(f"解密私钥失败: {str(e)}")
+            logger.error(f"钱包ID: {self.pk}, 地址: {self.address}")
             raise ValueError(f"解密私钥失败: {str(e)}")
+
+    def _verify_address_match(self, generated_address: str) -> bool:
+        """验证生成的地址是否与钱包地址匹配"""
+        try:
+            # 如果地址完全匹配
+            if self.address == generated_address:
+                return True
+                
+            # 如果是Solana钱包
+            if self.chain == 'SOL':
+                # 如果钱包地址是压缩公钥格式（以02或03开头的十六进制）
+                if (self.address.startswith('02') or self.address.startswith('03')):
+                    try:
+                        # 从压缩公钥中提取实际的公钥数据（去掉前缀）
+                        hex_str = self.address[2:]  # 移除02/03前缀
+                        # 将十六进制转换为字节
+                        hex_bytes = bytes.fromhex(hex_str)
+                        # 转换为Base58格式
+                        base58_address = base58.b58encode(hex_bytes).decode()
+                        logger.debug(f"从压缩公钥转换后的Base58地址: {base58_address}")
+                        return base58_address == generated_address
+                    except Exception as e:
+                        logger.error(f"压缩公钥转换失败: {str(e)}")
+                        return False
+                        
+                # 如果钱包地址是Base58格式
+                try:
+                    wallet_bytes = base58.b58decode(self.address)
+                    generated_bytes = base58.b58decode(generated_address)
+                    return wallet_bytes == generated_bytes
+                except Exception as e:
+                    logger.error(f"Base58解码失败: {str(e)}")
+                    return False
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"地址验证失败: {str(e)}")
+            return False
 
 class Token(models.Model):
     """代币模型"""
@@ -171,6 +206,7 @@ class Token(models.Model):
     discord = models.URLField(max_length=500, null=True, blank=True, verbose_name='Discord')
     github = models.URLField(max_length=500, null=True, blank=True, verbose_name='GitHub')
     medium = models.URLField(max_length=500, null=True, blank=True, verbose_name='Medium')
+    coingecko_id = models.CharField(max_length=100, null=True, blank=True, verbose_name='CoinGecko ID')
     total_supply = models.CharField(max_length=255, null=True, blank=True, verbose_name='总供应量')
     total_supply_formatted = models.CharField(max_length=255, null=True, blank=True, verbose_name='格式化总供应量')
     security_score = models.IntegerField(null=True, blank=True, verbose_name='安全评分')

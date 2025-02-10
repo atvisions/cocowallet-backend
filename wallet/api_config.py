@@ -31,7 +31,7 @@ class RPCConfig:
     BASE_RPC_URL: str = os.getenv('BASE_RPC_URL', 'https://base-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
     
     # Solana RPC 节点
-    SOLANA_MAINNET_RPC_URL: str = os.getenv('SOLANA_MAINNET_RPC_URL', 'https://solana-mainnet.g.alchemy.com/v2/rs5H2pmXTs6Q8b4kmOQ47cgKii5GnEZl')
+    SOLANA_MAINNET_RPC_URL: str = os.getenv('SOLANA_MAINNET_RPC_URL', 'https://api.mainnet-beta.solana.com')
     SOLANA_TESTNET_RPC_URL: str = os.getenv('SOLANA_TESTNET_RPC_URL', 'https://api.testnet.solana.com')
     SOLANA_DEVNET_RPC_URL: str = os.getenv('SOLANA_DEVNET_RPC_URL', 'https://api.devnet.solana.com')
     
@@ -41,9 +41,17 @@ class RPCConfig:
         """获取 Solana 备用节点列表"""
         return [
             'https://api.mainnet-beta.solana.com',
-            'https://solana-mainnet.g.alchemy.com/v2/rs5H2pmXTs6Q8b4kmOQ47cgKii5GnEZl',
+            'https://solana.public-rpc.com',
             'https://rpc.ankr.com/solana',
-            'https://solana-api.projectserum.com'
+            'https://solana-api.projectserum.com',
+            'https://solana.getblock.io/mainnet',
+            'https://mainnet.rpcpool.com',
+            'https://free.rpcpool.com',
+            'https://solana.api.chainstack.com/mainnet',
+            'https://solana-mainnet.rpc.extrnode.com',
+            'https://solana.api.onfinality.io/public',
+            'https://solana.publicnode.com',
+            'https://solana-mainnet.g.alchemy.com/v2/demo'
         ]
     
     # RPC 节点映射
@@ -66,7 +74,6 @@ class RPCConfig:
             }
         }
 
-@dataclass
 class MoralisConfig:
     """Moralis API 配置"""
     API_KEY: str = os.getenv('MORALIS_API_KEY', '')
@@ -82,39 +89,22 @@ class MoralisConfig:
     EVM_TOKEN_PRICE_BATCH_URL: str = f"{BASE_URL}/chains/{{0}}/native-price"
     
     # Solana价格和元数据查询接口
-    SOLANA_TOKEN_PRICE_URL: str = f"{SOLANA_URL}/token/mainnet/{{}}/price"
-    SOLANA_TOKEN_PRICE_HISTORY_URL: str = f"{SOLANA_URL}/token/mainnet/pairs/{{}}/ohlcv"
-    SOLANA_TOKEN_METADATA_URL: str = f"{SOLANA_URL}/token/mainnet/{{}}/metadata"
-    SOLANA_ACCOUNT_BALANCE_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/balance"
-    SOLANA_ACCOUNT_TOKENS_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/tokens"
-
-class APIEndpoints:
-    """API 端点配置"""
+    SOLANA_TOKEN_PRICE_URL: str = f"{SOLANA_URL}/token/mainnet/{{}}/price"  # 获取代币价格
+    SOLANA_TOKEN_PAIRS_URL: str = f"{SOLANA_URL}/token/mainnet/{{}}/pairs"  # 获取代币交易对
+    SOLANA_TOKEN_PAIRS_PRICE_URL: str = f"{SOLANA_URL}/token/mainnet/pairs/{{}}/price"  # 获取交易对价格
+    SOLANA_TOKEN_PAIRS_OHLCV_URL: str = f"{SOLANA_URL}/token/mainnet/pairs/{{}}/ohlcv"  # 获取K线数据
+    SOLANA_TOKEN_METADATA_URL: str = f"{SOLANA_URL}/token/mainnet/{{}}/metadata"  # 获取代币元数据
+    SOLANA_ACCOUNT_BALANCE_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/balance"  # 获取账户余额
+    SOLANA_ACCOUNT_TOKENS_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/tokens"  # 获取账户代币列表
     
-    # Moralis API 接口
-    class Moralis:
-        # EVM 链接口
-        GET_NATIVE_BALANCE = '/wallets/{address}/balance'
-        GET_TOKEN_BALANCES = '/{address}/erc20'
-        GET_NFT_COLLECTIONS = '/{address}/nft/collections'
-        GET_NFTS = '/{address}/nft'
-        GET_NFT_TRANSFERS = '/{address}/nft/transfers'
-        GET_TOKEN_TRANSFERS = '/{address}/erc20/transfers'
-        GET_NATIVE_TRANSFERS = '/{address}/transfers'
-        GET_TOKEN_METADATA = '/erc20/metadata'
-        GET_NFT_METADATA = '/nft/{address}/{token_id}'
-        
-        # Solana 接口
-        SOLANA_GET_BALANCE = '/account/{address}/balance'
-        SOLANA_GET_NFTS = '/account/{address}/nft'
-        SOLANA_GET_PORTFOLIO = '/account/{address}/portfolio'
-        SOLANA_GET_TOKEN_TRANSFERS = '/account/{address}/transfers'
-        SOLANA_GET_TOKEN_METADATA = '/token/metadata'
-        SOLANA_GET_TOKEN_PRICE = '/token/mainnet/{address}/price'
-        SOLANA_GET_NFT_METADATA = '/nft/{address}/metadata'
-        SOLANA_GET_NFT_PRICE = '/nft/{address}/price'
-        SOLANA_GET_TOKEN_TRANSFERS = '/account/{address}/token/transfers'
-        SOLANA_GET_SPL_TOKENS = '/account/{address}/tokens'
+    # API 请求超时时间(秒)
+    TIMEOUT = 30
+    
+    # 最大重试次数
+    MAX_RETRIES = 3
+    
+    # 重试间隔(秒)
+    RETRY_INTERVAL = 1
 
 class APIConfig:
     """API 配置类"""
