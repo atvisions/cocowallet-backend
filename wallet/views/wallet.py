@@ -19,7 +19,7 @@ from ..serializers import (
     WalletSerializer, 
     WalletCreateSerializer,
     WalletSetupSerializer,
-    ChainSelectionSerializer
+    ChainSelectionSerializer # type: ignore
 )
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class WalletViewSet(viewsets.ModelViewSet):
     serializer_class = WalletSerializer
 
     def get_queryset(self):
-        device_id = self.request.query_params.get('device_id') or self.request.data.get('device_id')
+        device_id = self.request.query_params.get('device_id') or self.request.data.get('device_id') # type: ignore
         if device_id:
             return self.queryset.filter(device_id=device_id)
         return self.queryset.none()
@@ -665,7 +665,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             )
             
             # 保存头像
-            wallet.avatar.save(f'wallet_avatar_{wallet.id}.png', avatar_file, save=True)
+            wallet.avatar.save(f'wallet_avatar_{wallet.id}.png', avatar_file, save=True) # type: ignore
             
             return Response({
                 'status': 'success',
@@ -752,7 +752,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             )
             
             # 保存头像
-            wallet.avatar.save(f'wallet_avatar_{wallet.id}.png', avatar_file, save=True)
+            wallet.avatar.save(f'wallet_avatar_{wallet.id}.png', avatar_file, save=True) # type: ignore
             
             return Response({
                 'status': 'success',

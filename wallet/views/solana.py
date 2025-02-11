@@ -11,12 +11,15 @@ from rest_framework.authentication import SessionAuthentication, BasicAuthentica
 import aiohttp
 from decimal import Decimal
 from typing import Optional
-from django.db.models import Q
+from django.db.models import QuerySet
+from django.utils import timezone
+from solana.rpc.async_api import AsyncClient
+from solana.rpc.commitment import Commitment
 
-from ..models import Wallet, Token, Transaction as DBTransaction
+from ..models import Wallet, Token, Transaction
 from ..serializers import WalletSerializer
 from ..services.factory import ChainServiceFactory
-from ..api_config import APIConfig
+from ..api_config import RPCConfig
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +37,10 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
     authentication_classes = [SessionAuthentication, BasicAuthentication]
     parser_classes = [JSONParser]
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[Wallet]:
         """获取查询集"""
-        device_id = self.request.query_params.get('device_id')
+        # 从请求参数中获取device_id
+        device_id = self.request.GET.get('device_id')
         logger.debug(f"查询参数 device_id: {device_id}")
         
         # 基础查询集
@@ -89,7 +93,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(int(pk), device_id)
+            wallet = await self.get_wallet_async(int(pk), device_id) # type: ignore
             logger.debug(f"请求获取代币余额，钱包地址: {wallet.address}, device_id: {device_id}")
             
             if wallet.chain != 'SOL':
@@ -109,7 +113,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             # 获取所有代币余额
             logger.debug(f"开始获取代币余额，钱包地址: {wallet.address}")
             result = await balance_service.get_all_token_balances(wallet.address)
-            logger.debug(f"成功获取代币余额，数量: {len(result.get('tokens', []))}")
+
             
             # 获取隐藏的代币列表
             hidden_tokens = await sync_to_async(list)(
@@ -120,7 +124,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             # 过滤和处理代币数据
             filtered_tokens = []
             
-            for token in result.get('tokens', []):
+            for token in result.get('tokens', []): # type: ignore
                 # 跳过隐藏的代币
                 if token.get('token_address') in hidden_tokens:
                     logger.debug(f"跳过隐藏代币: {token.get('token_address')}")
@@ -191,7 +195,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             filtered_tokens.sort(key=lambda x: float(x['value_usd'].replace('$', '')), reverse=True)
             
             # 获取总价值
-            total_value_usd = float(result.get('total_value_usd', '0'))
+            total_value_usd = float(result.get('total_value_usd', '0')) # type: ignore
             
             # 格式化总价值
             formatted_total_value = '${:.2f}'.format(total_value_usd)
@@ -235,7 +239,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(pk, device_id)
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
             
             if wallet.chain != 'SOL':
                 return Response({
@@ -290,7 +294,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(pk, device_id)
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
             
             if wallet.chain != 'SOL':
                 return Response({
@@ -354,7 +358,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(pk, device_id)
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
             
             if wallet.chain != 'SOL':
                 return Response({
@@ -408,7 +412,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(int(pk), device_id)
+            wallet = await self.get_wallet_async(int(pk), device_id) # type: ignore
             logger.debug(f"请求获取代币详情，钱包地址: {wallet.address}, 代币地址: {token_address}")
             
             if wallet.chain != 'SOL':
@@ -426,7 +430,10 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
             # 获取代币余额
-            balance = await balance_service.get_token_balance(wallet.address, token_address)
+            # 确保token_address不为None
+            if not token_address:
+                raise ValueError("token_address不能为空")
+            balance = await balance_service.get_token_balance(wallet.address, str(token_address))
             
             # 获取代币信息服务
             token_info_service = ChainServiceFactory.get_token_info_service('SOL')
@@ -677,7 +684,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(int(pk), device_id)
+            wallet = await self.get_wallet_async(int(pk), device_id) # type: ignore
             logger.debug(f"请求转账，钱包地址: {wallet.address}, 接收地址: {to_address}, 金额: {amount}")
             
             if wallet.chain != 'SOL':
@@ -779,7 +786,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(int(pk), device_id)
+            wallet = await self.get_wallet_async(int(pk), device_id) # type: ignore
             logger.debug(f"请求估算转账费用，钱包地址: {wallet.address}, 接收地址: {to_address}, 金额: {amount}")
             
             if wallet.chain != 'SOL':
@@ -841,6 +848,188 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 'message': f'估算费用失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=True, methods=['get'], url_path='swap/quote')
+    @async_to_sync_api
+    async def get_swap_quote(self, request, pk=None):
+        """获取代币兑换报价"""
+        try:
+            device_id = request.query_params.get('device_id')
+            from_token = request.query_params.get('from_token')
+            to_token = request.query_params.get('to_token')
+            amount = request.query_params.get('amount')
+            slippage = request.query_params.get('slippage')
+            
+            if not all([device_id, from_token, to_token, amount]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取并验证钱包
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
+            
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持SOL链钱包'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取 Swap 服务
+            swap_service = ChainServiceFactory.get_swap_service('SOL') # type: ignore
+            if not swap_service:
+                return Response({
+                    'status': 'error',
+                    'message': 'SOL Swap服务不可用'
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            
+            # 获取兑换报价
+            quote = await swap_service.get_swap_quote(
+                from_token=from_token,
+                to_token=to_token,
+                amount=Decimal(str(amount)),
+                slippage=Decimal(str(slippage)) if slippage else None
+            )
+            
+            return Response({
+                'status': 'success',
+                'data': quote
+            })
+            
+        except ObjectDoesNotExist as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"获取兑换报价失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'获取兑换报价失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['post'], url_path='swap/execute')
+    @async_to_sync_api
+    async def execute_swap(self, request, pk=None):
+        """执行代币兑换"""
+        try:
+            device_id = request.data.get('device_id')
+            quote_id = request.data.get('quote_id')
+            from_token = request.data.get('from_token')
+            to_token = request.data.get('to_token')
+            amount = request.data.get('amount')
+            payment_password = request.data.get('payment_password')
+            slippage = request.data.get('slippage')
+            
+            if not all([device_id, quote_id, from_token, to_token, amount, payment_password]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取并验证钱包
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
+            
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持SOL链钱包'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 设置支付密码
+            wallet.payment_password = payment_password
+            
+            # 获取私钥
+            try:
+                private_key = wallet.decrypt_private_key()
+            except Exception as e:
+                return Response({
+                    'status': 'error',
+                    'message': f'解密私钥失败: {str(e)}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取 Swap 服务
+            swap_service = ChainServiceFactory.get_swap_service('SOL') # type: ignore
+            if not swap_service:
+                return Response({
+                    'status': 'error',
+                    'message': 'SOL Swap服务不可用'
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            
+            # 执行兑换
+            result = await swap_service.execute_swap(
+                quote_id=quote_id,
+                from_token=from_token,
+                to_token=to_token,
+                amount=Decimal(str(amount)),
+                from_address=wallet.address,
+                private_key=private_key,
+                slippage=Decimal(str(slippage)) if slippage else None
+            )
+            
+            # 创建交易记录
+            # 获取交易详情
+            client = AsyncClient(RPCConfig.SOLANA_MAINNET_RPC_URL)
+            try:
+                tx_info = await client.get_transaction(
+                    result['tx_hash'],
+                    commitment=Commitment("confirmed")
+                )
+                if tx_info and 'result' in tx_info:
+                    tx_result = tx_info['result']
+                    block_number = tx_result.get('slot', 0)
+                    gas_fee = tx_result.get('meta', {}).get('fee', 0)
+                    gas_price = Decimal(str(gas_fee / 1e9))  # 转换为 SOL
+                else:
+                    block_number = 0
+                    gas_price = Decimal('0')
+            except Exception as e:
+                logger.error(f"获取交易详情失败: {str(e)}")
+                block_number = 0
+                gas_price = Decimal('0')
+            finally:
+                await client.close()
+
+            # 获取代币信息
+            try:
+                token = await sync_to_async(Token.objects.get)(chain='SOL', address=from_token)
+            except Token.DoesNotExist:
+                token = None
+                logger.warning(f"找不到代币信息: {from_token}")
+
+            # 创建交易记录
+            await sync_to_async(Transaction.objects.create)(
+                wallet=wallet,
+                chain='SOL',
+                tx_hash=result['tx_hash'],
+                tx_type='SWAP',
+                status='SUCCESS',
+                from_address=wallet.address,
+                to_address='Jupiter',  # 使用固定值，因为是通过Jupiter DEX进行的交易
+                amount=Decimal(str(result['amount_in'])),
+                gas_price=gas_price,
+                gas_used=Decimal('1'),
+                block_number=block_number,
+                block_timestamp=timezone.now(),
+                token=token
+            )
+            
+            return Response({
+                'status': 'success',
+                'data': result
+            })
+            
+        except ObjectDoesNotExist as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"执行兑换失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'执行兑换失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=True, methods=['get'], url_path='token-transfers')
     @async_to_sync_api
     async def token_transfers(self, request, pk=None):
@@ -864,7 +1053,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             end = start + page_size
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(int(pk), device_id)
+            wallet = await self.get_wallet_async(int(pk), device_id) # type: ignore
             logger.debug(f"请求获取转账记录，钱包地址: {wallet.address}")
             
             if wallet.chain != 'SOL':
@@ -887,11 +1076,11 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 query &= Q(tx_type=tx_type)
             
             # 获取总记录数
-            total_count = await DBTransaction.objects.filter(query).acount()
+            total_count = await Transaction.objects.filter(query).acount() # type: ignore
             
             # 获取交易记录
             transactions = []
-            async for tx in DBTransaction.objects.filter(query).order_by('-block_timestamp')[start:end].select_related('token'):
+            async for tx in Transaction.objects.filter(query).order_by('-block_timestamp')[start:end].select_related('token'): # type: ignore
                 # 获取代币精度，如果是原生SOL则使用9位精度
                 decimals = tx.token.decimals if tx.token else 9
                 
@@ -964,4 +1153,4 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': f'获取转账记录失败: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

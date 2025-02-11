@@ -34,4 +34,8 @@ class ServiceUnavailableError(WalletError):
 
 class ValidationError(WalletError):
     """数据验证错误异常"""
-    pass 
+    pass
+
+class SwapError(WalletError):
+    """代币兑换异常"""
+    pass

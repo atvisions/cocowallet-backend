@@ -5,12 +5,14 @@ from .base.transfer import BaseTransferService
 from .base.price import BasePriceService
 from .base.history import BaseHistoryService
 from .base.token_info import BaseTokenInfoService
+from .base.swap import BaseSwapService
 
 from .solana.balance import SolanaBalanceService
 from .solana.transfer import SolanaTransferService
 from .solana.price import SolanaPriceService
 from .solana.history import SolanaHistoryService
 from .solana.token_info import SolanaTokenInfoService
+from .solana.swap import SolanaSwapService
 
 # TODO: 添加 Ethereum 服务实现
 
@@ -37,6 +39,11 @@ class ChainServiceFactory:
     _token_info_services: Dict[str, Type[BaseTokenInfoService]] = {
         'SOL': SolanaTokenInfoService,
         # TODO: 添加其他链的代币信息服务
+    }
+
+    _swap_services: Dict[str, Type[BaseSwapService]] = {
+        'SOL': SolanaSwapService,
+        # TODO: 添加其他链的兑换服务
     }
     
     @classmethod
@@ -71,4 +78,10 @@ class ChainServiceFactory:
     def get_token_info_service(cls, chain: str) -> Optional[BaseTokenInfoService]:
         """获取代币信息服务实例"""
         service_class = cls._token_info_services.get(chain.upper())
-        return service_class() if service_class else None 
+        return service_class() if service_class else None
+
+    @classmethod
+    def get_swap_service(cls, chain: str) -> Optional[BaseSwapService]:
+        """获取代币兑换服务实例"""
+        service_class = cls._swap_services.get(chain.upper())
+        return service_class() if service_class else None
