@@ -1,12 +1,14 @@
 import logging
 from decimal import Decimal
-from typing import Dict, Any, Optional, cast, Union
+from typing import Dict, Any, Optional, cast, Union, Callable
 import asyncio
 import aiohttp
 from django.utils import timezone
 import base58
+import time
 
 from solana.rpc.async_api import AsyncClient
+from solana.rpc.commitment import Commitment
 from solana.transaction import Transaction as SolanaTransaction
 from solana.keypair import Keypair
 from solana.publickey import PublicKey
@@ -21,6 +23,7 @@ from ...models import Wallet, Transaction as DBTransaction, Token
 from ..base.transfer import BaseTransferService
 from ...exceptions import InsufficientBalanceError, InvalidAddressError, TransferError
 from ...api_config import RPCConfig, MoralisConfig
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -28,211 +31,271 @@ class SolanaTransferService(BaseTransferService):
     def __init__(self):
         """初始化 Solana 转账服务"""
         super().__init__()
-        self.headers = {
-            "accept": "application/json",
-            "content-type": "application/json",
-        }
-        self.timeout = aiohttp.ClientTimeout(total=30, connect=5, sock_connect=5, sock_read=10)
-        self.rpc_url = RPCConfig.SOLANA_MAINNET_RPC_URL
-        self.backup_nodes = RPCConfig.SOLANA_BACKUP_NODES
-        # 初始化主要和备用 RPC 节点
-        self.rpc_urls = [self.rpc_url]
-        if isinstance(self.backup_nodes, list):
-            self.rpc_urls.extend(self.backup_nodes)
-        self.current_rpc_index = 0
-        self.client = AsyncClient(self.rpc_urls[self.current_rpc_index], timeout=30)
         
-    async def _switch_rpc_node(self):
-        """切换到下一个可用的 RPC 节点"""
-        try:
-            # 获取当前节点的索引
-            current_index = self.rpc_urls.index(self.rpc_url)
-            # 尝试切换到下一个节点
-            for i in range(len(self.rpc_urls)):
-                next_index = (current_index + i + 1) % len(self.rpc_urls)
-                next_url = self.rpc_urls[next_index]
-                
-                # 测试新节点是否可用
-                try:
-                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
-                        response = await self._fetch_with_retry(
-                            session,
-                            next_url,
-                            method="post",
-                            json={
-                                "jsonrpc": "2.0",
-                                "id": 1,
-                                "method": "getLatestBlockhash",
-                                "params": [{"commitment": "confirmed"}]
-                            }
-                        )
-                        
-                        if response and isinstance(response, dict):
-                            result = response.get('result')
-                            if result and isinstance(result, dict):
-                                value = result.get('value', {})
-                                if isinstance(value, dict) and value.get('blockhash'):
-                                    self.rpc_url = next_url
-                                    self.client = AsyncClient(next_url, timeout=30)
-                                    logger.info(f"成功切换到 RPC 节点: {next_url}")
-                                    return True
-                except Exception as e:
-                    logger.warning(f"测试节点 {next_url} 失败: {str(e)}")
-                    continue
+        # 初始化 RPC 配置
+        self.primary_rpc_url = RPCConfig.SOLANA_MAINNET_RPC_URL
+        self.backup_rpc_urls = [
+            "https://api.mainnet-beta.solana.com",
+            "https://solana-api.projectserum.com"
+        ]
+        self.current_rpc_url = self.primary_rpc_url
+        
+        # 初始化 RPC 客户端
+        self.client = AsyncClient(
+            endpoint=self.current_rpc_url,
+            timeout=30,
+            commitment=Commitment("confirmed")
+        )
+        
+        # 重试配置
+        self.max_retries = 3
+        self.retry_delay = 1
+        self.max_delay = 10
+        
+        # 设置请求头
+        self.request_headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
+        
+        # 如果是 Alchemy API，添加认证头
+        if "alchemy" in self.current_rpc_url.lower():
+            api_key = self.current_rpc_url.split("/")[-1] if "/" in self.current_rpc_url else ""
+            if api_key:
+                self.request_headers.update({
+                    'Authorization': f'Bearer {api_key}',
+                    'Alchemy-API-Key': api_key,
+                    'Alchemy-Web3-Version': '2.0.0'
+                })
+        
+        # RPC 节点健康状态
+        self.rpc_health = {
+            'last_check': 0,
+            'check_interval': 300,  # 5分钟检查一次
+            'is_healthy': True
+        }
+        
+        # 设置 aiohttp 会话配置
+        self.timeout = aiohttp.ClientTimeout(
+            total=30,
+            connect=5,
+            sock_connect=5,
+            sock_read=10
+        )
+        
+        # 创建 aiohttp 会话
+        self.session = None
+        
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取或创建 aiohttp 会话"""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                timeout=self.timeout,
+                headers=self.request_headers
+            )
+        return self.session
+        
+    async def _fetch_with_retry(self, method: str, *args, **kwargs) -> Any:
+        """
+        带重试的 RPC 请求
+        
+        Args:
+            method: RPC 方法名
+            *args: 位置参数
+            **kwargs: 关键字参数
             
-            # 如果所有节点都不可用，尝试使用公共节点
-            public_nodes = [
-                'https://api.mainnet-beta.solana.com',
-                'https://solana.public-rpc.com',
-                'https://rpc.ankr.com/solana'
-            ]
-            
-            for url in public_nodes:
-                if url not in self.rpc_urls:
-                    try:
-                        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
-                            response = await self._fetch_with_retry(
-                                session,
-                                url,
-                                method="post",
-                                json={
-                                    "jsonrpc": "2.0",
-                                    "id": 1,
-                                    "method": "getLatestBlockhash",
-                                    "params": [{"commitment": "confirmed"}]
-                                }
-                            )
-                            
-                            if response and isinstance(response, dict):
-                                result = response.get('result')
-                                if result and isinstance(result, dict):
-                                    value = result.get('value', {})
-                                    if isinstance(value, dict) and value.get('blockhash'):
-                                        self.rpc_url = url
-                                        self.client = AsyncClient(url, timeout=30)
-                                        # 将可用的公共节点添加到节点列表中
-                                        if url not in self.rpc_urls:
-                                            self.rpc_urls.append(url)
-                                        logger.info(f"成功切换到公共节点: {url}")
-                                        return True
-                    except Exception as e:
-                        logger.warning(f"测试公共节点 {url} 失败: {str(e)}")
-                        continue
-            
-            logger.error("所有RPC节点都不可用")
-            return False
-            
-        except Exception as e:
-            logger.error(f"切换RPC节点失败: {str(e)}")
-            return False
-
-    async def _get_recent_blockhash(self) -> str:
-        """获取最新的区块哈希，带重试机制和节点切换"""
-        max_retries = 5  # 增加重试次数
-        retry_delay = 2  # 增加重试延迟
+        Returns:
+            Any: 响应数据
+        """
+        max_retries = kwargs.pop('max_retries', 3)
+        timeout = kwargs.pop('timeout', 30)
+        
+        # 构建 JSON-RPC 2.0 请求体
+        params = kwargs.get('params', [])
+        
+        # 确保参数格式正确
+        if isinstance(params, (dict, list)):
+            # 如果是字典，将其包装在数组中
+            if isinstance(params, dict):
+                params = [params]
+        elif isinstance(params, str):
+            try:
+                parsed_params = json.loads(params)
+                # 如果解析后是字典，将其包装在数组中
+                if isinstance(parsed_params, dict):
+                    params = [parsed_params]
+                else:
+                    params = parsed_params if isinstance(parsed_params, list) else [parsed_params]
+            except json.JSONDecodeError:
+                params = [params] if params else []
+        else:
+            # 对于其他类型的参数，确保它们被包装在数组中
+            params = [params] if params is not None else []
+        
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params  # 直接使用处理后的参数
+        }
+        
+        session = await self._get_session()
         
         for attempt in range(max_retries):
             try:
-                # 构建标准的 JSON-RPC 2.0 请求
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getLatestBlockhash",
-                    "params": [
-                        {
-                            "commitment": "confirmed"
-                        }
-                    ]
-                }
-                
-                # 使用 aiohttp 直接发送请求
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                    headers = {"Content-Type": "application/json"}
-                    async with session.post(
-                        self.rpc_url,
-                        json=payload,
-                        headers=headers
-                    ) as resp:
-                        response = await resp.json()
-                        logger.debug(f"获取区块哈希响应: {response}")
-                        
-                        if response and 'result' in response:
-                            result = response['result']
-                            if isinstance(result, dict):
-                                value = result.get('value', {})
-                                if isinstance(value, dict):
-                                    blockhash = value.get('blockhash')
-                                    if blockhash:
-                                        logger.info(f"成功获取区块哈希: {blockhash}")
-                                        return blockhash
-                        
-                        # 如果响应中包含错误
-                        if 'error' in response:
-                            error = response['error']
-                            if isinstance(error, dict):
-                                error_msg = error.get('message', '')
-                                if 'App is inactive' in error_msg or 'Invalid request' in error_msg:
-                                    # 切换到下一个节点
-                                    if await self._switch_rpc_node():
-                                        logger.info("成功切换RPC节点，重试获取区块哈希")
-                                        continue
-                
-                # 如果没有获取到有效的区块哈希
-                error_msg = f"第 {attempt + 1} 次尝试获取区块哈希失败，响应: {response}"
-                logger.warning(error_msg)
-                
-                # 尝试切换节点
-                if await self._switch_rpc_node():
-                    await asyncio.sleep(retry_delay)
-                    continue
+                async with session.post(
+                    self.current_rpc_url,
+                    json=payload,
+                    headers=self.request_headers,
+                    timeout=timeout
+                ) as response:
+                    response_text = await response.text()
+                    logger.info(f"响应状态码: {response.status}")
+                    logger.debug(f"响应内容: {response_text}")
                     
-            except Exception as e:
-                error_msg = f"获取区块哈希出错: {str(e)}"
-                logger.error(error_msg)
+                    if response.status == 200:
+                        result = await response.json()
+                        
+                        if 'error' in result:
+                            error = result['error']
+                            error_msg = error.get('message', str(error))
+                            logger.error(f"RPC 请求错误: {error_msg}")
+                            
+                            if any(err in error_msg for err in ['BlockhashNotFound', 'Rate limit exceeded']):
+                                if attempt < max_retries - 1:
+                                    wait_time = 2 ** attempt
+                                    logger.warning(f"将在 {wait_time} 秒后重试请求")
+                                    await asyncio.sleep(wait_time)
+                                    continue
+                            
+                            raise TransferError(f"RPC 请求失败: {error_msg}")
+                        
+                        return result.get('result')
+                    
+                    elif response.status == 429:  # 速率限制
+                        if attempt < max_retries - 1:
+                            wait_time = int(response.headers.get('Retry-After', 2 ** attempt))
+                            logger.warning(f"触发速率限制，将在 {wait_time} 秒后重试")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        
+                        raise TransferError("触发速率限制，请稍后重试")
+                    
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"HTTP {response.status}: {error_text}")
+                        
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** attempt)
+                            continue
+                        
+                        raise TransferError(f"HTTP 请求失败: {response.status}")
+                        
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                logger.error(f"请求异常: {str(e)}")
                 
-                # 尝试切换节点
-                if await self._switch_rpc_node():
-                    await asyncio.sleep(retry_delay)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
                     continue
                 
-            # 增加重试间隔
-            await asyncio.sleep(retry_delay * (attempt + 1))
+                raise TransferError(f"连接失败: {str(e)}")
+            
+            except Exception as e:
+                logger.error(f"未知错误: {str(e)}")
                 
-        raise TransferError("多次尝试后仍无法获取区块哈希，请稍后重试")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                
+                raise TransferError(f"请求失败: {str(e)}")
+        
+        raise TransferError("请求重试次数已达上限")
+
+    async def _get_recent_blockhash(self) -> str:
+        """获取最新区块哈希"""
+        try:
+            logger.debug("开始获取最新区块哈希")
+            
+            response = await self._fetch_with_retry(
+                'getLatestBlockhash',
+                params=[{"commitment": "confirmed"}]
+            )
+            
+            if isinstance(response, dict):
+                value = response.get('value', {})
+                if isinstance(value, dict):
+                    blockhash = value.get('blockhash')
+                    if blockhash:
+                        logger.info(f"成功获取区块哈希: {blockhash}")
+                        return blockhash
+            
+            raise Exception(f"无效的区块哈希响应格式: {response}")
+            
+        except Exception as e:
+            error_msg = f"获取区块哈希失败: {str(e)}"
+            if hasattr(e, '__class__'):
+                error_msg += f" ({e.__class__.__name__})"
+            logger.error(error_msg)
+            raise Exception(error_msg)
 
     def get_health_check_url(self) -> str:
         """获取健康检查URL"""
         return self.rpc_url
         
     async def check_health(self) -> Dict[str, Any]:
-        """检查服务健康状态"""
+        """检查服务健康状态
+        
+        Returns:
+            Dict[str, Any]: 包含服务健康状态信息的字典
+        """
         try:
             # 使用父类的健康检查方法
             health_status = await super().check_health()
             
-            # 额外检查 Solana RPC 节点状态
-            response = await self.client.get_recent_blockhash()
-            if response and 'result' in response:
-                health_status['solana_rpc'] = {
-                    'status': 'ok',
-                    'message': '节点连接正常'
-                }
-            else:
+            # 检查 Solana RPC 节点状态
+            try:
+                response = await self._fetch_with_retry(
+                    'get_latest_blockhash',
+                    commitment=Commitment("confirmed")
+                )
+                
+                if response and 'result' in response:
+                    health_status['solana_rpc'] = {
+                        'status': 'ok',
+                        'message': '节点连接正常',
+                        'timestamp': timezone.now().isoformat()
+                    }
+                else:
+                    health_status['solana_rpc'] = {
+                        'status': 'error',
+                        'message': '无法获取区块哈希',
+                        'timestamp': timezone.now().isoformat()
+                    }
+            except Exception as e:
                 health_status['solana_rpc'] = {
                     'status': 'error',
-                    'message': '无法获取区块哈希'
+                    'message': f'RPC 节点异常: {str(e)}',
+                    'error_type': e.__class__.__name__,
+                    'timestamp': timezone.now().isoformat()
                 }
             
             return health_status
+            
         except Exception as e:
-            return {
+            error_status = {
                 'status': 'error',
                 'message': f'服务异常: {str(e)}',
+                'error_type': e.__class__.__name__,
+                'timestamp': timezone.now().isoformat(),
                 'solana_rpc': {
                     'status': 'error',
-                    'message': str(e)
+                    'message': str(e),
+                    'error_type': e.__class__.__name__,
+                    'timestamp': timezone.now().isoformat()
                 }
             }
+            logger.error(f"健康检查失败: {error_status}")
+            return error_status
 
     async def _get_wallet_keypair(self, wallet: Wallet) -> Keypair:
         """从钱包获取密钥对"""
@@ -301,40 +364,29 @@ class SolanaTransferService(BaseTransferService):
     async def _check_token_account_exists(self, account_address: str) -> bool:
         """检查代币账户是否存在"""
         try:
-            # 构建标准的 JSON-RPC 2.0 请求
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getAccountInfo",
-                "params": [
+            logger.debug(f"检查账户 {account_address} 是否存在")
+            response = await self._fetch_with_retry(
+                'getAccountInfo',
+                params=[
                     account_address,
                     {
                         "encoding": "base64",
                         "commitment": "confirmed"
                     }
                 ]
-            }
+            )
             
-            # 使用 aiohttp 直接发送请求
-            async with aiohttp.ClientSession() as session:
-                headers = {"Content-Type": "application/json"}
-                async with session.post(
-                    self.rpc_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=10
-                ) as resp:
-                    response = await resp.json()
-                    logger.debug(f"检查账户响应: {response}")
-                    
-                    if response and 'result' in response:
-                        result = response['result']
-                        if isinstance(result, dict):
-                            value = result.get('value')
-                            return value is not None and len(value) > 0
+            if response and isinstance(response, dict):
+                value = response.get('value')
+                exists = value is not None and len(value) > 0
+                logger.debug(f"账户 {account_address} 存在: {exists}")
+                return exists
             return False
         except Exception as e:
-            logger.error(f"检查代币账户失败: {str(e)}")
+            error_msg = f"检查代币账户失败: {str(e)}"
+            if hasattr(e, '__class__'):
+                error_msg += f" ({e.__class__.__name__})"
+            logger.error(error_msg)
             return False
 
     async def _create_token_account(self, wallet: Wallet, token_address: str, private_key: str) -> str:
@@ -479,7 +531,7 @@ class SolanaTransferService(BaseTransferService):
                         opts=TxOpts(
                             skip_preflight=False,  # 启用预检查
                             max_retries=5,
-                            preflight_commitment="confirmed"
+                            preflight_commitment=Commitment("confirmed")
                         )
                     )
                     
@@ -730,13 +782,6 @@ class SolanaTransferService(BaseTransferService):
                             logger.warning(f"确认方法 {method.__name__} 失败: {str(method_error)}")
                             continue
                     
-                    # 如果所有方法都失败，检查是否需要切换节点
-                    if i > 0 and i % 5 == 0:
-                        if await self._switch_rpc_node():
-                            logger.info("已切换到新的 RPC 节点")
-                            await asyncio.sleep(2)
-                            continue
-                    
                     # 动态调整等待时间
                     wait_time = min(2 * (i + 1), 10)
                     logger.warning(f"第 {i + 1} 次确认: 交易尚未上链，等待 {wait_time} 秒")
@@ -744,11 +789,6 @@ class SolanaTransferService(BaseTransferService):
                     
                 except Exception as e:
                     logger.warning(f"第 {i + 1} 次确认交易状态失败: {str(e)}")
-                    if 'App is inactive' in str(e):
-                        if await self._switch_rpc_node():
-                            logger.info("已切换到新的 RPC 节点")
-                            await asyncio.sleep(2)
-                            continue
                     await asyncio.sleep(2)
             
             logger.error(f"交易确认超时: {tx_hash}")
@@ -760,47 +800,40 @@ class SolanaTransferService(BaseTransferService):
             
     async def _confirm_with_signature_status(self, tx_hash: str) -> bool:
         """使用签名状态确认交易"""
-        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+        try:
             response = await self._fetch_with_retry(
-                session,
-                self.rpc_url,
-                method="post",
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getSignatureStatuses",
-                    "params": [
-                        [tx_hash],
-                        {"searchTransactionHistory": True}
-                    ]
-                }
+                'getTransaction',
+                params=[
+                    tx_hash,
+                    {
+                        "commitment": "confirmed",
+                        "maxSupportedTransactionVersion": 0
+                    }
+                ]
             )
             
             if response and isinstance(response, dict):
-                result = response.get('result', {})
-                if result and isinstance(result, dict):
-                    value = result.get('value', [])
-                    if value and isinstance(value, list) and len(value) > 0:
-                        status = value[0]
-                        if status is None:
+                result = response.get('result')
+                if result:
+                    meta = result.get('meta')
+                    if meta is not None:
+                        if meta.get('err'):
+                            logger.error(f"交易失败: {meta['err']}")
                             return False
-                            
-                        if status.get('err'):
-                            error_msg = str(status['err'])
-                            logger.error(f"交易失败: {error_msg}")
-                            return False
-                            
-                        confirmation_status = status.get('confirmationStatus')
-                        return confirmation_status == 'finalized'
+                        return True
             
             return False
             
+        except Exception as e:
+            logger.warning(f"获取交易状态失败: {str(e)}")
+            return False
+
     async def _confirm_with_transaction_status(self, tx_hash: str) -> bool:
         """使用交易状态确认交易"""
         try:
             response = await self.client.get_transaction(
                 tx_hash,
-                commitment="finalized"
+                commitment=Commitment("finalized")
             )
             
             if response and isinstance(response, dict):
@@ -836,7 +869,7 @@ class SolanaTransferService(BaseTransferService):
             return {}
 
     async def _save_transaction(self, wallet_address: str, to_address: str, amount: Decimal,
-                              token_address: str, tx_hash: str, tx_info: Dict[str, Any]) -> None:
+                              token_address: Optional[str], tx_hash: str, tx_info: Dict[str, Any]) -> None:
         """保存交易记录"""
         try:
             wallet = await Wallet.objects.aget(address=wallet_address, chain='SOL', is_active=True)
@@ -860,4 +893,4 @@ class SolanaTransferService(BaseTransferService):
                 block_timestamp=timezone.now()
             )
         except Exception as e:
-            logger.error(f"保存交易记录失败: {str(e)}") 
+            logger.error(f"保存交易记录失败: {str(e)}")

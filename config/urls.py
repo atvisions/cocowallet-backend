@@ -21,6 +21,8 @@ from django.conf import settings
 from django.conf.urls.static import static
 
 urlpatterns = [
+    path('jet/', include('jet.urls', 'jet')),  # Django Jet URLS
+    path('jet/dashboard/', include('jet.dashboard.urls', 'jet-dashboard')),  # Django Jet dashboard URLS
     path('admin/', admin.site.urls),
     path('api/v1/', include('wallet.urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

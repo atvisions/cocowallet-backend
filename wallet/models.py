@@ -23,26 +23,6 @@ def decrypt_string(encrypted_text: str, key: str) -> str:
         logger.error(f"解密字符串失败: {str(e)}")
         raise ValueError("解密失败")
 
-class TokenIndex(models.Model):
-    """代币索引模型"""
-    coin_id = models.CharField(verbose_name='代币ID', max_length=100, unique=True)
-    name = models.CharField(verbose_name='名称', max_length=100)
-    symbol = models.CharField(verbose_name='符号', max_length=20)
-    rank = models.IntegerField(verbose_name='排名', default=0)
-    is_new = models.BooleanField(verbose_name='是否新增', default=False)
-    is_active = models.BooleanField(verbose_name='是否激活', default=True)
-    type = models.CharField(verbose_name='类型', max_length=20, default='token')
-    is_token_synced = models.BooleanField(verbose_name='代币已同步', default=False, help_text='代币详细信息是否已同步')
-    updated_at = models.DateTimeField(verbose_name='更新时间', auto_now=True)
-    
-    class Meta:
-        verbose_name = '代币索引'
-        verbose_name_plural = '代币索引'
-        ordering = ['rank']
-        
-    def __str__(self):
-        return f"{self.name} ({self.symbol})"
-
 class Wallet(models.Model):
     """钱包模型"""
     CHAIN_CHOICES = [(key, value['name']) for key, value in settings.SUPPORTED_CHAINS.items()]
@@ -343,3 +323,100 @@ class PaymentPassword(models.Model):
         except Exception as e:
             logger.error(f"验证支付密码失败: {str(e)}")
             return False
+
+class TokenIndex(models.Model):
+    """代币索引模型,只存储基本信息"""
+    chain = models.CharField(max_length=10, verbose_name='链')
+    address = models.CharField(max_length=255, verbose_name='合约地址')
+    name = models.CharField(max_length=255, verbose_name='名称')
+    symbol = models.CharField(max_length=50, verbose_name='符号')
+    decimals = models.IntegerField(default=18, verbose_name='小数位数')
+    is_native = models.BooleanField(default=False, verbose_name='是否原生代币')
+    is_verified = models.BooleanField(default=False, verbose_name='是否已验证')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        verbose_name = '代币索引'
+        verbose_name_plural = '代币索引'
+        unique_together = ('chain', 'address')
+        indexes = [
+            models.Index(fields=['chain', 'address']),
+            models.Index(fields=['symbol']),
+            models.Index(fields=['name']),
+        ]
+
+    def __str__(self):
+        return f"{self.chain} - {self.symbol} ({self.address})"
+
+class TokenIndexSource(models.Model):
+    """代币数据源记录"""
+    name = models.CharField(max_length=50, verbose_name='数据源名称')
+    priority = models.IntegerField(verbose_name='优先级')
+    last_sync = models.DateTimeField(auto_now=True, verbose_name='最后同步时间')
+    is_active = models.BooleanField(default=True, verbose_name='是否启用')
+    
+    class Meta:
+        verbose_name = '代币数据源'
+        verbose_name_plural = '代币数据源'
+        ordering = ['priority']
+        
+    def __str__(self):
+        return f"{self.name} (优先级: {self.priority})"
+
+class TokenIndexMetrics(models.Model):
+    """代币指标数据"""
+    token = models.OneToOneField(TokenIndex, on_delete=models.CASCADE, related_name='metrics', verbose_name='代币')
+    daily_volume = models.DecimalField(max_digits=30, decimal_places=18, default=Decimal('0'), verbose_name='24h交易量(USD)')
+    holder_count = models.IntegerField(default=0, verbose_name='持有人数')
+    liquidity = models.DecimalField(max_digits=30, decimal_places=18, default=Decimal('0'), verbose_name='流动性(USD)')
+    market_cap = models.DecimalField(max_digits=30, decimal_places=18, default=Decimal('0'), verbose_name='市值(USD)')
+    price = models.DecimalField(max_digits=30, decimal_places=18, default=Decimal('0'), verbose_name='价格(USD)')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+    
+    class Meta:
+        verbose_name = '代币指标'
+        verbose_name_plural = '代币指标'
+        
+    def __str__(self):
+        return f"{self.token.symbol} 指标"
+
+class TokenIndexGrade(models.Model):
+    """代币等级评估"""
+    GRADE_CHOICES = [
+        ('A', 'A级 - 核心代币'),
+        ('B', 'B级 - 常规代币'),
+        ('C', 'C级 - 观察代币'),
+    ]
+    
+    token = models.OneToOneField(TokenIndex, on_delete=models.CASCADE, related_name='grade', verbose_name='代币')
+    grade = models.CharField(max_length=1, choices=GRADE_CHOICES, verbose_name='等级')
+    score = models.IntegerField(default=0, verbose_name='综合评分')
+    last_evaluated = models.DateTimeField(auto_now=True, verbose_name='最后评估时间')
+    evaluation_reason = models.TextField(null=True, blank=True, verbose_name='评估原因')
+    
+    class Meta:
+        verbose_name = '代币等级'
+        verbose_name_plural = '代币等级'
+        
+    def __str__(self):
+        return f"{self.token.symbol} ({self.grade}级)"
+
+class TokenIndexReport(models.Model):
+    """索引库状态报告"""
+    total_tokens = models.IntegerField(verbose_name='代币总数')
+    grade_a_count = models.IntegerField(verbose_name='A级代币数')
+    grade_b_count = models.IntegerField(verbose_name='B级代币数')
+    grade_c_count = models.IntegerField(verbose_name='C级代币数')
+    new_tokens = models.IntegerField(verbose_name='新增代币数')
+    removed_tokens = models.IntegerField(verbose_name='移除代币数')
+    report_date = models.DateTimeField(auto_now_add=True, verbose_name='报告时间')
+    details = models.JSONField(default=dict, verbose_name='详细信息')
+    
+    class Meta:
+        verbose_name = '索引库报告'
+        verbose_name_plural = '索引库报告'
+        ordering = ['-report_date']
+        
+    def __str__(self):
+        return f"代币索引报告 ({self.report_date.strftime('%Y-%m-%d %H:%M')})"

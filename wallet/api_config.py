@@ -21,38 +21,28 @@ class Environment(str, Enum):
 class RPCConfig:
     """RPC 节点配置"""
     
-    # EVM 链 RPC 节点
-    ETH_RPC_URL: str = os.getenv('ETH_RPC_URL', 'https://eth-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
-    BSC_RPC_URL: str = os.getenv('BSC_RPC_URL', 'https://bsc-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
-    POLYGON_RPC_URL: str = os.getenv('POLYGON_RPC_URL', 'https://polygon-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
-    AVAX_RPC_URL: str = os.getenv('AVAX_RPC_URL', 'https://avalanche-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
-    ARBITRUM_RPC_URL: str = os.getenv('ARBITRUM_RPC_URL', 'https://arb-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
-    OPTIMISM_RPC_URL: str = os.getenv('OPTIMISM_RPC_URL', 'https://opt-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
-    BASE_RPC_URL: str = os.getenv('BASE_RPC_URL', 'https://base-mainnet.g.alchemy.com/v2/4IbTHF9NVzEGTHGZjKZNwjF5J9nhlmH7')
+    # API密钥配置
+    ALCHEMY_API_KEY: str = os.getenv('ALCHEMY_API_KEY', '')
+    QUICKNODE_API_KEY: str = os.getenv('QUICKNODE_API_KEY', '')
     
-    # Solana RPC 节点
-    SOLANA_MAINNET_RPC_URL: str = os.getenv('SOLANA_MAINNET_RPC_URL', 'https://api.mainnet-beta.solana.com')
+    # EVM 链 RPC 节点
+    ETH_RPC_URL: str = os.getenv('ETH_RPC_URL', f'https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
+    BSC_RPC_URL: str = os.getenv('BSC_RPC_URL', f'https://bsc-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
+    POLYGON_RPC_URL: str = os.getenv('POLYGON_RPC_URL', f'https://polygon-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
+    AVAX_RPC_URL: str = os.getenv('AVAX_RPC_URL', f'https://avalanche-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
+    ARBITRUM_RPC_URL: str = os.getenv('ARBITRUM_RPC_URL', f'https://arb-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
+    OPTIMISM_RPC_URL: str = os.getenv('OPTIMISM_RPC_URL', f'https://opt-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
+    BASE_RPC_URL: str = os.getenv('BASE_RPC_URL', f'https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
+    
+    # Solana RPC 节点配置
+    SOLANA_MAINNET_RPC_URL: str = os.getenv('SOLANA_MAINNET_RPC_URL', 
+        # 主要RPC节点
+        f'https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}' if ALCHEMY_API_KEY else 
+        # 公共RPC节点
+        'https://api.mainnet-beta.solana.com'
+    )
     SOLANA_TESTNET_RPC_URL: str = os.getenv('SOLANA_TESTNET_RPC_URL', 'https://api.testnet.solana.com')
     SOLANA_DEVNET_RPC_URL: str = os.getenv('SOLANA_DEVNET_RPC_URL', 'https://api.devnet.solana.com')
-    
-    # Solana 备用节点
-    @property
-    def SOLANA_BACKUP_NODES(self) -> List[str]:
-        """获取 Solana 备用节点列表"""
-        return [
-            'https://api.mainnet-beta.solana.com',
-            'https://solana.public-rpc.com',
-            'https://rpc.ankr.com/solana',
-            'https://solana-api.projectserum.com',
-            'https://solana.getblock.io/mainnet',
-            'https://mainnet.rpcpool.com',
-            'https://free.rpcpool.com',
-            'https://solana.api.chainstack.com/mainnet',
-            'https://solana-mainnet.rpc.extrnode.com',
-            'https://solana.api.onfinality.io/public',
-            'https://solana.publicnode.com',
-            'https://solana-mainnet.g.alchemy.com/v2/demo'
-        ]
     
     # RPC 节点映射
     @classmethod
@@ -69,8 +59,7 @@ class RPCConfig:
             'SOL': {
                 'mainnet': cls.SOLANA_MAINNET_RPC_URL,
                 'testnet': cls.SOLANA_TESTNET_RPC_URL,
-                'devnet': cls.SOLANA_DEVNET_RPC_URL,
-                'backup': cls.SOLANA_BACKUP_NODES
+                'devnet': cls.SOLANA_DEVNET_RPC_URL
             }
         }
 

@@ -21,7 +21,8 @@ ALLOWED_HOSTS = []
 
 # Application definition
 INSTALLED_APPS = [
-    'simpleui',  # 必须在 django.contrib.admin 之前
+    'jet.dashboard',  # 必须在 jet 之前
+    'jet',  # 必须在 django.contrib.admin 之前
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -47,7 +48,9 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [
+            os.path.join(BASE_DIR, 'wallet/templates'),
+        ],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -107,65 +110,65 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# SimpleUI 配置
-SIMPLEUI_CONFIG = {
-    'system_keep': False,
-    'menu_display': ['钱包管理', '代币管理', 'NFT管理', '交易记录', '认证和授权'],
-    'dynamic': True,
-    'menus': [{
-        'name': '钱包管理',
-        'icon': 'fas fa-wallet',
-        'models': [{
-            'name': '钱包',
-            'icon': 'fas fa-wallet',
-            'url': 'wallet/wallet/'
-        }, {
-            'name': '助记词备份',
-            'icon': 'fas fa-key',
-            'url': 'wallet/mnemonicbackup/'
-        }, {
-            'name': '支付密码',
-            'icon': 'fas fa-lock',
-            'url': 'wallet/paymentpassword/'
-        }]
-    }, {
-        'name': '代币管理',
-        'icon': 'fas fa-coins',
-        'models': [{
-            'name': '代币',
-            'icon': 'fas fa-coin',
-            'url': 'wallet/token/'
-        }, {
-            'name': '代币索引',
-            'icon': 'fas fa-list',
-            'url': 'wallet/tokenindex/'
-        }]
-    }, {
-        'name': 'NFT管理',
-        'icon': 'fas fa-images',
-        'models': [{
-            'name': 'NFT合集',
-            'icon': 'fas fa-image',
-            'url': 'wallet/nftcollection/'
-        }]
-    }, {
-        'name': '交易记录',
-        'icon': 'fas fa-exchange-alt',
-        'models': [{
-            'name': '交易',
-            'icon': 'fas fa-exchange-alt',
-            'url': 'wallet/transaction/'
-        }]
-    }]
-}
+# Django Jet 配置
+JET_DEFAULT_THEME = 'light-blue'
+JET_THEMES = [
+    {
+        'theme': 'default',
+        'color': '#47bac1',
+        'title': '默认'
+    },
+    {
+        'theme': 'green',
+        'color': '#44b78b',
+        'title': '绿色'
+    },
+    {
+        'theme': 'light-green',
+        'color': '#2faa60',
+        'title': '浅绿色'
+    },
+    {
+        'theme': 'light-violet',
+        'color': '#a464c4',
+        'title': '浅紫色'
+    },
+    {
+        'theme': 'light-blue',
+        'color': '#5EADDE',
+        'title': '浅蓝色'
+    },
+    {
+        'theme': 'light-gray',
+        'color': '#222',
+        'title': '浅灰色'
+    }
+]
+JET_SIDE_MENU_COMPACT = True  # 紧凑的侧边栏
+JET_CHANGE_FORM_SIBLING_LINKS = True  # 显示上一个/下一个链接
 
-# SimpleUI 设置
-SIMPLEUI_DEFAULT_THEME = 'element'  # 使用 Element UI 主题
-SIMPLEUI_HOME_TITLE = 'Coco Wallet 管理后台'  # 首页标题
-SIMPLEUI_LOGO = 'https://example.com/path/to/your/logo.png'  # 替换成您的 logo URL
-SIMPLEUI_HOME_INFO = False  # 关闭首页的快捷导航
-SIMPLEUI_ANALYSIS = False  # 关闭使用分析
-SIMPLEUI_STATIC_OFFLINE = True  # 使用离线模式
+# Jet 菜单配置
+JET_SIDE_MENU_ITEMS = [
+    {'label': '认证和授权', 'items': [
+        {'name': 'auth.user'},
+        {'name': 'auth.group'},
+    ]},
+    {'label': '钱包管理', 'items': [
+        {'name': 'wallet.wallet'},
+        {'name': 'wallet.mnemonicbackup'},
+        {'name': 'wallet.paymentpassword'},
+    ]},
+    {'label': '代币管理', 'items': [
+        {'name': 'wallet.tokenindex'},
+        {'name': 'wallet.token'},
+    ]},
+    {'label': 'NFT管理', 'items': [
+        {'name': 'wallet.nftcollection'},
+    ]},
+    {'label': '交易记录', 'items': [
+        {'name': 'wallet.transaction'},
+    ]},
+]
 
 # 登录界面配置
 SIMPLEUI_LOGIN_TITLE = 'Coco Wallet 管理后台'  # 登录页标题

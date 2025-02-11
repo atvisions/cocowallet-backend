@@ -1,0 +1,11 @@
+{% extends "admin/change_list.html" %}
+{% load i18n admin_urls %}
+
+{% block object-tools-items %}
+  <li>
+    <a href="{% url 'admin:tokenindex_sync' %}" class="sync-button">
+      同步代币索引
+    </a>
+  </li>
+  {{ block.super }}
+{% endblock %} 

@@ -94,104 +94,148 @@ class SolanaTokenInfoService(BaseTokenInfoService):
 
     async def get_token_metadata(self, token_address: str) -> Dict:
         """获取代币元数据"""
-        async with aiohttp.ClientSession(timeout=self.timeout) as session:
-            try:
-                # 从 Moralis API 获取最新数据
-                url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/metadata"
-                metadata = await self._fetch_with_retry(session, url)
+        try:
+            # 首先从数据库获取代币信息
+            token = await sync_to_async(Token.objects.filter(
+                chain='SOL',
+                address=token_address
+            ).first)()
+            
+            # 初始化基础数据结构
+            token_data = {
+                'name': 'Unknown Token',
+                'symbol': 'Unknown',
+                'decimals': 0,
+                'logo': '',
+                'description': '',
+                'website': '',
+                'twitter': '',
+                'telegram': '',
+                'discord': '',
+                'github': '',
+                'medium': '',
+                'coingecko_id': '',
+                'total_supply': '0',
+                'total_supply_formatted': '0',
+                'security_score': 0,
+                'verified': False,
+                'possible_spam': False,
+                'is_native': token_address == 'So11111111111111111111111111111111111111112',
+                'price_usd': '0',
+                'price_change_24h': '0',
+                'from_cache': True
+            }
+            
+            # 如果数据库中有数据，使用数据库中的数据
+            if token:
+                token_data.update({
+                    'name': token.name,
+                    'symbol': token.symbol,
+                    'decimals': token.decimals,
+                    'logo': token.logo or '',
+                    'description': token.description or '',
+                    'website': token.website or '',
+                    'twitter': token.twitter or '',
+                    'telegram': token.telegram or '',
+                    'discord': token.discord or '',
+                    'github': token.github or '',
+                    'medium': token.medium or '',
+                    'coingecko_id': token.coingecko_id or '',
+                    'total_supply': token.total_supply or '0',
+                    'total_supply_formatted': token.total_supply_formatted or '0',
+                    'security_score': token.security_score or 0,
+                    'verified': token.verified,
+                    'possible_spam': token.possible_spam,
+                    'is_native': token.is_native,
+                    'price_usd': token.last_price or '0',
+                    'price_change_24h': token.last_price_change or '0'
+                })
+            
+            # 从 Moralis API 获取最新的价格和供应量信息
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                # 获取元数据
+                metadata_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/metadata"
+                metadata = await self._fetch_with_retry(session, metadata_url)
                 logger.debug(f"Moralis API 返回的元数据: {metadata}")
                 
                 if metadata:
+                    # 只更新必要的字段，保留原有的社交媒体信息
+                    update_fields = {
+                        'name': metadata.get('name', token_data['name']),
+                        'symbol': metadata.get('symbol', token_data['symbol']),
+                        'decimals': int(metadata.get('decimals', token_data['decimals'])),
+                        'logo': metadata.get('logo', token_data['logo']),
+                        'total_supply': metadata.get('totalSupply', token_data['total_supply']),
+                        'total_supply_formatted': metadata.get('totalSupplyFormatted', token_data['total_supply_formatted']),
+                        'verified': bool(metadata.get('metaplex', {}).get('primarySaleHappened', token_data['verified'])),
+                    }
+                    token_data.update(update_fields)
+                    
+                    # 保存 metaplex 数据
+                    metaplex_data = metadata.get('metaplex', {})
+                    
                     # 获取价格信息
                     price_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/price"
                     price_data = await self._fetch_with_retry(session, price_url)
                     logger.debug(f"从API获取的价格数据: {price_data}")
                     
-                    price_usd = '0'
-                    price_change = '0'
                     if price_data and isinstance(price_data, dict):
                         try:
                             usd_price = price_data.get('usdPrice')
                             price_change_24h = price_data.get('usdPrice24hrPercentChange')
                             
-                            logger.debug(f"原始价格数据 - usdPrice: {usd_price}, price_change_24h: {price_change_24h}")
-                            
                             if usd_price is not None:
-                                price_usd = str(usd_price)
+                                token_data['price_usd'] = str(usd_price)
                             if price_change_24h is not None:
-                                price_change = str(price_change_24h)
+                                token_data['price_change_24h'] = str(price_change_24h)
                             
-                            logger.debug(f"处理后的价格数据 - price_usd: {price_usd}, price_change: {price_change}")
+                            logger.debug(f"处理后的价格数据 - price_usd: {token_data['price_usd']}, price_change: {token_data['price_change_24h']}")
                         except Exception as e:
                             logger.error(f"处理价格数据时出错: {str(e)}")
-                    else:
-                        logger.warning(f"无法获取价格数据或数据格式不正确: {price_data}")
                     
-                    # 从 links 中提取社交媒体链接
-                    links = metadata.get('links', {})
-                    
-                    token_data = {
-                        'name': metadata.get('name', 'Unknown Token'),
-                        'symbol': metadata.get('symbol', 'Unknown'),
-                        'decimals': int(metadata.get('decimals', 0)),
-                        'logo': metadata.get('logo', ''),
-                        'description': metadata.get('description') or '',
-                        'website': links.get('website', ''),
-                        'twitter': links.get('twitter', ''),
-                        'telegram': links.get('telegram', ''),
-                        'discord': links.get('discord', ''),
-                        'github': links.get('github', ''),
-                        'medium': links.get('medium', ''),
-                        'coingecko_id': '',  # Moralis API 不返回此字段
-                        'total_supply': metadata.get('totalSupply', '0'),
-                        'total_supply_formatted': metadata.get('totalSupplyFormatted', '0'),
-                        'security_score': 0,  # Moralis API 不返回此字段
-                        'verified': bool(metadata.get('metaplex', {}).get('primarySaleHappened', False)),
-                        'possible_spam': False,  # Moralis API 不返回此字段
-                        'is_native': token_address == 'So11111111111111111111111111111111111111112',
-                        'price_usd': price_usd,
-                        'price_change_24h': price_change,
-                        'from_cache': False
-                    }
-
                     # 更新数据库
+                    defaults = {
+                        'name': token_data['name'],
+                        'symbol': token_data['symbol'],
+                        'decimals': token_data['decimals'],
+                        'logo': token_data['logo'],
+                        'type': 'token',
+                        'contract_type': metadata.get('standard', 'SPL'),
+                        'total_supply': token_data['total_supply'],
+                        'total_supply_formatted': token_data['total_supply_formatted'],
+                        'verified': token_data['verified'],
+                        'is_native': token_data['is_native'],
+                        'last_price': token_data['price_usd'],
+                        'last_price_change': token_data['price_change_24h'],
+                        'metaplex_data': json.dumps(metaplex_data),
+                        'updated_at': timezone.now()
+                    }
+                    
+                    # 如果是新建的代币，添加社交媒体信息
+                    if not token:
+                        links = metadata.get('links', {})
+                        defaults.update({
+                            'description': metadata.get('description') or '',
+                            'website': links.get('website', ''),
+                            'twitter': links.get('twitter', ''),
+                            'telegram': links.get('telegram', ''),
+                            'discord': links.get('discord', ''),
+                            'github': links.get('github', ''),
+                            'medium': links.get('medium', '')
+                        })
+                    
+                    # 更新或创建代币记录
                     await sync_to_async(Token.objects.update_or_create)(
                         chain='SOL',
                         address=token_address,
-                        defaults={
-                            'name': token_data['name'],
-                            'symbol': token_data['symbol'],
-                            'decimals': token_data['decimals'],
-                            'logo': token_data['logo'],
-                            'type': 'token',
-                            'contract_type': metadata.get('standard', 'SPL'),
-                            'description': token_data['description'],
-                            'website': token_data['website'],
-                            'twitter': token_data['twitter'],
-                            'telegram': token_data['telegram'],
-                            'discord': token_data['discord'],
-                            'github': token_data['github'],
-                            'medium': token_data['medium'],
-                            'coingecko_id': token_data['coingecko_id'],
-                            'total_supply': token_data['total_supply'],
-                            'total_supply_formatted': token_data['total_supply_formatted'],
-                            'security_score': token_data['security_score'],
-                            'verified': token_data['verified'],
-                            'possible_spam': token_data['possible_spam'],
-                            'is_native': token_data['is_native'],
-                            'last_price': price_usd,
-                            'last_price_change': price_change,
-                            'updated_at': timezone.now()
-                        }
+                        defaults=defaults
                     )
+            
+            return token_data
 
-                    return token_data
-
-                return {}
-
-            except Exception as e:
-                logger.error(f"获取代币元数据时出错: {str(e)}")
-                return {}
+        except Exception as e:
+            logger.error(f"获取代币元数据时出错: {str(e)}")
+            return {}
 
     async def validate_token_address(self, token_address: str) -> bool:
         """验证代币地址是否有效"""

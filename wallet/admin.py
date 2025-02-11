@@ -2,41 +2,154 @@ from django.contrib import admin
 from django.utils.html import format_html
 import requests
 from django.contrib import messages
+from django.db.models import Q
+from django.db import transaction
 from .models import (
     Wallet, Token, NFTCollection, Transaction,
-    MnemonicBackup, PaymentPassword, TokenIndex
+    MnemonicBackup, PaymentPassword, TokenIndex,
+    TokenIndexSource, TokenIndexMetrics, TokenIndexGrade,
+    TokenIndexReport
 )
 import re
+from django.urls import path
+from django.http import JsonResponse
+from django.template.response import TemplateResponse
+import asyncio
+from .management.commands.sync_token_metadata import Command as SyncTokenMetadataCommand
+from django.utils.safestring import mark_safe
+from django.db import connection
+import logging
+
+logger = logging.getLogger(__name__)
+
+class DecimalsFilter(admin.SimpleListFilter):
+    """代币小数位数过滤器"""
+    title = '小数位数'
+    parameter_name = 'decimals_filter'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('non_zero', '非零小数位数'),
+            ('zero', '零小数位数'),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == 'non_zero':
+            return queryset.exclude(decimals=0)
+        elif self.value() == 'zero':
+            return queryset.filter(decimals=0)
+        return queryset
 
 @admin.register(Token)
 class TokenAdmin(admin.ModelAdmin):
     """代币管理"""
-    list_display = ('chain', 'name', 'symbol', 'address', 'decimals', 'type', 'contract_type', 'verified', 'possible_spam', 'updated_at')
-    list_filter = ('chain', 'type', 'contract_type', 'verified', 'possible_spam')
+    list_display = ('logo_img', 'name', 'symbol', 'chain', 'address', 'decimals', 'is_native', 'is_visible')
+    list_filter = (DecimalsFilter, 'chain', 'is_native', 'is_visible')
     search_fields = ('name', 'symbol', 'address')
-    readonly_fields = ('updated_at',)
-    ordering = ('-updated_at',)
-    fieldsets = (
-        ('基本信息', {
-            'fields': ('chain', 'name', 'symbol', 'address', 'decimals', 'logo', 'type', 'contract_type', 'description')
-        }),
-        ('状态信息', {
-            'fields': ('verified', 'possible_spam', 'is_native', 'security_score', 'created_at')
-        }),
-        ('链接信息', {
-            'fields': ('website', 'twitter', 'telegram', 'reddit', 'discord', 'github', 'medium')
-        }),
-        ('供应信息', {
-            'fields': ('total_supply', 'total_supply_formatted')
-        }),
-        ('缓存数据', {
-            'fields': ('last_balance', 'last_price', 'last_price_change', 'last_value', 'updated_at')
-        })
-    )
+    readonly_fields = ('created_at', 'updated_at')
+    actions = ['sync_token_metadata']
+    change_list_template = 'admin/wallet/token/change_list.html'
+
+    def get_queryset(self, request):
+        """默认只显示非零小数位数的代币"""
+        queryset = super().get_queryset(request)
+        # 如果没有指定过滤器，默认排除小数位数为0的代币
+        if 'decimals_filter' not in request.GET:
+            return queryset.exclude(decimals=0)
+        return queryset
+
+    def save_model(self, request, obj, form, change):
+        """保存模型时统一合约地址为小写"""
+        if obj.address:
+            obj.address = obj.address.lower()
+        super().save_model(request, obj, form, change)
+
+    def logo_img(self, obj):
+        if obj.logo:
+            return format_html('<img src="{}" style="width: 32px; height: 32px; border-radius: 50%;" />', obj.logo)
+        return '-'
+    logo_img.short_description = '图标'
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path('sync-metadata/', self.admin_site.admin_view(self.sync_metadata_view), name='token_sync_metadata'),
+            path('sync-metadata/status/', self.admin_site.admin_view(self.sync_metadata_status), name='token_sync_metadata_status'),
+        ]
+        return custom_urls + urls
+
+    def sync_metadata_view(self, request):
+        if request.method == 'POST':
+            try:
+                # 创建命令实例
+                command = SyncTokenMetadataCommand()
+                
+                # 在后台运行同步任务
+                async def run_sync():
+                    try:
+                        await command.handle_async()
+                    except Exception as e:
+                        logger.error(f"同步任务执行失败: {str(e)}")
+                        command.update_sync_status(status='error', progress=0, message=str(e))
+                
+                # 创建新的事件循环
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # 启动异步任务
+                future = asyncio.ensure_future(run_sync(), loop=loop)
+                
+                # 在后台线程中运行事件循环
+                import threading
+                def run_loop():
+                    loop.run_until_complete(future)
+                    loop.close()
+                
+                thread = threading.Thread(target=run_loop)
+                thread.daemon = True
+                thread.start()
+                
+                return JsonResponse({'status': 'success', 'message': '同步任务已启动'})
+            except Exception as e:
+                import traceback
+                error_msg = f"启动同步任务失败: {str(e)}\n{traceback.format_exc()}"
+                logger.error(error_msg)
+                return JsonResponse({'status': 'error', 'message': error_msg}, status=500)
+        
+        # GET 请求显示同步页面
+        context = dict(
+            self.admin_site.each_context(request),
+            title='同步代币元数据',
+        )
+        return TemplateResponse(request, 'admin/wallet/token/sync_metadata.html', context)
+
+    def sync_metadata_status(self, request):
+        try:
+            command = SyncTokenMetadataCommand()
+            status = command.get_sync_status()
+            logger.debug(f"获取同步状态: {status}")
+            return JsonResponse(status)
+        except Exception as e:
+            import traceback
+            error_msg = f"获取状态失败: {str(e)}\n{traceback.format_exc()}"
+            logger.error(error_msg)
+            return JsonResponse({'status': 'error', 'message': error_msg}, status=500)
+
+    def sync_token_metadata(self, request, queryset):
+        """同步选中代币的元数据"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            command = SyncTokenMetadataCommand()
+            loop.run_until_complete(command.handle_async())
+            self.message_user(request, '代币元数据同步完成')
+        except Exception as e:
+            self.message_user(request, f'同步失败: {str(e)}', level='error')
+    sync_token_metadata.short_description = '同步代币元数据'
 
 @admin.register(Wallet)
 class WalletAdmin(admin.ModelAdmin):
-    list_display = ['name', 'chain', 'address', 'is_active', 'is_watch_only', 'is_imported', 'created_at']
+    list_display = ['name', 'chain', 'address', 'device_id', 'is_active', 'created_at']
     list_filter = ['chain', 'is_active', 'is_watch_only', 'is_imported']
     search_fields = ['name', 'address', 'device_id']
     readonly_fields = ['created_at', 'updated_at']
@@ -51,7 +164,7 @@ class NFTCollectionAdmin(admin.ModelAdmin):
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
-    list_display = ['tx_hash', 'chain', 'tx_type', 'status', 'from_address', 'to_address', 'block_timestamp']
+    list_display = ['tx_hash', 'chain', 'tx_type', 'status', 'from_address', 'to_address', 'amount', 'block_timestamp']
     list_filter = ['chain', 'tx_type', 'status']
     search_fields = ['tx_hash', 'from_address', 'to_address']
     readonly_fields = ['created_at']
@@ -68,340 +181,165 @@ class PaymentPasswordAdmin(admin.ModelAdmin):
     search_fields = ['device_id']
     readonly_fields = ['created_at', 'updated_at']
 
-@admin.register(TokenIndex)
-class TokenIndexAdmin(admin.ModelAdmin):
-    list_display = ['coin_id', 'name', 'symbol', 'rank', 'is_new', 'is_active', 'type', 'is_token_synced', 'updated_at', 'sync_button']
-    list_filter = ['is_new', 'is_active', 'type', 'is_token_synced']
-    search_fields = ['coin_id', 'name', 'symbol']
-    ordering = ['rank']
-    readonly_fields = ['updated_at']
-    actions = ['sync_selected_tokens', 'import_token_indexes']
-
-    def sync_button(self, obj):
-        """为每行添加同步按钮"""
-        return format_html(
-            '<a class="el-button el-button--primary el-button--small" href="javascript:void(0);" onclick="syncToken(\'{}\')">更新</a>',
-            obj.coin_id
-        )
-    sync_button.short_description = '操作'
-
-    def _clean_string(self, text):
-        if not text:
-            return ''
-        # 移除表情符号和特殊字符
-        text = re.sub(r'[^\x00-\x7F]+', '', text)
-        # 移除多余的空格
-        text = ' '.join(text.split())
-        return text.strip()
-
-    def import_token_indexes(self, request, queryset):
-        base_api_url = "https://serene-sly-voice.solana-mainnet.quiknode.pro/6a79cc4a87b9f9024abafc0783211ea381c4d181/addon/748/v1/coins/"
-        
-        # 统计计数器
-        new_count = 0
-        update_count = 0
-        error_count = 0
-        
-        try:
-            page = 1
-            while True:
-                api_url = f"{base_api_url}?page={page}"
-                response = requests.get(api_url)
-                
-                if not response.ok:
-                    self.message_user(request, f"API请求失败: {response.status_code}", level=messages.ERROR)
-                    break
-                    
-                data = response.json()
-                if not data:
-                    break
-                    
-                for token in data:
-                    try:
-                        coin_id = token.get('id')
-                        if not coin_id:
-                            error_count += 1
-                            continue
-                            
-                        # 清理数据
-                        token_data = {
-                            'name': self._clean_string(token.get('name', '')),
-                            'symbol': self._clean_string(token.get('symbol', '')),
-                            'rank': token.get('rank', 0),
-                            'is_new': token.get('is_new', False),
-                            'is_active': token.get('is_active', True),
-                            'type': token.get('type', 'token'),
-                            'is_token_synced': False
-                        }
-                        
-                        # 尝试更新现有记录，如果不存在则创建新记录
-                        obj, created = TokenIndex.objects.update_or_create(
-                            coin_id=coin_id,
-                            defaults=token_data
-                        )
-                        
-                        if created:
-                            new_count += 1
-                        else:
-                            update_count += 1
-                            
-                    except Exception as e:
-                        error_count += 1
-                        print(f"处理代币 {coin_id} 时出错: {str(e)}")
-                        continue
-                
-                page += 1
-                
-            self.message_user(
-                request,
-                f"导入完成。新增: {new_count}, 更新: {update_count}, 错误: {error_count}",
-                level=messages.SUCCESS if error_count == 0 else messages.WARNING
-            )
-            
-        except Exception as e:
-            self.message_user(request, f"导入过程发生错误: {str(e)}", level=messages.ERROR)
-
-    def sync_selected_tokens(self, request, queryset):
-        """批量同步选中的代币"""
-        success_count = 0
-        failed_count = 0
-        
-        for token_index in queryset:
-            try:
-                self.sync_token_data(token_index)
-                success_count += 1
-            except Exception as e:
-                failed_count += 1
-                self.message_user(request, f"同步代币 {token_index.name} 失败: {str(e)}", level=messages.ERROR)
-        
-        self.message_user(request, f"成功同步 {success_count} 个代币，失败 {failed_count} 个")
-    sync_selected_tokens.short_description = "同步选中代币"
-
-    def sync_token_data(self, token_index):
-        """同步单个代币数据，确保数据完整性"""
-        # 原生币配置
-        native_coins = {
-            'BTC': {
-                'chain': 'BITCOIN',
-                'decimals': 8,
-                'contract': '0x0000000000000000000000000000000000000000'
-            },
-            'ETH': {
-                'chain': 'ETHEREUM',
-                'decimals': 18,
-                'contract': '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
-            },
-            'DOGE': {
-                'chain': 'DOGECOIN',
-                'decimals': 8,
-                'contract': '0xba2ae424d960c26247dd6c32edc70b295c744c43'  # DOGE的BSC合约地址
-            },
-            'SOL': {
-                'chain': 'SOLANA',
-                'decimals': 9,
-                'contract': 'So11111111111111111111111111111111111111112'
-            },
-        }
-
-        # 主接口
-        main_api_url = f"https://serene-sly-voice.solana-mainnet.quiknode.pro/6a79cc4a87b9f9024abafc0783211ea381c4d181/addon/748/v1/coins/{token_index.coin_id}"
-        # 备选接口列表
-        backup_apis = [
-            f"https://api.coingecko.com/api/v3/coins/{token_index.coin_id}",
-            f"https://pro-api.coinmarketcap.com/v2/cryptocurrency/info?symbol={token_index.symbol}"
-        ]
-
-        try:
-            # 尝试主接口
-            response = requests.get(main_api_url)
-            data = None
-            
-            if response.status_code == 200:
-                data = response.json()
-                # 检查数据是否为空或不完整
-                if not data or not data.get('contracts', []):
-                    # 如果主接口数据为空，尝试备选接口
-                    for backup_api in backup_apis:
-                        try:
-                            backup_response = requests.get(backup_api)
-                            if backup_response.status_code == 200:
-                                backup_data = backup_response.json()
-                                if backup_data:
-                                    # 将备选接口数据转换为标准格式
-                                    data = self._convert_backup_data(backup_data, token_index)
-                                    if data and data.get('contracts'):
-                                        break
-                        except Exception as e:
-                            print(f"备选接口请求失败: {str(e)}")
-                            continue
-
-            if not data:
-                raise Exception("所有接口都未返回有效数据")
-
-            # 基础数据验证
-            if not all(field in data for field in ['name', 'symbol', 'type']):
-                raise Exception("基础数据不完整")
-            
-            # 构建基础数据
-            base_token_data = {
-                'name': data['name'],
-                'symbol': data['symbol'],
-                'type': data['type'],
-                'description': data.get('description', ''),
-                'logo': data.get('logo', ''),
-                'rank': data.get('rank', 0),
-                'is_new': data.get('is_new', False),
-                'is_active': data.get('is_active', True),
-                'open_source': data.get('open_source', False),
-                'hardware_wallet': data.get('hardware_wallet', False),
-                'development_status': data.get('development_status'),
-                'proof_type': data.get('proof_type'),
-                'org_structure': data.get('org_structure'),
-                'hash_algorithm': data.get('hash_algorithm'),
-                'tags': data.get('tags', []),
-                'team': data.get('team', []),
-                'links_extended': data.get('links_extended', []),
-                'website': data.get('links', {}).get('website', [None])[0],
-                'explorer': data.get('links', {}).get('explorer', []),
-                'reddit': data.get('links', {}).get('reddit', []),
-                'source_code': data.get('links', {}).get('source_code', []),
-                'technical_doc': data.get('links', {}).get('technical_doc', [None])[0],
-                'twitter': next((link['url'] for link in data.get('links_extended', []) if link.get('type') == 'twitter'), None),
-                'telegram': next((link['url'] for link in data.get('links_extended', []) if link.get('type') == 'telegram'), None),
-                'whitepaper_link': data.get('whitepaper', {}).get('link'),
-                'whitepaper_thumbnail': data.get('whitepaper', {}).get('thumbnail'),
-                'first_data_at': data.get('first_data_at'),
-                'last_data_at': data.get('last_data_at'),
-                'coin_id': token_index.coin_id,
-            }
-
-            success = False
-            
-            # 首先删除该代币的所有旧记录
-            Token.objects.filter(coin_id=token_index.coin_id).delete()
-
-            # 检查是否是原生币
-            symbol = data['symbol'].upper()
-            if symbol in native_coins:
-                # 使用预定义的原生币配置
-                coin_config = native_coins[symbol]
-                token_data = {
-                    **base_token_data,
-                    'chain': coin_config['chain'],
-                    'address': coin_config['contract'],
-                    'decimals': coin_config['decimals']
-                }
-                Token.objects.create(**token_data)
-                success = True
-            else:
-                # 处理合约数据
-                contracts = data.get('contracts', [])
-                if contracts:
-                    for contract in contracts:
-                        if not contract.get('contract') or not contract.get('platform'):
-                            continue
-                        
-                        platform = contract['platform'].split('-')[0].upper()
-                        chain_mapping = {
-                            'ETH': 'ETHEREUM',
-                            'BSC': 'BSC',
-                            'POLYGON': 'POLYGON',
-                            'SOLANA': 'SOLANA',
-                            'AVALANCHE': 'AVALANCHE',
-                            'FANTOM': 'FANTOM',
-                            'TRON': 'TRON',
-                            'NEAR': 'NEAR',
-                        }
-                        
-                        chain = chain_mapping.get(platform, platform)
-                        token_data = {
-                            **base_token_data,
-                            'chain': chain,
-                            'address': contract['contract'],
-                            'decimals': contract.get('decimals', 18)
-                        }
-                        Token.objects.create(**token_data)
-                        success = True
-            
-            if not success:
-                raise Exception("没有找到有效的合约信息")
-
-            # 更新同步状态
-            token_index.is_token_synced = True
-            token_index.save()
-            
-        except Exception as e:
-            token_index.is_token_synced = False
-            token_index.save()
-            raise e
-
-    def _convert_backup_data(self, backup_data, token_index):
-        """将备选接口的数据转换为标准格式"""
-        # 处理CoinGecko数据格式
-        if 'platforms' in backup_data:
-            contracts = []
-            for platform, address in backup_data['platforms'].items():
-                if address:
-                    contracts.append({
-                        'platform': platform,
-                        'contract': address,
-                        'decimals': 18
-                    })
-            
-            return {
-                'name': backup_data.get('name', token_index.name),
-                'symbol': backup_data.get('symbol', token_index.symbol).upper(),
-                'type': 'token',
-                'contracts': contracts,
-                'description': backup_data.get('description', {}).get('en', ''),
-                'logo': backup_data.get('image', {}).get('large', ''),
-                'rank': backup_data.get('market_cap_rank', 0),
-                'is_active': True
-            }
-            
-        # 处理CoinMarketCap数据格式
-        elif 'data' in backup_data:
-            token_data = next(iter(backup_data['data'].values()))
-            contracts = []
-            for platform in token_data.get('platform', []):
-                if platform.get('token_address'):
-                    contracts.append({
-                        'platform': platform['name'],
-                        'contract': platform['token_address'],
-                        'decimals': platform.get('decimals', 18)
-                    })
-            
-            return {
-                'name': token_data.get('name', token_index.name),
-                'symbol': token_data.get('symbol', token_index.symbol).upper(),
-                'type': 'token',
-                'contracts': contracts,
-                'description': token_data.get('description', ''),
-                'logo': token_data.get('logo', ''),
-                'rank': token_data.get('cmc_rank', 0),
-                'is_active': True
-            }
-            
-        return None
-
-    class Media:
-        js = ('admin/js/token_sync.js',)
-
     def get_fieldsets(self, request, obj=None):
         return [
             ('基本信息', {
                 'fields': [
-                    'coin_id', 'name', 'symbol', 'rank'
-                ]
-            }),
-            ('状态', {
-                'fields': [
-                    'is_new', 'is_active', 'type', 'is_token_synced'
-                ]
-            }),
-            ('时间信息', {
-                'fields': [
-                    'updated_at'
+                    'device_id', 'created_at', 'updated_at'
                 ]
             })
         ]
+
+@admin.register(TokenIndex)
+class TokenIndexAdmin(admin.ModelAdmin):
+    """代币索引管理"""
+    list_display = ('name', 'symbol', 'chain', 'address', 'decimals', 'is_native', 'is_verified', 'get_grade', 'get_metrics')
+    list_filter = ('chain', 'is_native', 'is_verified', 'grade__grade')
+    search_fields = ('name', 'symbol', 'address')
+    readonly_fields = ('created_at', 'updated_at', 'get_grade', 'get_metrics')
+    change_list_template = 'admin/wallet/tokenindex/change_list.html'
+    actions = ['sync_selected_tokens']
+
+    def get_grade(self, obj):
+        """获取代币等级"""
+        try:
+            return obj.grade.get_grade_display()
+        except:
+            return '-'
+    get_grade.short_description = '等级'
+
+    def get_metrics(self, obj):
+        """获取代币指标"""
+        try:
+            metrics = obj.metrics
+            return format_html(
+                '持有人: {}<br>'
+                '日交易量: ${:,.2f}<br>'
+                '流动性: ${:,.2f}<br>'
+                '价格: ${:,.6f}',
+                metrics.holder_count,
+                float(metrics.daily_volume),
+                float(metrics.liquidity),
+                float(metrics.price)
+            )
+        except:
+            return '-'
+    get_metrics.short_description = '指标'
+    
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path('sync/', self.admin_site.admin_view(self.sync_view), name='tokenindex_sync'),
+            path('sync/status/', self.admin_site.admin_view(self.sync_status), name='tokenindex_sync_status'),
+        ]
+        return custom_urls + urls
+
+    def sync_view(self, request):
+        if request.method == 'POST':
+            try:
+                from .management.commands.sync_token_index import Command
+                command = Command()
+                
+                # 在后台运行同步任务
+                async def run_sync():
+                    try:
+                        await command.handle_async()
+                    except Exception as e:
+                        logger.error(f"同步任务执行失败: {str(e)}")
+                        command.update_sync_status(status='error', progress=0, message=str(e))
+                
+                # 创建新的事件循环
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # 启动异步任务
+                future = asyncio.ensure_future(run_sync(), loop=loop)
+                
+                # 在后台线程中运行事件循环
+                import threading
+                def run_loop():
+                    loop.run_until_complete(future)
+                    loop.close()
+                
+                thread = threading.Thread(target=run_loop)
+                thread.daemon = True
+                thread.start()
+                
+                return JsonResponse({'status': 'success', 'message': '同步任务已启动'})
+            except Exception as e:
+                import traceback
+                error_msg = f"启动同步任务失败: {str(e)}\n{traceback.format_exc()}"
+                logger.error(error_msg)
+                return JsonResponse({'status': 'error', 'message': error_msg}, status=500)
+        
+        # GET 请求显示同步页面
+        context = dict(
+            self.admin_site.each_context(request),
+            title='同步代币索引',
+        )
+        return TemplateResponse(request, 'admin/wallet/tokenindex/sync.html', context)
+
+    def sync_status(self, request):
+        try:
+            from .management.commands.sync_token_index import Command
+            command = Command()
+            status = command.get_sync_status()
+            return JsonResponse(status)
+        except Exception as e:
+            import traceback
+            error_msg = f"获取状态失败: {str(e)}\n{traceback.format_exc()}"
+            logger.error(error_msg)
+            return JsonResponse({'status': 'error', 'message': error_msg}, status=500)
+
+    def sync_selected_tokens(self, request, queryset):
+        """同步选中的代币"""
+        try:
+            from .management.commands.sync_token_index import Command
+            command = Command()
+            
+            # 创建新的事件循环
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # 运行同步任务
+            loop.run_until_complete(command.handle_async())
+            
+            self.message_user(request, f'成功同步 {len(queryset)} 个代币')
+        except Exception as e:
+            self.message_user(request, f'同步失败: {str(e)}', level='error')
+    sync_selected_tokens.short_description = '同步选中代币'
+
+    def save_model(self, request, obj, form, change):
+        """保存模型时统一合约地址为小写"""
+        if obj.address:
+            obj.address = obj.address.lower()
+        super().save_model(request, obj, form, change)
+
+@admin.register(TokenIndexSource)
+class TokenIndexSourceAdmin(admin.ModelAdmin):
+    """代币数据源管理"""
+    list_display = ('name', 'priority', 'last_sync', 'is_active')
+    list_editable = ('priority', 'is_active')
+    ordering = ('priority',)
+
+@admin.register(TokenIndexMetrics)
+class TokenIndexMetricsAdmin(admin.ModelAdmin):
+    """代币指标管理"""
+    list_display = ('token', 'daily_volume', 'holder_count', 'liquidity', 'market_cap', 'price', 'updated_at')
+    search_fields = ('token__symbol', 'token__name', 'token__address')
+    readonly_fields = ('updated_at',)
+
+@admin.register(TokenIndexGrade)
+class TokenIndexGradeAdmin(admin.ModelAdmin):
+    """代币等级管理"""
+    list_display = ('token', 'grade', 'score', 'last_evaluated')
+    list_filter = ('grade',)
+    search_fields = ('token__symbol', 'token__name', 'token__address')
+    readonly_fields = ('last_evaluated',)
+
+@admin.register(TokenIndexReport)
+class TokenIndexReportAdmin(admin.ModelAdmin):
+    """索引库报告管理"""
+    list_display = ('report_date', 'total_tokens', 'grade_a_count', 'grade_b_count', 'grade_c_count', 'new_tokens', 'removed_tokens')
+    readonly_fields = ('report_date', 'total_tokens', 'grade_a_count', 'grade_b_count', 'grade_c_count', 'new_tokens', 'removed_tokens', 'details')
+    ordering = ('-report_date',)

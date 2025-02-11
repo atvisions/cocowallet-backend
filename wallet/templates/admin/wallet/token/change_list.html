@@ -1,0 +1,31 @@
+{% extends "admin/change_list.html" %}
+{% load i18n admin_urls static admin_list %}
+
+{% block object-tools-items %}
+  <li>
+    <a href="{% url 'admin:token_sync_metadata' %}" class="sync-metadata-button">
+      同步代币元数据
+    </a>
+  </li>
+  {{ block.super }}
+{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<style>
+  .sync-metadata-button {
+    background: #79aec8;
+    padding: 10px 15px;
+    border-radius: 4px;
+    color: white !important;
+    font-size: 13px;
+    line-height: 15px;
+    display: inline-block;
+    margin-right: 10px;
+  }
+  .sync-metadata-button:hover {
+    background: #417690;
+    text-decoration: none;
+  }
+</style>
+{% endblock %} 
