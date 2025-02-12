@@ -86,6 +86,10 @@ class MoralisConfig:
     SOLANA_ACCOUNT_BALANCE_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/balance"  # 获取账户余额
     SOLANA_ACCOUNT_TOKENS_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/tokens"  # 获取账户代币列表
     
+    # Solana NFT 相关接口
+    SOLANA_NFT_LIST_URL: str = f"{SOLANA_URL}/account/{{0}}/{{1}}/nft"  # 获取地址的NFTs，参数: network, address
+    SOLANA_NFT_METADATA_URL: str = f"{SOLANA_URL}/nft/{{0}}/{{1}}/metadata"  # 获取NFT元数据，参数: network, address
+    
     # Solana Swap 相关接口
     SOLANA_ACCOUNT_SWAPS_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/swaps"  # 获取账户 swap 历史
     SOLANA_SWAP_QUOTE_URL: str = f"{SOLANA_URL}/swap/mainnet/quote"  # 获取 swap 报价
@@ -99,6 +103,20 @@ class MoralisConfig:
     
     # 重试间隔(秒)
     RETRY_INTERVAL = 1
+
+class HeliusConfig:
+    """Helius API配置"""
+    API_KEY = os.getenv('HELIUS_API_KEY', '')
+    BASE_URL = f"https://mainnet.helius-rpc.com/?api-key={API_KEY}"
+    
+    # RPC 方法
+    GET_ASSET = "getAsset"  # 获取单个NFT详情
+    GET_ASSETS_BY_OWNER = "getAssetsByOwner"  # 获取钱包拥有的NFTs
+    
+    @classmethod
+    def get_rpc_url(cls):
+        """获取RPC URL"""
+        return cls.BASE_URL
 
 class APIConfig:
     """API 配置类"""

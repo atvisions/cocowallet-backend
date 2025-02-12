@@ -15,11 +15,19 @@ from django.db.models import QuerySet
 from django.utils import timezone
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Commitment
+import asyncio
+from django.core.cache import cache
+import os
+import json
 
 from ..models import Wallet, Token, Transaction
 from ..serializers import WalletSerializer
 from ..services.factory import ChainServiceFactory
-from ..api_config import RPCConfig
+from ..api_config import RPCConfig, MoralisConfig, HeliusConfig
+
+# Helius API 配置
+HELIUS_API_KEY = os.getenv('HELIUS_API_KEY', '')
+HELIUS_URL = f'https://rpc.helius.xyz/?api-key={HELIUS_API_KEY}'  # 更新为正确的端点
 
 logger = logging.getLogger(__name__)
 
@@ -716,23 +724,24 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 执行转账
             try:
-                if token_address:
-                    # SPL代币转账
-                    result = await transfer_service.transfer_token(
-                        from_address=wallet.address,
-                        to_address=to_address,
-                        token_address=token_address,
-                        amount=Decimal(amount),
-                        private_key=private_key
-                    )
-                else:
-                    # SOL原生代币转账
-                    result = await transfer_service.transfer_native(
-                        from_address=wallet.address,
-                        to_address=to_address,
-                        amount=Decimal(amount),
-                        private_key=private_key
-                    )
+                async with transfer_service:  # 使用异步上下文管理器
+                    if token_address:
+                        # SPL代币转账
+                        result = await transfer_service.transfer_token(
+                            from_address=wallet.address,
+                            to_address=to_address,
+                            token_address=token_address,
+                            amount=Decimal(amount),
+                            private_key=private_key
+                        )
+                    else:
+                        # SOL原生代币转账
+                        result = await transfer_service.transfer_native(
+                            from_address=wallet.address,
+                            to_address=to_address,
+                            amount=Decimal(amount),
+                            private_key=private_key
+                        )
                 
                 if result.get('success'):
                     return Response({
@@ -1154,3 +1163,5 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 'status': 'error',
                 'message': f'获取转账记录失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+   

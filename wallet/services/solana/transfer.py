@@ -39,6 +39,7 @@ class SolanaTransferService(BaseTransferService):
             "https://solana-api.projectserum.com"
         ]
         self.current_rpc_url = self.primary_rpc_url
+        self.rpc_url = self.current_rpc_url
         
         # 初始化 RPC 客户端
         self.client = AsyncClient(
@@ -84,16 +85,20 @@ class SolanaTransferService(BaseTransferService):
         )
         
         # 创建 aiohttp 会话
-        self.session = None
+        self._session = None
+        self._session_lock = asyncio.Lock()
         
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取或创建 aiohttp 会话"""
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(
-                timeout=self.timeout,
-                headers=self.request_headers
-            )
-        return self.session
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                connector = aiohttp.TCPConnector(ssl=False)
+                self._session = aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=self.timeout,
+                    headers=self.request_headers
+                )
+            return self._session
         
     async def _fetch_with_retry(self, method: str, *args, **kwargs) -> Any:
         """
@@ -115,13 +120,11 @@ class SolanaTransferService(BaseTransferService):
         
         # 确保参数格式正确
         if isinstance(params, (dict, list)):
-            # 如果是字典，将其包装在数组中
             if isinstance(params, dict):
                 params = [params]
         elif isinstance(params, str):
             try:
                 parsed_params = json.loads(params)
-                # 如果解析后是字典，将其包装在数组中
                 if isinstance(parsed_params, dict):
                     params = [parsed_params]
                 else:
@@ -129,24 +132,21 @@ class SolanaTransferService(BaseTransferService):
             except json.JSONDecodeError:
                 params = [params] if params else []
         else:
-            # 对于其他类型的参数，确保它们被包装在数组中
             params = [params] if params is not None else []
         
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": method,
-            "params": params  # 直接使用处理后的参数
+            "params": params
         }
-        
+
         session = await self._get_session()
-        
         for attempt in range(max_retries):
             try:
                 async with session.post(
                     self.current_rpc_url,
                     json=payload,
-                    headers=self.request_headers,
                     timeout=timeout
                 ) as response:
                     response_text = await response.text()
@@ -894,3 +894,12 @@ class SolanaTransferService(BaseTransferService):
             )
         except Exception as e:
             logger.error(f"保存交易记录失败: {str(e)}")
+
+    async def __aenter__(self):
+        """异步上下文管理器入口"""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器退出"""
+        if self._session and not self._session.closed:
+            await self._session.close()
