@@ -1089,71 +1089,76 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 获取交易记录
             transactions = []
-            async for tx in Transaction.objects.filter(query).order_by('-block_timestamp')[start:end].select_related('token'): # type: ignore
-                # 获取代币精度，如果是原生SOL则使用9位精度
-                decimals = tx.token.decimals if tx.token else 9
-                
-                # 格式化金额，考虑代币精度
-                amount = tx.amount
-                if decimals > 0:
-                    amount = amount * Decimal('1')  # 创建一个新的Decimal对象
-                
-                # 格式化gas相关的值
-                def format_gas_value(value):
-                    if value == 0:
-                        return "0"
-                    # 移除末尾的0和小数点
-                    return str(value).rstrip('0').rstrip('.')
-                
+            async for tx in Transaction.objects.filter(query).order_by('-block_timestamp')[start:end].select_related('token', 'nft_collection'): # type: ignore
                 # 判断交易方向
                 is_received = tx.to_address == wallet.address
                 
+                # 基础交易数据
                 tx_data = {
                     'tx_hash': tx.tx_hash,
                     'tx_type': tx.tx_type,
                     'status': tx.status,
                     'from_address': tx.from_address,
                     'to_address': tx.to_address,
-                    'amount': str(amount),  # 使用原始金额
+                    'amount': str(tx.amount),
                     'direction': 'RECEIVED' if is_received else 'SENT',
-                    'gas_price': format_gas_value(tx.gas_price),
-                    'gas_used': format_gas_value(tx.gas_used),
-                    'gas_fee': format_gas_value(tx.gas_price * tx.gas_used),
+                    'gas_price': str(tx.gas_price),
+                    'gas_used': str(tx.gas_used),
+                    'gas_fee': str(tx.gas_price * tx.gas_used),
                     'block_number': tx.block_number,
                     'block_timestamp': tx.block_timestamp.isoformat(),
                     'created_at': tx.created_at.isoformat()
                 }
                 
-                # 添加代币信息
-                if tx.token:
-                    tx_data['token'] = {
-                        'address': tx.token.address,
-                        'name': tx.token.name,
-                        'symbol': tx.token.symbol,
-                        'decimals': tx.token.decimals,
-                        'logo': tx.token.logo
-                    }
+                # 根据交易类型添加不同的信息
+                if tx.tx_type == 'NFT_TRANSFER':
+                    # 如果是 NFT 转账，添加 NFT 信息
+                    if tx.nft_collection:
+                        tx_data['nft'] = {
+                            'collection_name': tx.nft_collection.name,
+                            'collection_symbol': tx.nft_collection.symbol,
+                            'token_id': tx.nft_token_id,
+                            'logo': tx.nft_collection.logo or '',
+                            'is_verified': tx.nft_collection.is_verified
+                        }
+                    else:
+                        # 如果没有关联的 NFT 合集信息，至少显示 token_id
+                        tx_data['nft'] = {
+                            'token_id': tx.nft_token_id,
+                            'collection_name': 'Unknown Collection',
+                            'collection_symbol': '',
+                            'logo': '',
+                            'is_verified': False
+                        }
                 else:
-                    tx_data['token'] = {
-                        'address': 'So11111111111111111111111111111111111111112',
-                        'name': 'Solana',
-                        'symbol': 'SOL',
-                        'decimals': 9,
-                        'logo': ''
-                    }
+                    # 如果是代币转账，添加代币信息
+                    if tx.token:
+                        tx_data['token'] = {
+                            'address': tx.token.address,
+                            'name': tx.token.name,
+                            'symbol': tx.token.symbol,
+                            'decimals': tx.token.decimals,
+                            'logo': tx.token.logo or ''
+                        }
+                    else:
+                        # 如果是原生 SOL 转账
+                        tx_data['token'] = {
+                            'address': 'So11111111111111111111111111111111111111112',
+                            'name': 'Solana',
+                            'symbol': 'SOL',
+                            'decimals': 9,
+                            'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png'
+                        }
                 
                 transactions.append(tx_data)
             
             return Response({
                 'status': 'success',
                 'data': {
-                    'transactions': transactions,
-                    'pagination': {
-                        'current_page': page,
-                        'page_size': page_size,
-                        'total_count': total_count,
-                        'total_pages': (total_count + page_size - 1) // page_size
-                    }
+                    'total': total_count,
+                    'page': page,
+                    'page_size': page_size,
+                    'transactions': transactions
                 }
             })
             

@@ -105,17 +105,18 @@ class MoralisConfig:
     RETRY_INTERVAL = 1
 
 class HeliusConfig:
-    """Helius API配置"""
+    """Helius API 配置"""
     API_KEY = os.getenv('HELIUS_API_KEY', '')
-    BASE_URL = f"https://mainnet.helius-rpc.com/?api-key={API_KEY}"
-    
+    BASE_URL = f"https://rpc.helius.xyz/?api-key={API_KEY}"
+
+    # RPC 方法
+    GET_ASSETS_BY_OWNER = "getAssetsByOwner"  # 获取用户的所有资产
+    GET_TOKEN_ACCOUNTS = "getTokenAccounts"  # 获取代币账户
     # RPC 方法
     GET_ASSET = "getAsset"  # 获取单个NFT详情
-    GET_ASSETS_BY_OWNER = "getAssetsByOwner"  # 获取钱包拥有的NFTs
-    
     @classmethod
-    def get_rpc_url(cls):
-        """获取RPC URL"""
+    def get_rpc_url(cls) -> str:
+        """获取 RPC URL"""
         return cls.BASE_URL
 
 class APIConfig:

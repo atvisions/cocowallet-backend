@@ -10,10 +10,15 @@ from rest_framework.parsers import JSONParser
 from rest_framework.authentication import SessionAuthentication, BasicAuthentication
 import aiohttp
 from typing import Optional
+from rest_framework.views import APIView
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
 from ..models import Wallet
 from ..serializers import WalletSerializer
 from ..api_config import HeliusConfig
+from ..services.factory import ChainServiceFactory
+from ..exceptions import InvalidAddressError, TransferError
 
 logger = logging.getLogger(__name__)
 
@@ -478,4 +483,203 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @swagger_auto_schema(
+        operation_summary="转移 NFT",
+        operation_description="将 NFT 从一个地址转移到另一个地址",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['to_address', 'nft_address', 'payment_password'],
+            properties={
+                'to_address': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='接收方地址'
+                ),
+                'nft_address': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='NFT 地址'
+                ),
+                'payment_password': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='支付密码'
+                )
+            }
+        ),
+        responses={
+            200: "转账成功",
+            400: "参数错误",
+            401: "未授权",
+            500: "服务器错误"
+        }
+    )
+    @action(detail=False, methods=['post'], url_path=r'transfer/(?P<wallet_id>[^/.]+)')
+    @async_to_sync_api
+    async def transfer_nft(self, request, wallet_id=None):
+        """处理 NFT 转账请求"""
+        try:
+            # 验证设备ID
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 获取钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持SOL链钱包'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取请求参数
+            to_address = request.data.get('to_address')
+            nft_address = request.data.get('nft_address')
+            payment_password = request.data.get('payment_password')
+            
+            # 参数验证
+            if not to_address or not nft_address or not payment_password:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取 NFT 服务
+            nft_service = ChainServiceFactory.get_nft_service(wallet.chain)
+            if not nft_service:
+                return Response({
+                    'status': 'error',
+                    'message': f'不支持的链: {wallet.chain}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 设置支付密码
+            wallet.payment_password = payment_password
+            
+            # 执行转账
+            result = await nft_service.transfer_nft(
+                from_address=wallet.address,
+                to_address=to_address,
+                nft_address=nft_address,
+                private_key=wallet.decrypt_private_key()
+            )
+            
+            return Response({
+                'status': 'success',
+                'data': result
+            })
+            
+        except Wallet.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': '钱包不存在'
+            }, status=status.HTTP_404_NOT_FOUND)
+        except InvalidAddressError as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except TransferError as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"NFT 转账失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class NFTTransferView(APIView):
+    """NFT 转账视图"""
+
+    @swagger_auto_schema(
+        operation_summary="转移 NFT",
+        operation_description="将 NFT 从一个地址转移到另一个地址",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['to_address', 'nft_address', 'payment_password'],
+            properties={
+                'to_address': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='接收方地址'
+                ),
+                'nft_address': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='NFT 地址'
+                ),
+                'payment_password': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='支付密码'
+                )
+            }
+        ),
+        responses={
+            200: "转账成功",
+            400: "参数错误",
+            401: "未授权",
+            500: "服务器错误"
+        }
+    )
+    async def post(self, request, wallet_id):
+        """处理 NFT 转账请求"""
+        try:
+            # 获取钱包
+            wallet = await Wallet.objects.aget(id=wallet_id, is_active=True)
+            
+            # 获取请求参数
+            to_address = request.data.get('to_address')
+            nft_address = request.data.get('nft_address')
+            payment_password = request.data.get('payment_password')
+            
+            # 参数验证
+            if not to_address or not nft_address or not payment_password:
+                return Response(
+                    {"error": "缺少必要参数"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # 获取 NFT 服务
+            nft_service = ChainServiceFactory.get_nft_service(wallet.chain)
+            if not nft_service:
+                return Response(
+                    {"error": f"不支持的链: {wallet.chain}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # 设置支付密码
+            wallet.payment_password = payment_password
+            
+            # 执行转账
+            result = await nft_service.transfer_nft(
+                from_address=wallet.address,
+                to_address=to_address,
+                nft_address=nft_address,
+                private_key=wallet.decrypt_private_key()
+            )
+            
+            return Response(result)
+            
+        except Wallet.DoesNotExist:
+            return Response(
+                {"error": "钱包不存在"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except InvalidAddressError as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except TransferError as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            logger.error(f"NFT 转账失败: {str(e)}")
+            return Response(
+                {"error": "服务器错误"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            ) 

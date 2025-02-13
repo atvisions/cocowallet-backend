@@ -10,7 +10,7 @@ import json
 
 from ..base.token_info import BaseTokenInfoService
 from ...models import Token, Wallet, Transaction
-from ...api_config import MoralisConfig, APIConfig
+from ...api_config import MoralisConfig, APIConfig, HeliusConfig
 from datetime import timedelta, datetime
 import async_timeout
 
@@ -151,90 +151,160 @@ class SolanaTokenInfoService(BaseTokenInfoService):
                     'price_change_24h': token.last_price_change or '0'
                 })
             
-            # 从 Moralis API 获取最新的价格和供应量信息
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                # 获取元数据
-                metadata_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/metadata"
-                metadata = await self._fetch_with_retry(session, metadata_url)
-                logger.debug(f"Moralis API 返回的元数据: {metadata}")
-                
-                if metadata:
-                    # 只更新必要的字段，保留原有的社交媒体信息
-                    update_fields = {
-                        'name': metadata.get('name', token_data['name']),
-                        'symbol': metadata.get('symbol', token_data['symbol']),
-                        'decimals': int(metadata.get('decimals', token_data['decimals'])),
-                        'logo': metadata.get('logo', token_data['logo']),
-                        'total_supply': metadata.get('totalSupply', token_data['total_supply']),
-                        'total_supply_formatted': metadata.get('totalSupplyFormatted', token_data['total_supply_formatted']),
-                        'verified': bool(metadata.get('metaplex', {}).get('primarySaleHappened', token_data['verified'])),
+            # 使用 Helius API 获取最新数据
+            try:
+                async with aiohttp.ClientSession() as session:
+                    # 获取代币元数据
+                    metadata_payload = {
+                        "jsonrpc": "2.0",
+                        "id": "my-id",
+                        "method": HeliusConfig.GET_TOKEN_METADATA,
+                        "params": {
+                            "id": token_address
+                        }
                     }
-                    token_data.update(update_fields)
                     
-                    # 保存 metaplex 数据
-                    metaplex_data = metadata.get('metaplex', {})
+                    async with session.post(HeliusConfig.get_rpc_url(), json=metadata_payload) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            if 'result' in result:
+                                helius_data = result['result']
+                                
+                                # 更新代币数据
+                                if helius_data:
+                                    content = helius_data.get('content', {})
+                                    metadata = content.get('metadata', {})
+                                    token_info = helius_data.get('token_info', {})
+                                    price_info = token_info.get('price_info', {})
+                                    
+                                    # 获取图片链接
+                                    image_url = content.get('links', {}).get('image', '')
+                                    if not image_url and content.get('files'):
+                                        for file in content['files']:
+                                            if file.get('mime', '').startswith('image/'):
+                                                image_url = file.get('uri', '')
+                                                break
+                                    
+                                    # 更新代币数据
+                                    token_data.update({
+                                        'name': metadata.get('name', token_data['name']),
+                                        'symbol': metadata.get('symbol', token_data['symbol']),
+                                        'decimals': token_info.get('decimals', token_data['decimals']),
+                                        'logo': image_url or token_data['logo'],
+                                        'description': metadata.get('description', token_data['description']),
+                                        'total_supply': str(token_info.get('supply', token_data['total_supply'])),
+                                        'total_supply_formatted': str(float(token_info.get('supply', 0)) / (10 ** token_info.get('decimals', 9))),
+                                        'verified': bool(helius_data.get('authorities', [])),
+                                        'from_cache': False
+                                    })
+                                    
+                                    # 更新价格信息
+                                    if price_info:
+                                        price_usd = price_info.get('price_per_token', 0)
+                                        token_data['price_usd'] = str(price_usd)
+                                        
+                                    # 保持原有的社交媒体链接
+                                    # 因为 Helius API 目前不提供这些信息
                     
-                    # 获取价格信息
-                    price_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/price"
-                    price_data = await self._fetch_with_retry(session, price_url)
-                    logger.debug(f"从API获取的价格数据: {price_data}")
+                    # 获取价格数据
+                    price_payload = {
+                        "jsonrpc": "2.0",
+                        "id": "my-id",
+                        "method": HeliusConfig.GET_TOKEN_PRICES,
+                        "params": {
+                            "tokens": [token_address]
+                        }
+                    }
                     
-                    if price_data and isinstance(price_data, dict):
-                        try:
-                            usd_price = price_data.get('usdPrice')
-                            price_change_24h = price_data.get('usdPrice24hrPercentChange')
-                            
-                            if usd_price is not None:
-                                token_data['price_usd'] = str(usd_price)
-                            if price_change_24h is not None:
-                                token_data['price_change_24h'] = str(price_change_24h)
-                            
-                            logger.debug(f"处理后的价格数据 - price_usd: {token_data['price_usd']}, price_change: {token_data['price_change_24h']}")
-                        except Exception as e:
-                            logger.error(f"处理价格数据时出错: {str(e)}")
+                    async with session.post(HeliusConfig.get_rpc_url(), json=price_payload) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            if 'result' in result and result['result']:
+                                price_data = result['result'][0]
+                                if price_data:
+                                    token_data.update({
+                                        'price_usd': str(price_data.get('usdPrice', '0')),
+                                        'price_change_24h': str(price_data.get('usdPrice24hrPercentChange', '0'))
+                                    })
                     
                     # 更新数据库
-                    defaults = {
-                        'name': token_data['name'],
-                        'symbol': token_data['symbol'],
-                        'decimals': token_data['decimals'],
-                        'logo': token_data['logo'],
-                        'type': 'token',
-                        'contract_type': metadata.get('standard', 'SPL'),
-                        'total_supply': token_data['total_supply'],
-                        'total_supply_formatted': token_data['total_supply_formatted'],
-                        'verified': token_data['verified'],
-                        'is_native': token_data['is_native'],
-                        'last_price': token_data['price_usd'],
-                        'last_price_change': token_data['price_change_24h'],
-                        'metaplex_data': json.dumps(metaplex_data),
-                        'updated_at': timezone.now()
-                    }
-                    
-                    # 如果是新建的代币，添加社交媒体信息
-                    if not token:
-                        links = metadata.get('links', {})
-                        defaults.update({
-                            'description': metadata.get('description') or '',
-                            'website': links.get('website', ''),
-                            'twitter': links.get('twitter', ''),
-                            'telegram': links.get('telegram', ''),
-                            'discord': links.get('discord', ''),
-                            'github': links.get('github', ''),
-                            'medium': links.get('medium', '')
-                        })
-                    
-                    # 更新或创建代币记录
-                    await sync_to_async(Token.objects.update_or_create)(
-                        chain='SOL',
-                        address=token_address,
-                        defaults=defaults
-                    )
+                    if token:
+                        await sync_to_async(Token.objects.filter(id=token.id).update)(
+                            name=token_data['name'],
+                            symbol=token_data['symbol'],
+                            decimals=token_data['decimals'],
+                            logo=token_data['logo'],
+                            description=token_data['description'],
+                            verified=token_data['verified'],
+                            last_price=token_data['price_usd'],
+                            last_price_change=token_data['price_change_24h'],
+                            updated_at=timezone.now()
+                        )
+                    else:
+                        # 创建新的代币记录
+                        await sync_to_async(Token.objects.create)(
+                            chain='SOL',
+                            address=token_address,
+                            name=token_data['name'],
+                            symbol=token_data['symbol'],
+                            decimals=token_data['decimals'],
+                            logo=token_data['logo'],
+                            description=token_data['description'],
+                            verified=token_data['verified'],
+                            last_price=token_data['price_usd'],
+                            last_price_change=token_data['price_change_24h'],
+                            is_native=token_data['is_native'],
+                            type='token',
+                            contract_type='SPL'
+                        )
+                        
+            except Exception as e:
+                logger.error(f"从 Helius API 获取代币数据失败: {str(e)}")
             
             return token_data
-
+            
         except Exception as e:
-            logger.error(f"获取代币元数据时出错: {str(e)}")
+            logger.error(f"获取代币元数据失败: {str(e)}")
+            return token_data
+
+    async def get_token_supply(self, token_address: str) -> Dict:
+        """获取代币供应量信息"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": "my-id",
+                    "method": HeliusConfig.GET_TOKEN_METADATA,
+                    "params": {
+                        "id": token_address
+                    }
+                }
+                
+                async with session.post(HeliusConfig.get_rpc_url(), json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if 'result' in result:
+                            helius_data = result['result']
+                            content = helius_data.get('content', {})
+                            metadata = content.get('metadata', {})
+                            
+                            decimals = metadata.get('decimals', 0)
+                            total_supply = Decimal(metadata.get('supply', '0'))
+                            
+                            # 转换为实际数量
+                            total_supply = total_supply / Decimal(str(10 ** decimals))
+                            
+                            return {
+                                'total_supply': str(total_supply),
+                                'circulating_supply': str(total_supply),  # Helius API 目前不提供流通量信息
+                                'holder_count': 0,  # Helius API 目前不提供持有人数量信息
+                                'decimals': decimals
+                            }
+                    
+                    return {}
+                    
+        except Exception as e:
+            logger.error(f"获取代币供应量信息失败: {str(e)}")
             return {}
 
     async def validate_token_address(self, token_address: str) -> bool:
@@ -251,35 +321,6 @@ class SolanaTokenInfoService(BaseTokenInfoService):
         except Exception as e:
             logger.error(f"验证代币地址时出错: {str(e)}")
             return False
-
-    async def get_token_supply(self, token_address: str) -> Dict:
-        """获取代币供应量信息"""
-        async with aiohttp.ClientSession(timeout=self.timeout) as session:
-            try:
-                url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/supply"
-                response = await self._fetch_with_retry(session, url)
-                
-                if response:
-                    decimals = response.get('decimals', 0)
-                    total_supply = Decimal(response.get('total_supply', '0'))
-                    circulating_supply = Decimal(response.get('circulating_supply', '0'))
-                    
-                    # 转换为实际数量
-                    total_supply = total_supply / Decimal(str(10 ** decimals))
-                    circulating_supply = circulating_supply / Decimal(str(10 ** decimals))
-
-                    return {
-                        'total_supply': str(total_supply),
-                        'circulating_supply': str(circulating_supply),
-                        'holder_count': response.get('holder_count', 0),
-                        'decimals': decimals
-                    }
-
-                return {}
-
-            except Exception as e:
-                logger.error(f"获取代币供应量信息时出错: {str(e)}")
-                return {}
 
     async def _update_token_info(self, token_address: str, token_data: Dict) -> None:
         """更新数据库中的代币信息"""
