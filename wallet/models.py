@@ -195,6 +195,7 @@ class Token(models.Model):
     possible_spam = models.BooleanField(default=False, verbose_name='是否可能是垃圾代币')
     is_native = models.BooleanField(default=False, verbose_name='是否原生代币')
     is_visible = models.BooleanField(default=True, verbose_name='是否显示')
+    is_recommended = models.BooleanField(default=False, verbose_name='是否推荐')
     
     # 缓存字段
     last_balance = models.CharField(max_length=255, null=True, blank=True, verbose_name='最后余额')
@@ -210,6 +211,7 @@ class Token(models.Model):
         indexes = [
             models.Index(fields=['chain', 'address']),
         ]
+        ordering = ['-is_recommended', '-verified', '-created_at']
 
     def __str__(self):
         return f"{self.chain} - {self.symbol} ({self.address})"

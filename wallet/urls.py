@@ -16,4 +16,5 @@ router.register(r'solana/nfts', SolanaNFTViewSet, basename='solana-nft')
 # API 路由
 urlpatterns = [
     path('', include(router.urls)),
-] 
+]  
+    

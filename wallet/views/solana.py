@@ -1169,4 +1169,80 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 'message': f'获取转账记录失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=False, methods=['get'], url_path='recommended-tokens')
+    @async_to_sync_api
+    async def recommended_tokens(self, request):
+        """获取推荐代币列表"""
+        try:
+            # 从请求参数获取链类型
+            chain = request.query_params.get('chain', 'SOL')
+            
+            # 验证链类型
+            if chain not in ['SOL', 'ETH', 'BASE']:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链类型'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 从数据库获取推荐代币
+            recommended_tokens = await sync_to_async(list)(Token.objects.filter(
+                chain=chain,
+                is_recommended=True,
+                is_visible=True
+            ).order_by('-created_at'))
+
+            # 转换为列表
+            tokens = []
+            for token in recommended_tokens:
+                # 格式化价格
+                price_usd = token.last_price or '0'
+                try:
+                    price = float(price_usd)
+                    if price < 0.00001:
+                        formatted_price = '{:.8f}'.format(price)
+                    elif price < 0.01:
+                        formatted_price = '{:.6f}'.format(price)
+                    else:
+                        formatted_price = '{:.4f}'.format(price)
+                    formatted_price = formatted_price.rstrip('0').rstrip('.')
+                except (ValueError, TypeError):
+                    formatted_price = '0'
+
+                # 格式化价格变化
+                price_change = token.last_price_change or '0'
+                try:
+                    change = float(price_change)
+                    formatted_change = '{:+.2f}%'.format(change)
+                except (ValueError, TypeError):
+                    formatted_change = '+0.00%'
+
+                tokens.append({
+                    'token_address': token.address,
+                    'symbol': token.symbol,
+                    'name': token.name,
+                    'decimals': token.decimals,
+                    'logo': token.logo,
+                    'price_usd': formatted_price,
+                    'price_change_24h': formatted_change,
+                    'is_native': token.is_native,
+                    'verified': token.verified,
+                    'description': token.description,
+                    'website': token.website,
+                    'twitter': token.twitter,
+                    'telegram': token.telegram,
+                    'discord': token.discord
+                })
+
+            return Response({
+                'status': 'success',
+                'data': tokens
+            })
+
+        except Exception as e:
+            logger.error(f"获取推荐代币失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取推荐代币失败'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
    

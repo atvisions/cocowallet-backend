@@ -43,19 +43,26 @@ class DecimalsFilter(admin.SimpleListFilter):
 @admin.register(Token)
 class TokenAdmin(admin.ModelAdmin):
     """代币管理"""
-    list_display = ('logo_img', 'name', 'symbol', 'chain', 'address', 'decimals', 'is_native', 'is_visible')
-    list_filter = (DecimalsFilter, 'chain', 'is_native', 'is_visible')
+    list_display = ('logo_img', 'name', 'symbol', 'chain', 'address', 'decimals', 'is_native', 'is_visible', 'is_recommended')
+    list_filter = (DecimalsFilter, 'chain', 'is_native', 'is_visible', 'is_recommended')
     search_fields = ('name', 'symbol', 'address')
     readonly_fields = ('created_at', 'updated_at')
+    list_editable = ['is_recommended']
     actions = ['sync_token_metadata']
     change_list_template = 'admin/wallet/token/change_list.html'
 
     def get_queryset(self, request):
-        """默认只显示非零小数位数的代币"""
+        """默认只显示非零小数位数的代币，并排除 NFT"""
         queryset = super().get_queryset(request)
         # 如果没有指定过滤器，默认排除小数位数为0的代币
         if 'decimals_filter' not in request.GET:
-            return queryset.exclude(decimals=0)
+            queryset = queryset.exclude(decimals=0)
+        # 排除 NFT：通过多个条件识别 NFT
+        queryset = queryset.exclude(
+            Q(type='nft') |  # 类型为 nft
+            Q(decimals=0, symbol__icontains='DIGIKONG') |  # DIGIKONG NFT
+            Q(decimals=0, contract_type__in=['ERC721', 'ERC1155'])  # ERC721/ERC1155 代币
+        )
         return queryset
 
     def save_model(self, request, obj, form, change):

@@ -19,7 +19,7 @@ def generate_avatar(size=200, bg_color=None):
         )
     
     # 创建图像
-    image = Image.new('RGB', (size, size), bg_color)
+    image = Image.new('RGB', (size, size), bg_color) # type: ignore
     draw = ImageDraw.Draw(image)
     
     # 生成随机图案
