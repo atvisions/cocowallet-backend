@@ -112,8 +112,10 @@ class HeliusConfig:
     # RPC 方法
     GET_ASSETS_BY_OWNER = "getAssetsByOwner"  # 获取用户的所有资产
     GET_TOKEN_ACCOUNTS = "getTokenAccounts"  # 获取代币账户
-    # RPC 方法
     GET_ASSET = "getAsset"  # 获取单个NFT详情
+    GET_TOKEN_METADATA = "getTokenMetadata"  # 获取代币元数据
+    GET_TOKEN_PRICES = "getTokenPrices"  # 获取代币价格
+    
     @classmethod
     def get_rpc_url(cls) -> str:
         """获取 RPC URL"""

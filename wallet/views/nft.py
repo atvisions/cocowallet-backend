@@ -72,7 +72,7 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # 验证钱包
-            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            wallet = await self.get_wallet_async(int(wallet_id), device_id) # type: ignore  
             if wallet.chain != 'SOL':
                 return Response({
                     'status': 'error',
@@ -216,7 +216,7 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # 验证钱包
-            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            wallet = await self.get_wallet_async(int(wallet_id), device_id) # type: ignore
             if wallet.chain != 'SOL':
                 return Response({
                     'status': 'error',
@@ -362,7 +362,7 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # 验证钱包
-            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            wallet = await self.get_wallet_async(int(wallet_id), device_id) # type: ignore
             if wallet.chain != 'SOL':
                 return Response({
                     'status': 'error',
@@ -527,7 +527,7 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # 获取钱包
-            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            wallet = await self.get_wallet_async(int(wallet_id), device_id) # type: ignore
             if wallet.chain != 'SOL':
                 return Response({
                     'status': 'error',

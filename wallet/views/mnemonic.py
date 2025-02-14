@@ -11,7 +11,7 @@ class MnemonicBackupViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """获取助记词备份列表"""
-        device_id = self.request.query_params.get('device_id')
+        device_id = self.request.query_params.get('device_id') # type: ignore
         if not device_id:
             return MnemonicBackup.objects.none()
         return MnemonicBackup.objects.filter(device_id=device_id)

@@ -1019,7 +1019,14 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 gas_used=Decimal('1'),
                 block_number=block_number,
                 block_timestamp=timezone.now(),
-                token=token
+                token=token,
+                token_info={  # 添加代币信息
+                    'address': from_token,
+                    'name': 'Solana',
+                    'symbol': 'SOL',
+                    'decimals': 9,
+                    'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png'
+                } if from_token == 'So11111111111111111111111111111111111111112' else None
             )
             
             return Response({
@@ -1100,48 +1107,29 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                     'status': tx.status,
                     'from_address': tx.from_address,
                     'to_address': tx.to_address,
-                    'amount': str(tx.amount),
+                    'amount': tx.amount,
                     'direction': 'RECEIVED' if is_received else 'SENT',
-                    'gas_price': str(tx.gas_price),
-                    'gas_used': str(tx.gas_used),
-                    'gas_fee': str(tx.gas_price * tx.gas_used),
+                    'gas_price': tx.gas_price,
+                    'gas_used': tx.gas_used,
+                    'gas_fee': str(tx.gas_price * tx.gas_used) if tx.gas_price and tx.gas_used else '0',
                     'block_number': tx.block_number,
-                    'block_timestamp': tx.block_timestamp.isoformat(),
-                    'created_at': tx.created_at.isoformat()
+                    'block_timestamp': tx.block_timestamp,
+                    'created_at': tx.created_at,
                 }
-                
-                # 根据交易类型添加不同的信息
-                if tx.tx_type == 'NFT_TRANSFER':
-                    # 如果是 NFT 转账，添加 NFT 信息
-                    if tx.nft_collection:
-                        tx_data['nft'] = {
-                            'collection_name': tx.nft_collection.name,
-                            'collection_symbol': tx.nft_collection.symbol,
-                            'token_id': tx.nft_token_id,
-                            'logo': tx.nft_collection.logo or '',
-                            'is_verified': tx.nft_collection.is_verified
-                        }
-                    else:
-                        # 如果没有关联的 NFT 合集信息，至少显示 token_id
-                        tx_data['nft'] = {
-                            'token_id': tx.nft_token_id,
-                            'collection_name': 'Unknown Collection',
-                            'collection_symbol': '',
-                            'logo': '',
-                            'is_verified': False
-                        }
-                else:
-                    # 如果是代币转账，添加代币信息
+
+                # 添加代币信息
+                if tx.tx_type == 'TRANSFER':
                     if tx.token:
                         tx_data['token'] = {
                             'address': tx.token.address,
                             'name': tx.token.name,
                             'symbol': tx.token.symbol,
                             'decimals': tx.token.decimals,
-                            'logo': tx.token.logo or ''
+                            'logo': tx.token.logo if tx.token.logo else f'https://d23exngyjlavgo.cloudfront.net/solana_{tx.token.address}'
                         }
-                    else:
-                        # 如果是原生 SOL 转账
+                    elif tx.token_info:  # 使用 token_info 字段
+                        tx_data['token'] = tx.token_info
+                    else:  # 默认SOL代币信息
                         tx_data['token'] = {
                             'address': 'So11111111111111111111111111111111111111112',
                             'name': 'Solana',
@@ -1149,7 +1137,40 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                             'decimals': 9,
                             'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png'
                         }
-                
+                elif tx.tx_type == 'SWAP':
+                    # 添加源代币信息
+                    if tx.token:
+                        tx_data['from_token'] = {
+                            'address': tx.token.address,
+                            'name': tx.token.name,
+                            'symbol': tx.token.symbol,
+                            'decimals': tx.token.decimals,
+                            'logo': tx.token.logo if tx.token.logo else f'https://d23exngyjlavgo.cloudfront.net/solana_{tx.token.address}'
+                        }
+                    elif tx.token_info:  # 使用 token_info 字段
+                        tx_data['from_token'] = tx.token_info
+                    
+                    # 添加目标代币信息（从 token_info 中获取）
+                    if hasattr(tx, 'token_info') and tx.token_info and 'to_token' in tx.token_info:
+                        tx_data['to_token'] = tx.token_info['to_token']
+                    else:
+                        # 默认 SOL 代币信息
+                        tx_data['to_token'] = {
+                            'address': 'So11111111111111111111111111111111111111112',
+                            'name': 'Solana',
+                            'symbol': 'SOL',
+                            'decimals': 9,
+                            'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png'
+                        }
+                elif tx.tx_type == 'NFT_TRANSFER' and tx.nft_collection:
+                    tx_data['nft'] = {
+                        'token_id': tx.nft_token_id,
+                        'collection_name': tx.nft_collection.name,
+                        'collection_symbol': tx.nft_collection.symbol,
+                        'logo': tx.nft_collection.logo,
+                        'is_verified': tx.nft_collection.is_verified
+                    }
+
                 transactions.append(tx_data)
             
             return Response({

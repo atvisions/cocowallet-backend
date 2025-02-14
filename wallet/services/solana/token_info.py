@@ -95,12 +95,6 @@ class SolanaTokenInfoService(BaseTokenInfoService):
     async def get_token_metadata(self, token_address: str) -> Dict:
         """获取代币元数据"""
         try:
-            # 首先从数据库获取代币信息
-            token = await sync_to_async(Token.objects.filter(
-                chain='SOL',
-                address=token_address
-            ).first)()
-            
             # 初始化基础数据结构
             token_data = {
                 'name': 'Unknown Token',
@@ -125,6 +119,12 @@ class SolanaTokenInfoService(BaseTokenInfoService):
                 'price_change_24h': '0',
                 'from_cache': True
             }
+            
+            # 首先从数据库获取代币信息
+            token = await sync_to_async(Token.objects.filter(
+                chain='SOL',
+                address=token_address
+            ).first)()
             
             # 如果数据库中有数据，使用数据库中的数据
             if token:
@@ -151,94 +151,81 @@ class SolanaTokenInfoService(BaseTokenInfoService):
                     'price_change_24h': token.last_price_change or '0'
                 })
             
-            # 使用 Helius API 获取最新数据
+            # 使用 Moralis API 获取最新数据
             try:
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(timeout=self.timeout) as session:
                     # 获取代币元数据
-                    metadata_payload = {
-                        "jsonrpc": "2.0",
-                        "id": "my-id",
-                        "method": HeliusConfig.GET_TOKEN_METADATA,
-                        "params": {
-                            "id": token_address
-                        }
-                    }
+                    url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/metadata"
+                    logger.debug(f"请求Moralis API获取代币元数据: {url}")
                     
-                    async with session.post(HeliusConfig.get_rpc_url(), json=metadata_payload) as response:
+                    async with session.get(url, headers=self.headers) as response:
                         if response.status == 200:
-                            result = await response.json()
-                            if 'result' in result:
-                                helius_data = result['result']
+                            moralis_data = await response.json()
+                            logger.debug(f"Moralis API返回数据: {moralis_data}")
+                            
+                            if moralis_data:
+                                # 从 links 中提取社交媒体链接
+                                links = moralis_data.get('links', {})
                                 
                                 # 更新代币数据
-                                if helius_data:
-                                    content = helius_data.get('content', {})
-                                    metadata = content.get('metadata', {})
-                                    token_info = helius_data.get('token_info', {})
-                                    price_info = token_info.get('price_info', {})
-                                    
-                                    # 获取图片链接
-                                    image_url = content.get('links', {}).get('image', '')
-                                    if not image_url and content.get('files'):
-                                        for file in content['files']:
-                                            if file.get('mime', '').startswith('image/'):
-                                                image_url = file.get('uri', '')
-                                                break
-                                    
-                                    # 更新代币数据
-                                    token_data.update({
-                                        'name': metadata.get('name', token_data['name']),
-                                        'symbol': metadata.get('symbol', token_data['symbol']),
-                                        'decimals': token_info.get('decimals', token_data['decimals']),
-                                        'logo': image_url or token_data['logo'],
-                                        'description': metadata.get('description', token_data['description']),
-                                        'total_supply': str(token_info.get('supply', token_data['total_supply'])),
-                                        'total_supply_formatted': str(float(token_info.get('supply', 0)) / (10 ** token_info.get('decimals', 9))),
-                                        'verified': bool(helius_data.get('authorities', [])),
-                                        'from_cache': False
-                                    })
-                                    
-                                    # 更新价格信息
-                                    if price_info:
-                                        price_usd = price_info.get('price_per_token', 0)
-                                        token_data['price_usd'] = str(price_usd)
-                                        
-                                    # 保持原有的社交媒体链接
-                                    # 因为 Helius API 目前不提供这些信息
+                                token_data.update({
+                                    'name': moralis_data.get('name', token_data['name']),
+                                    'symbol': moralis_data.get('symbol', token_data['symbol']),
+                                    'decimals': int(moralis_data.get('decimals', token_data['decimals'])),
+                                    'logo': moralis_data.get('logo', token_data['logo']),
+                                    'description': moralis_data.get('description', token_data['description']),
+                                    'website': links.get('website', token_data['website']),
+                                    'twitter': links.get('twitter', token_data['twitter']),
+                                    'telegram': links.get('telegram', token_data['telegram']),
+                                    'discord': links.get('discord', token_data['discord']),
+                                    'github': links.get('github', token_data['github']),
+                                    'medium': links.get('medium', token_data['medium']),
+                                    'total_supply': str(moralis_data.get('supply', token_data['total_supply'])),
+                                    'total_supply_formatted': str(float(moralis_data.get('supply', 0)) / (10 ** int(moralis_data.get('decimals', 9)))),
+                                    'verified': bool(moralis_data.get('metaplex', {}).get('primarySaleHappened', False)),
+                                    'from_cache': False
+                                })
                     
                     # 获取价格数据
-                    price_payload = {
-                        "jsonrpc": "2.0",
-                        "id": "my-id",
-                        "method": HeliusConfig.GET_TOKEN_PRICES,
-                        "params": {
-                            "tokens": [token_address]
-                        }
-                    }
+                    price_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/price"
+                    logger.debug(f"请求Moralis API获取代币价格: {price_url}")
                     
-                    async with session.post(HeliusConfig.get_rpc_url(), json=price_payload) as response:
+                    async with session.get(price_url, headers=self.headers) as response:
                         if response.status == 200:
-                            result = await response.json()
-                            if 'result' in result and result['result']:
-                                price_data = result['result'][0]
-                                if price_data:
-                                    token_data.update({
-                                        'price_usd': str(price_data.get('usdPrice', '0')),
-                                        'price_change_24h': str(price_data.get('usdPrice24hrPercentChange', '0'))
-                                    })
+                            price_data = await response.json()
+                            logger.debug(f"Moralis API返回价格数据: {price_data}")
+                            
+                            if price_data:
+                                token_data.update({
+                                    'price_usd': str(price_data.get('usdPrice', token_data['price_usd'])),
+                                    'price_change_24h': str(price_data.get('24hrPercentChange', token_data['price_change_24h']))
+                                })
                     
                     # 更新数据库
                     if token:
-                        await sync_to_async(Token.objects.filter(id=token.id).update)(
-                            name=token_data['name'],
-                            symbol=token_data['symbol'],
-                            decimals=token_data['decimals'],
-                            logo=token_data['logo'],
-                            description=token_data['description'],
-                            verified=token_data['verified'],
-                            last_price=token_data['price_usd'],
-                            last_price_change=token_data['price_change_24h'],
-                            updated_at=timezone.now()
+                        # 使用 update_or_create 而不是直接更新
+                        await sync_to_async(Token.objects.update_or_create)(
+                            chain='SOL',
+                            address=token_address,
+                            defaults={
+                                'name': token_data['name'],
+                                'symbol': token_data['symbol'],
+                                'decimals': token_data['decimals'],
+                                'logo': token_data['logo'],
+                                'description': token_data['description'],
+                                'website': token_data['website'],
+                                'twitter': token_data['twitter'],
+                                'telegram': token_data['telegram'],
+                                'discord': token_data['discord'],
+                                'github': token_data['github'],
+                                'medium': token_data['medium'],
+                                'total_supply': token_data['total_supply'],
+                                'total_supply_formatted': token_data['total_supply_formatted'],
+                                'verified': token_data['verified'],
+                                'last_price': token_data['price_usd'],
+                                'last_price_change': token_data['price_change_24h'],
+                                'updated_at': timezone.now()
+                            }
                         )
                     else:
                         # 创建新的代币记录
@@ -250,6 +237,14 @@ class SolanaTokenInfoService(BaseTokenInfoService):
                             decimals=token_data['decimals'],
                             logo=token_data['logo'],
                             description=token_data['description'],
+                            website=token_data['website'],
+                            twitter=token_data['twitter'],
+                            telegram=token_data['telegram'],
+                            discord=token_data['discord'],
+                            github=token_data['github'],
+                            medium=token_data['medium'],
+                            total_supply=token_data['total_supply'],
+                            total_supply_formatted=token_data['total_supply_formatted'],
                             verified=token_data['verified'],
                             last_price=token_data['price_usd'],
                             last_price_change=token_data['price_change_24h'],
@@ -259,7 +254,25 @@ class SolanaTokenInfoService(BaseTokenInfoService):
                         )
                         
             except Exception as e:
-                logger.error(f"从 Helius API 获取代币数据失败: {str(e)}")
+                logger.error(f"从 Moralis API 获取代币数据失败: {str(e)}")
+            
+            # 如果是原生 SOL 代币，使用固定信息
+            if token_address == 'So11111111111111111111111111111111111111112':
+                token_data.update({
+                    'name': 'Solana',
+                    'symbol': 'SOL',
+                    'decimals': 9,
+                    'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png',
+                    'description': 'Solana native token',
+                    'website': 'https://solana.com',
+                    'twitter': 'https://twitter.com/solana',
+                    'telegram': 'https://t.me/solana',
+                    'discord': 'https://discord.com/invite/solana',
+                    'github': 'https://github.com/solana-labs',
+                    'medium': 'https://medium.com/solana-labs',
+                    'verified': True,
+                    'is_native': True
+                })
             
             return token_data
             
@@ -274,7 +287,7 @@ class SolanaTokenInfoService(BaseTokenInfoService):
                 payload = {
                     "jsonrpc": "2.0",
                     "id": "my-id",
-                    "method": HeliusConfig.GET_TOKEN_METADATA,
+                    "method": HeliusConfig.GET_TOKEN_METADATA, # type: ignore
                     "params": {
                         "id": token_address
                     }

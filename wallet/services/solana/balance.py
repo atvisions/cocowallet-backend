@@ -119,7 +119,7 @@ class SolanaBalanceService(BaseBalanceService):
         price_data = cache.get(cache_key)
         if price_data:
             return price_data
-        return None
+        return None # type: ignore
 
     async def _cache_price(self, token_address: str, price_data: Dict):
         """缓存价格数据"""
@@ -159,7 +159,7 @@ class SolanaBalanceService(BaseBalanceService):
             
         except Exception as e:
             logger.error(f"获取或创建代币元数据失败: {str(e)}")
-            return None
+            return None # type: ignore
 
     async def _update_token_price(self, token: Token, price_data: Dict):
         """更新代币价格信息"""
@@ -364,11 +364,11 @@ class SolanaBalanceService(BaseBalanceService):
                 
                 logger.info(f"返回代币列表，总数: {len(result)}, 总价值: {total_value}")
                 logger.info(f"总耗时: {time.time() - start_time:.2f}秒")
-                return final_result
+                return final_result # type: ignore
 
             except Exception as e:
                 logger.error(f"获取所有代币余额时出错: {str(e)}")
-                return {'total_value_usd': '0', 'tokens': []}
+                return {'total_value_usd': '0', 'tokens': []} # type: ignore
 
     async def _async_update_tokens(self, new_tokens: List[Dict], price_update_needed: List[str]):
         """异步更新代币信息和价格"""

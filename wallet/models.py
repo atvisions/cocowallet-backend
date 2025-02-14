@@ -272,6 +272,7 @@ class Transaction(models.Model):
     token = models.ForeignKey(Token, null=True, blank=True, on_delete=models.SET_NULL, verbose_name='代币')
     nft_collection = models.ForeignKey(NFTCollection, null=True, blank=True, on_delete=models.SET_NULL, verbose_name='NFT合集')
     nft_token_id = models.CharField(max_length=100, null=True, blank=True, verbose_name='NFT Token ID')
+    token_info = models.JSONField(null=True, blank=True, verbose_name='代币信息')
     gas_price = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='Gas价格')
     gas_used = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='Gas使用量')
     block_number = models.IntegerField(verbose_name='区块高度')
