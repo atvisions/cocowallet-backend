@@ -1,18 +1,18 @@
+"""Solana 价格服务"""
+import logging
+from typing import Dict, List, Optional
+from decimal import Decimal
 import aiohttp
 import asyncio
-import logging
-from decimal import Decimal
-from typing import Dict, List, Optional
+import json
 from django.utils import timezone
-from asgiref.sync import sync_to_async
 
-from ..base.price import BasePriceService
 from ...models import Token
 from ...api_config import MoralisConfig
 
 logger = logging.getLogger(__name__)
 
-class SolanaPriceService(BasePriceService):
+class SolanaPriceService:
     """Solana 价格服务实现类"""
 
     def __init__(self):

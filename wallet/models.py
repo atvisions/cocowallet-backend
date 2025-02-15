@@ -23,6 +23,18 @@ def decrypt_string(encrypted_text: str, key: str) -> str:
         logger.error(f"解密字符串失败: {str(e)}")
         raise ValueError("解密失败")
 
+class Chain(models.TextChoices):
+    """支持的链类型"""
+    ETH = 'ETH', 'Ethereum'
+    BSC = 'BNB', 'BNB Chain'
+    MATIC = 'MATIC', 'Polygon'
+    AVAX = 'AVAX', 'Avalanche'
+    BASE = 'BASE', 'Base'
+    ARBITRUM = 'ARBITRUM', 'Arbitrum'
+    OPTIMISM = 'OPTIMISM', 'Optimism'
+    SOL = 'SOL', 'Solana'
+    BTC = 'BTC', 'Bitcoin'
+
 class Wallet(models.Model):
     """钱包模型"""
     CHAIN_CHOICES = [(key, value['name']) for key, value in settings.SUPPORTED_CHAINS.items()]
@@ -176,23 +188,34 @@ class Token(models.Model):
     symbol = models.CharField(max_length=50, verbose_name='符号')
     decimals = models.IntegerField(default=18, verbose_name='小数位数')
     logo = models.URLField(max_length=500, null=True, blank=True, verbose_name='Logo')
+    logo_hash = models.CharField(max_length=255, null=True, blank=True, verbose_name='Logo哈希')
+    thumbnail = models.URLField(max_length=500, null=True, blank=True, verbose_name='缩略图')
     type = models.CharField(max_length=20, default='token', verbose_name='类型')
     contract_type = models.CharField(max_length=20, default='ERC20', verbose_name='合约类型')
     description = models.TextField(null=True, blank=True, verbose_name='描述')
     website = models.URLField(max_length=500, null=True, blank=True, verbose_name='网站')
+    email = models.EmailField(max_length=255, null=True, blank=True, verbose_name='邮箱')
     twitter = models.URLField(max_length=500, null=True, blank=True, verbose_name='Twitter')
     telegram = models.URLField(max_length=500, null=True, blank=True, verbose_name='Telegram')
-    reddit = models.JSONField(default=list, null=True, blank=True, verbose_name='Reddit')
+    reddit = models.URLField(max_length=500, null=True, blank=True, verbose_name='Reddit')
     discord = models.URLField(max_length=500, null=True, blank=True, verbose_name='Discord')
+    instagram = models.URLField(max_length=500, null=True, blank=True, verbose_name='Instagram')
     github = models.URLField(max_length=500, null=True, blank=True, verbose_name='GitHub')
     medium = models.URLField(max_length=500, null=True, blank=True, verbose_name='Medium')
+    moralis = models.URLField(max_length=500, null=True, blank=True, verbose_name='Moralis')
     coingecko_id = models.CharField(max_length=100, null=True, blank=True, verbose_name='CoinGecko ID')
     total_supply = models.CharField(max_length=255, null=True, blank=True, verbose_name='总供应量')
     total_supply_formatted = models.CharField(max_length=255, null=True, blank=True, verbose_name='格式化总供应量')
+    circulating_supply = models.CharField(max_length=255, null=True, blank=True, verbose_name='流通供应量')
+    market_cap = models.CharField(max_length=255, null=True, blank=True, verbose_name='市值')
+    fully_diluted_valuation = models.CharField(max_length=255, null=True, blank=True, verbose_name='完全稀释估值')
+    categories = models.JSONField(default=list, null=True, blank=True, verbose_name='分类')
     security_score = models.IntegerField(null=True, blank=True, verbose_name='安全评分')
     verified = models.BooleanField(default=False, verbose_name='是否验证')
-    created_at = models.DateTimeField(null=True, blank=True, verbose_name='创建时间')
     possible_spam = models.BooleanField(default=False, verbose_name='是否可能是垃圾代币')
+    block_number = models.CharField(max_length=255, null=True, blank=True, verbose_name='区块高度')
+    validated = models.IntegerField(default=0, verbose_name='验证状态')
+    created_at = models.DateTimeField(null=True, blank=True, verbose_name='创建时间')
     is_native = models.BooleanField(default=False, verbose_name='是否原生代币')
     is_visible = models.BooleanField(default=True, verbose_name='是否显示')
     is_recommended = models.BooleanField(default=False, verbose_name='是否推荐')

@@ -1,3 +1,4 @@
+"""Solana 转账服务"""
 import logging
 from decimal import Decimal
 from typing import Dict, Any, Optional, cast, Union, Callable
@@ -20,18 +21,16 @@ from solana.blockhash import Blockhash
 from spl.token.client import Token
 
 from ...models import Wallet, Transaction as DBTransaction, Token
-from ..base.transfer import BaseTransferService
 from ...exceptions import InsufficientBalanceError, InvalidAddressError, TransferError
 from ...api_config import RPCConfig, MoralisConfig
 import json
 
 logger = logging.getLogger(__name__)
 
-class SolanaTransferService(BaseTransferService):
+class SolanaTransferService:
+    """Solana 转账服务实现类"""
     def __init__(self):
         """初始化 Solana 转账服务"""
-        super().__init__()
-        
         # 初始化 RPC 配置
         self.primary_rpc_url = RPCConfig.SOLANA_MAINNET_RPC_URL
         self.backup_rpc_urls = [

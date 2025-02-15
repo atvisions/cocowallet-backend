@@ -558,7 +558,7 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
             wallet.payment_password = payment_password
             
             # 执行转账
-            result = await nft_service.transfer_nft(
+            result = await nft_service.transfer_nft( # type: ignore
                 from_address=wallet.address,
                 to_address=to_address,
                 nft_address=nft_address,
@@ -653,7 +653,7 @@ class NFTTransferView(APIView):
             wallet.payment_password = payment_password
             
             # 执行转账
-            result = await nft_service.transfer_nft(
+            result = await nft_service.transfer_nft( # type: ignore
                 from_address=wallet.address,
                 to_address=to_address,
                 nft_address=nft_address,

@@ -13,6 +13,9 @@ from django.core.files.base import ContentFile
 import re
 import logging
 import base58
+from web3 import Web3
+from solana.keypair import Keypair
+from base58 import b58encode, b58decode
 
 from ..models import Wallet, PaymentPassword
 from ..serializers import (
@@ -44,25 +47,38 @@ class WalletViewSet(viewsets.ModelViewSet):
         return self.serializer_class
 
     def encrypt_data(self, data, key):
-        """使用简单的异或加密方法，支持字符串和二进制数据"""
+        """使用简单的XOR加密方法加密数据"""
         try:
             logger.debug(f"加密数据类型: {type(data)}")
             logger.debug(f"加密数据长度: {len(data) if hasattr(data, '__len__') else 'unknown'}")
-            key_hash = hashlib.sha256(key.encode()).digest()
-            # 如果输入是字符串，转换为字节
-            if isinstance(data, str):
-                logger.debug("数据类型为字符串，转换为字节")
-                data_bytes = data.encode()
-            elif isinstance(data, bytes):
-                logger.debug("数据类型为字节，直接使用")
+            
+            # 如果输入是字节类型，直接使用
+            if isinstance(data, bytes):
                 data_bytes = data
+            # 如果是字符串类型，转换为字节
+            elif isinstance(data, str):
+                data_bytes = data.encode()
             else:
-                logger.error(f"不支持的数据类型: {type(data)}")
                 raise ValueError(f"不支持的数据类型: {type(data)}")
+            
+            # 确保密钥是字节类型
+            if isinstance(key, str):
+                key_bytes = key.encode()
+            elif isinstance(key, bytes):
+                key_bytes = key
+            else:
+                raise ValueError(f"不支持的密钥类型: {type(key)}")
+            
+            # 生成密钥的哈希值
+            key_hash = hashlib.sha256(key_bytes).digest()
+            
+            # 使用XOR加密
             encrypted = bytes(a ^ b for a, b in zip(data_bytes, key_hash * (len(data_bytes) // len(key_hash) + 1)))
+            
+            # Base64编码
             result = base64.b64encode(encrypted).decode()
-            logger.debug(f"加密结果长度: {len(result)}")
             return result
+            
         except Exception as e:
             logger.error(f"加密数据失败: {str(e)}, 数据类型: {type(data)}")
             raise ValueError("加密失败")
@@ -107,12 +123,95 @@ class WalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def select_chain(self, request):
+        """选择链
+        
+        支持的链:
+        1. ETH (Ethereum) - 以太坊主网
+        2. BSC (BNB Chain) - 币安智能链
+        3. MATIC (Polygon) - Polygon主网
+        4. AVAX (Avalanche) - Avalanche C-Chain
+        5. BASE (Base) - Base主网
+        6. ARBITRUM (Arbitrum) - Arbitrum One
+        7. OPTIMISM (Optimism) - Optimism主网
+        8. SOL (Solana) - Solana主网
+        9. BTC (Bitcoin) - 比特币主网 (即将支持)
+        """
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
         device_id = serializer.validated_data['device_id']
         chain = serializer.validated_data['chain']
+        
+        # 验证链是否支持
+        supported_chains = {
+            'ETH': {
+                'name': 'Ethereum',
+                'symbol': 'ETH',
+                'network': 'Mainnet',
+                'status': 'active'
+            },
+            'BSC': {
+                'name': 'BNB Chain',
+                'symbol': 'BNB',
+                'network': 'Mainnet',
+                'status': 'active'
+            },
+            'MATIC': {
+                'name': 'Polygon',
+                'symbol': 'MATIC',
+                'network': 'Mainnet',
+                'status': 'active'
+            },
+            'AVAX': {
+                'name': 'Avalanche',
+                'symbol': 'AVAX',
+                'network': 'Mainnet',
+                'status': 'active'
+            },
+            'BASE': {
+                'name': 'Base',
+                'symbol': 'ETH',
+                'network': 'Mainnet',
+                'status': 'active'
+            },
+            'ARBITRUM': {
+                'name': 'Arbitrum',
+                'symbol': 'ETH',
+                'network': 'Mainnet',
+                'status': 'active'
+            },
+            'OPTIMISM': {
+                'name': 'Optimism',
+                'symbol': 'ETH',
+                'network': 'Mainnet',
+                'status': 'active'
+            },
+            'SOL': {
+                'name': 'Solana',
+                'symbol': 'SOL',
+                'network': 'Mainnet',
+                'status': 'active'
+            },
+            'BTC': {
+                'name': 'Bitcoin',
+                'symbol': 'BTC',
+                'network': 'Mainnet',
+                'status': 'coming_soon'
+            }
+        }
+        
+        if chain not in supported_chains:
+            return Response({
+                'status': 'error',
+                'message': '不支持的链类型'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        if supported_chains[chain]['status'] == 'coming_soon':
+            return Response({
+                'status': 'error',
+                'message': f"{supported_chains[chain]['name']} 即将支持"
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         # 生成助记词
         mnemonic = generate_mnemonic(language="english", strength=128)
@@ -122,6 +221,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             'message': '链选择成功',
             'data': {
                 'chain': chain,
+                'chain_info': supported_chains[chain],
                 'mnemonic': mnemonic
             }
         })
@@ -187,16 +287,15 @@ class WalletViewSet(viewsets.ModelViewSet):
             hdwallet.from_mnemonic(mnemonic)
             
             # 根据不同链设置路径和获取地址
-            if chain == "ETH" or chain == "BASE":
+            if chain in ["ETH", "BSC", "MATIC", "AVAX", "BASE", "ARBITRUM", "OPTIMISM"]:
+                # 使用 BIP44 路径生成 EVM 链钱包
                 hdwallet.from_path("m/44'/60'/0'/0/0")
-                address = hdwallet.public_key()
                 private_key = hdwallet.private_key()
+                # 使用 HDWallet 的 public_key() 方法获取公钥，然后从公钥生成地址
+                public_key = hdwallet.public_key()
+                address = Web3.to_checksum_address(Web3.keccak(bytes.fromhex(public_key)[1:])[-20:].hex())
+                private_key_to_store = private_key
             elif chain == "SOL":
-                from solana.keypair import Keypair
-                from cryptography.hazmat.primitives import hashes
-                from cryptography.hazmat.primitives.asymmetric import ed25519
-                from base58 import b58encode
-                
                 # 使用助记词生成种子
                 seed = hashlib.pbkdf2_hmac(
                     'sha512',
@@ -218,7 +317,7 @@ class WalletViewSet(viewsets.ModelViewSet):
                 extended_key = private_key_bytes + public_key_bytes + extra_bytes
                 
                 # 将完整的88字节数据转换为Base58格式存储
-                private_key = b58encode(extended_key).decode()
+                private_key_to_store = b58encode(extended_key).decode()
             else:
                 return Response({
                     'status': 'error',
@@ -242,7 +341,7 @@ class WalletViewSet(viewsets.ModelViewSet):
                     # 如果钱包存在但已被删除，重新激活它
                     existing_wallet.is_active = True
                     decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
-                    existing_wallet.encrypted_private_key = self.encrypt_data(private_key, decrypted_password)
+                    existing_wallet.encrypted_private_key = self.encrypt_data(private_key_to_store, decrypted_password)
                     existing_wallet.save()
                     return Response({
                         'status': 'success',
@@ -259,24 +358,13 @@ class WalletViewSet(viewsets.ModelViewSet):
             # 使用支付密码加密私钥
             decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id).decode()
             
-            # 只使用32字节的私钥部分
-            private_key_bytes = seed[:32]
-            # 创建完整的Solana密钥对
-            keypair = Keypair.from_seed(private_key_bytes)
-            # 创建88字节格式的私钥（32字节私钥 + 32字节公钥 + 24字节额外数据）
-            public_key_bytes = bytes(keypair.public_key)
-            extra_bytes = bytes([0] * 24)  # 24字节的额外数据
-            extended_key = private_key_bytes + public_key_bytes + extra_bytes
-            # 将完整的88字节数据转换为Base58格式
-            encrypted_private_key = self.encrypt_data(base58.b58encode(extended_key).decode(), decrypted_password)
-            
             # 创建钱包
             wallet = Wallet.objects.create(
                 device_id=device_id,
-                name=f"SOL Wallet 1",  # 使用固定名称
+                name=f"{chain} Wallet 1",
                 chain=chain,
                 address=address,
-                encrypted_private_key=encrypted_private_key
+                encrypted_private_key=self.encrypt_data(private_key_to_store, decrypted_password)
             )
             
             # 保存头像
@@ -556,47 +644,42 @@ class WalletViewSet(viewsets.ModelViewSet):
             
         try:
             # 根据不同链处理私钥
-            if chain == "ETH" or chain == "BASE":
+            if chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
+                # 所有 EVM 兼容链使用相同的私钥处理逻辑
                 from eth_account import Account
                 account = Account.from_key(private_key)
                 address = account.address
-                private_key_to_store = private_key
+                # 确保私钥是十六进制格式，不带0x前缀
+                if private_key.startswith('0x'):
+                    private_key_to_store = private_key[2:]
+                else:
+                    private_key_to_store = private_key
+                # 转换为字节类型
+                private_key_to_store = bytes.fromhex(private_key_to_store)
+                
             elif chain == "SOL":
-                from solana.keypair import Keypair
-                from base58 import b58decode, b58encode
-                try:
-                    # 尝试Base58解码
-                    private_key_bytes = b58decode(private_key)
-                    # 如果是64字节的完整密钥对，直接使用
-                    if len(private_key_bytes) == 64:
-                        logger.debug("检测到64字节的完整密钥对，直接使用")
-                        private_key_to_store = private_key  # 保持原始格式
-                    elif len(private_key_bytes) == 32:
-                        # 如果是32字节的私钥，创建完整的密钥对
-                        logger.debug("检测到32字节的私钥，创建完整密钥对")
-                        keypair = Keypair.from_seed(private_key_bytes)
-                        private_key_to_store = b58encode(keypair.seed + bytes(keypair.public_key)).decode()
-                    else:
-                        raise ValueError("私钥长度错误")
-                    logger.debug(f"存储的私钥格式: {private_key_to_store}")
-                except Exception as e:
-                    logger.error(f"Base58解码失败: {str(e)}")
-                    # 如果不是Base58格式，尝试十六进制格式
-                    try:
-                        private_key_bytes = bytes.fromhex(private_key)
-                        if len(private_key_bytes) == 64:
-                            logger.debug("检测到64字节的十六进制密钥对，转换为Base58格式")
-                            private_key_to_store = b58encode(private_key_bytes).decode()
-                        elif len(private_key_bytes) == 32:
-                            logger.debug("检测到32字节的十六进制私钥，创建完整密钥对")
-                            keypair = Keypair.from_seed(private_key_bytes)
-                            private_key_to_store = b58encode(keypair.seed + bytes(keypair.public_key)).decode()
-                        else:
-                            raise ValueError("私钥长度错误")
-                        logger.debug(f"存储的私钥格式: {private_key_to_store}")
-                    except Exception as e:
-                        logger.error(f"十六进制解码失败: {str(e)}")
-                        raise ValueError("无效的私钥格式")
+                # 使用助记词生成种子
+                seed = hashlib.pbkdf2_hmac(
+                    'sha512',
+                    mnemonic.encode('utf-8'),
+                    'mnemonic'.encode('utf-8'),
+                    2048
+                )
+                
+                # 使用种子的前32字节作为私钥
+                private_key_bytes = seed[:32]
+                
+                # 从私钥创建Solana密钥对
+                keypair = Keypair.from_seed(private_key_bytes)
+                address = str(keypair.public_key)
+                
+                # 创建88字节格式的私钥（32字节私钥 + 32字节公钥 + 24字节额外数据）
+                public_key_bytes = bytes(keypair.public_key)
+                extra_bytes = bytes([0] * 24)  # 24字节的额外数据
+                extended_key = private_key_bytes + public_key_bytes + extra_bytes
+                
+                # 将完整的88字节数据转换为Base58格式存储
+                private_key_to_store = b58encode(extended_key).decode()
                 
                 # 验证地址
                 try:
@@ -606,6 +689,13 @@ class WalletViewSet(viewsets.ModelViewSet):
                 except Exception as e:
                     logger.error(f"验证密钥对失败: {str(e)}")
                     raise ValueError("无效的密钥对格式")
+                    
+            elif chain == "BTC":
+                # TODO: 添加比特币私钥导入支持
+                return Response({
+                    'status': 'error',
+                    'message': 'BTC 导入功能即将支持'
+                }, status=status.HTTP_400_BAD_REQUEST)
             else:
                 return Response({
                     'status': 'error',
@@ -655,6 +745,9 @@ class WalletViewSet(viewsets.ModelViewSet):
             
             # 创建钱包
             decrypted_password = self.decrypt_data(payment_password.encrypted_password, device_id)
+            if isinstance(decrypted_password, bytes):
+                decrypted_password = decrypted_password.decode()
+            
             wallet = Wallet.objects.create(
                 device_id=device_id,
                 name=name,
@@ -665,7 +758,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             )
             
             # 保存头像
-            wallet.avatar.save(f'wallet_avatar_{wallet.id}.png', avatar_file, save=True) # type: ignore
+            wallet.avatar.save(f'wallet_avatar_{wallet.pk}.png', avatar_file, save=True)
             
             return Response({
                 'status': 'success',
@@ -696,13 +789,17 @@ class WalletViewSet(viewsets.ModelViewSet):
             
         try:
             # 验证地址格式
-            if chain == "ETH" or chain == "BASE":
+            if chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
                 from eth_utils import is_address
                 if not is_address(address):
                     return Response({
                         'status': 'error',
-                        'message': '无效的以太坊地址'
+                        'message': f'无效的{chain}地址'
                     }, status=status.HTTP_400_BAD_REQUEST)
+                # 转换为校验和地址
+                from web3 import Web3
+                address = Web3.to_checksum_address(address)
+                
             elif chain == "SOL":
                 from solana.publickey import PublicKey
                 try:
@@ -712,18 +809,45 @@ class WalletViewSet(viewsets.ModelViewSet):
                         'status': 'error',
                         'message': '无效的Solana地址'
                     }, status=status.HTTP_400_BAD_REQUEST)
+                    
+            elif chain == "BTC":
+                # TODO: 添加比特币地址验证
+                return Response({
+                    'status': 'error',
+                    'message': 'BTC 导入功能即将支持'
+                }, status=status.HTTP_400_BAD_REQUEST)
             else:
                 return Response({
                     'status': 'error',
                     'message': '不支持的链类型'
                 }, status=status.HTTP_400_BAD_REQUEST)
                 
-            # 检查钱包是否已存在
-            if Wallet.objects.filter(device_id=device_id, chain=chain, address=address, is_active=True).exists():
-                return Response({
-                    'status': 'error',
-                    'message': '该钱包已存在'
-                }, status=status.HTTP_400_BAD_REQUEST)
+            # 检查钱包是否已存在（包括非活跃的）
+            existing_wallet = Wallet.objects.filter(
+                device_id=device_id,
+                chain=chain,
+                address=address
+            ).first()
+            
+            if existing_wallet:
+                if existing_wallet.is_active:
+                    return Response({
+                        'status': 'error',
+                        'message': '该钱包已存在'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    # 如果钱包存在但被软删除，重新激活它
+                    existing_wallet.is_active = True
+                    existing_wallet.is_watch_only = True
+                    existing_wallet.is_imported = True
+                    if name:  # 如果提供了新名称，更新名称
+                        existing_wallet.name = name
+                    existing_wallet.save()
+                    return Response({
+                        'status': 'success',
+                        'message': '观察者钱包已重新激活',
+                        'wallet': WalletSerializer(existing_wallet).data
+                    })
                 
             # 生成随机头像
             from ..serializers import generate_avatar
@@ -734,12 +858,12 @@ class WalletViewSet(viewsets.ModelViewSet):
             
             # 如果未提供名称，生成默认名称
             if not name:
-                existing_wallets = Wallet.objects.filter(
+                existing_wallets_count = Wallet.objects.filter(
                     device_id=device_id,
                     chain=chain,
                     is_active=True
                 ).count()
-                name = f"Watch {chain} Wallet {existing_wallets + 1}"
+                name = f"Watch {chain} Wallet {existing_wallets_count + 1}"
             
             # 创建观察者钱包
             wallet = Wallet.objects.create(
@@ -752,7 +876,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             )
             
             # 保存头像
-            wallet.avatar.save(f'wallet_avatar_{wallet.id}.png', avatar_file, save=True) # type: ignore
+            wallet.avatar.save(f'wallet_avatar_{wallet.pk}.png', avatar_file, save=True)
             
             return Response({
                 'status': 'success',
@@ -764,7 +888,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             logger.error(f"导入观察者钱包失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': f'导入观察者钱包失败: {str(e)}'
+                'message': '导入观察者钱包失败，该钱包可能已存在'
             }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['post'])
@@ -845,4 +969,119 @@ class WalletViewSet(viewsets.ModelViewSet):
         return Response({
             'status': 'success',
             'wallets': serializer.data
-        }) 
+        })
+
+    @action(detail=False, methods=['get'])
+    def get_supported_chains(self, request):
+        """获取支持的链列表
+        
+        Returns:
+            {
+                'status': 'success',
+                'message': '获取支持的链列表成功',
+                'data': {
+                    'supported_chains': {
+                        'ETH': {
+                            'chain_id': 'ETH',  # 前端选择链时应该使用的标识符
+                            'name': 'Ethereum',
+                            'symbol': 'ETH',
+                            'network': 'Mainnet',
+                            'status': 'active',
+                            'logo': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png'
+                        },
+                        ...
+                    }
+                }
+            }
+        """
+        try:
+            supported_chains = {
+                'ETH': {
+                    'chain_id': 'ETH',  # 添加 chain_id 字段
+                    'name': 'Ethereum',
+                    'symbol': 'ETH',
+                    'network': 'Mainnet',
+                    'status': 'active',
+                    'logo': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png'
+                },
+                'BSC': {
+                    'chain_id': 'BSC',
+                    'name': 'BNB Chain',
+                    'symbol': 'BNB',
+                    'network': 'Mainnet',
+                    'status': 'active',
+                    'logo': 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png'
+                },
+                'MATIC': {
+                    'chain_id': 'MATIC',
+                    'name': 'Polygon',
+                    'symbol': 'MATIC',
+                    'network': 'Mainnet',
+                    'status': 'active',
+                    'logo': 'https://assets.coingecko.com/coins/images/4713/large/matic-token-icon.png'
+                },
+                'AVAX': {
+                    'chain_id': 'AVAX',
+                    'name': 'Avalanche',
+                    'symbol': 'AVAX',
+                    'network': 'Mainnet',
+                    'status': 'active',
+                    'logo': 'https://assets.coingecko.com/coins/images/12559/large/Avalanche_Circle_RedWhite_Trans.png'
+                },
+                'BASE': {
+                    'chain_id': 'BASE',
+                    'name': 'Base',
+                    'symbol': 'ETH',
+                    'network': 'Mainnet',
+                    'status': 'active',
+                    'logo': 'https://assets.coingecko.com/coins/images/33526/large/base-token.png'
+                },
+                'ARBITRUM': {
+                    'chain_id': 'ARBITRUM',
+                    'name': 'Arbitrum',
+                    'symbol': 'ETH',
+                    'network': 'Mainnet',
+                    'status': 'active',
+                    'logo': 'https://assets.coingecko.com/coins/images/16547/large/photo_2023-03-29_21.47.00.jpeg'
+                },
+                'OPTIMISM': {
+                    'chain_id': 'OPTIMISM',
+                    'name': 'Optimism',
+                    'symbol': 'ETH',
+                    'network': 'Mainnet',
+                    'status': 'active',
+                    'logo': 'https://assets.coingecko.com/coins/images/25244/large/Optimism.png'
+                },
+                'SOL': {
+                    'chain_id': 'SOL',
+                    'name': 'Solana',
+                    'symbol': 'SOL',
+                    'network': 'Mainnet',
+                    'status': 'active',
+                    'logo': 'https://assets.coingecko.com/coins/images/4128/large/solana.png'
+                },
+                'BTC': {
+                    'chain_id': 'BTC',
+                    'name': 'Bitcoin',
+                    'symbol': 'BTC',
+                    'network': 'Mainnet',
+                    'status': 'coming_soon',
+                    'logo': 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png'
+                }
+            }
+            
+            return Response({
+                'status': 'success',
+                'message': '获取支持的链列表成功',
+                'data': {
+                    'supported_chains': supported_chains
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"获取支持的链列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取支持的链列表失败',
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 

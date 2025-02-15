@@ -2,27 +2,26 @@ import aiohttp
 import asyncio
 import logging
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Optional
 from django.utils import timezone
+from datetime import timedelta
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
-from datetime import timedelta
 import time
+import json
 
-from ..base.balance import BaseBalanceService
 from ...models import Token, Wallet
-from ...api_config import MoralisConfig
+from ...api_config import MoralisConfig, RPCConfig
 
 logger = logging.getLogger(__name__)
 
-class SolanaBalanceService(BaseBalanceService):
+class SolanaBalanceService:
     """Solana 余额查询服务实现类"""
 
     PRICE_CACHE_TTL = 300  # 价格缓存5分钟
     TOKEN_CACHE_TTL = 86400  # 代币元数据缓存24小时
 
     def __init__(self):
-        super().__init__()
         self.headers = {
             "accept": "application/json",
             "X-API-Key": MoralisConfig.API_KEY

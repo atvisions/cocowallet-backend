@@ -25,9 +25,90 @@ class RPCConfig:
     ALCHEMY_API_KEY: str = os.getenv('ALCHEMY_API_KEY', '')
     QUICKNODE_API_KEY: str = os.getenv('QUICKNODE_API_KEY', '')
     
+    # Alchemy API 配置
+    ALCHEMY_BASE_URL = "https://{}.g.alchemy.com/v2"
+    
+    # 原生代币配置
+    NATIVE_TOKENS = {
+        'ETH': {
+            'address': '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',  # WETH
+            'name': 'Ethereum',
+            'symbol': 'ETH',
+            'decimals': 18,
+            'logo': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png'
+        },
+        'BSC': {
+            'address': '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',  # WBNB
+            'name': 'BNB',
+            'symbol': 'BNB',
+            'decimals': 18,
+            'logo': 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png'
+        },
+        'MATIC': {
+            'address': '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270',  # WMATIC
+            'name': 'Polygon',
+            'symbol': 'MATIC',
+            'decimals': 18,
+            'logo': 'https://assets.coingecko.com/coins/images/4713/large/matic-token-icon.png'
+        },
+        'AVAX': {
+            'address': '0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7',  # WAVAX
+            'name': 'Avalanche',
+            'symbol': 'AVAX',
+            'decimals': 18,
+            'logo': 'https://assets.coingecko.com/coins/images/12559/large/coin-round-red.png'
+        },
+        'ARBITRUM': {
+            'address': '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',  # WETH
+            'name': 'Ethereum',
+            'symbol': 'ETH',
+            'decimals': 18,
+            'logo': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png'
+        },
+        'OPTIMISM': {
+            'address': '0x4200000000000000000000000000000000000006',  # WETH
+            'name': 'Ethereum',
+            'symbol': 'ETH',
+            'decimals': 18,
+            'logo': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png'
+        },
+        'BASE': {
+            'address': '0x4200000000000000000000000000000000000006',  # WETH
+            'name': 'Ethereum',
+            'symbol': 'ETH',
+            'decimals': 18,
+            'logo': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png'
+        }
+    }
+    
+    # 链到 Alchemy 网络的映射
+    ALCHEMY_NETWORKS = {
+        'ETH': 'eth-mainnet',
+        'MATIC': 'polygon-mainnet',
+        'AVAX': 'avalanche-mainnet',
+        'BASE': 'base-mainnet',
+        'ARBITRUM': 'arb-mainnet',
+        'OPTIMISM': 'opt-mainnet'
+    }
+    
+    @classmethod
+    def get_alchemy_url(cls, chain: str) -> str:
+        """获取 Alchemy API URL
+        
+        Args:
+            chain: 链标识
+            
+        Returns:
+            str: Alchemy API URL
+        """
+        network = cls.ALCHEMY_NETWORKS.get(chain)
+        if not network:
+            raise ValueError(f"不支持的链: {chain}")
+        return f"{cls.ALCHEMY_BASE_URL.format(network)}/{cls.ALCHEMY_API_KEY}"
+    
     # EVM 链 RPC 节点
     ETH_RPC_URL: str = os.getenv('ETH_RPC_URL', f'https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
-    BSC_RPC_URL: str = os.getenv('BSC_RPC_URL', f'https://bsc-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
+    BSC_RPC_URL: str = os.getenv('BSC_RPC_URL', 'https://bsc-dataseed.binance.org')
     POLYGON_RPC_URL: str = os.getenv('POLYGON_RPC_URL', f'https://polygon-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
     AVAX_RPC_URL: str = os.getenv('AVAX_RPC_URL', f'https://avalanche-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
     ARBITRUM_RPC_URL: str = os.getenv('ARBITRUM_RPC_URL', f'https://arb-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}')
@@ -69,15 +150,16 @@ class MoralisConfig:
     BASE_URL: str = 'https://deep-index.moralis.io/api/v2.2'
     SOLANA_URL: str = 'https://solana-gateway.moralis.io'
     
-    # EVM价格和元数据查询接口
-    EVM_TOKEN_PRICE_URL: str = f"{BASE_URL}/erc20/{{}}/price"
-    EVM_TOKEN_PRICE_HISTORY_URL: str = f"{BASE_URL}/erc20/{{}}/price/history"
-    EVM_TOKEN_METADATA_URL: str = f"{BASE_URL}/erc20/metadata"
-    EVM_WALLET_TOKENS_URL: str = f"{BASE_URL}/wallets/{{0}}/tokens"
-    EVM_WALLET_NATIVE_BALANCE_URL: str = f"{BASE_URL}/{{0}}/balance"
-    EVM_TOKEN_PRICE_BATCH_URL: str = f"{BASE_URL}/chains/{{0}}/native-price"
+    # EVM 代币相关接口
+    EVM_TOKEN_PRICE_URL: str = f"{BASE_URL}/erc20/{{0}}/price"  # 获取代币价格
+    EVM_TOKEN_PAIRS_URL: str = f"{BASE_URL}/erc20/{{0}}/pairs"  # 获取代币交易对
+    EVM_TOKEN_PRICE_CHART_URL: str = f"{BASE_URL}/pairs/{{0}}/ohlcv"  # 获取代币价格历史
+    EVM_TOKEN_METADATA_URL: str = f"{BASE_URL}/erc20/metadata"  # 获取代币元数据
+    EVM_WALLET_TOKENS_URL: str = f"{BASE_URL}/{{0}}/erc20"  # 获取钱包代币列表
+    EVM_TOKEN_TRANSFERS_URL: str = f"{BASE_URL}/{{0}}/erc20/transfers"  # 获取代币转账历史
+    EVM_TOKEN_HOLDERS_URL: str = f"{BASE_URL}/erc20/{{0}}/holders"  # 获取代币持有者
     
-    # Solana价格和元数据查询接口
+    # Solana 价格和元数据查询接口
     SOLANA_TOKEN_PRICE_URL: str = f"{SOLANA_URL}/token/mainnet/{{}}/price"  # 获取代币价格
     SOLANA_TOKEN_PAIRS_URL: str = f"{SOLANA_URL}/token/mainnet/{{}}/pairs"  # 获取代币交易对
     SOLANA_TOKEN_PAIRS_PRICE_URL: str = f"{SOLANA_URL}/token/mainnet/pairs/{{}}/price"  # 获取交易对价格
@@ -86,14 +168,42 @@ class MoralisConfig:
     SOLANA_ACCOUNT_BALANCE_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/balance"  # 获取账户余额
     SOLANA_ACCOUNT_TOKENS_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/tokens"  # 获取账户代币列表
     
-    # Solana NFT 相关接口
+    # Solana NFT 相关接口（未启用）
     SOLANA_NFT_LIST_URL: str = f"{SOLANA_URL}/account/{{0}}/{{1}}/nft"  # 获取地址的NFTs，参数: network, address
     SOLANA_NFT_METADATA_URL: str = f"{SOLANA_URL}/nft/{{0}}/{{1}}/metadata"  # 获取NFT元数据，参数: network, address
     
-    # Solana Swap 相关接口
+    # Solana Swap 相关接口，（未启用）
     SOLANA_ACCOUNT_SWAPS_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/swaps"  # 获取账户 swap 历史
     SOLANA_SWAP_QUOTE_URL: str = f"{SOLANA_URL}/swap/mainnet/quote"  # 获取 swap 报价
     SOLANA_SWAP_EXECUTE_URL: str = f"{SOLANA_URL}/swap/mainnet/execute"  # 执行 swap 交易
+    
+    # API 请求头
+    @classmethod
+    def get_headers(cls) -> Dict:
+        """获取请求头"""
+        return {
+            "accept": "application/json",
+            "X-API-Key": cls.API_KEY
+        }
+    
+    # 链 ID 映射
+    CHAIN_MAPPING = {
+        'ETH': 'eth',
+        'BSC': 'bsc',
+        'MATIC': 'polygon',
+        'AVAX': 'avalanche',
+        'ARBITRUM': 'arbitrum',
+        'OPTIMISM': 'optimism',
+        'BASE': 'base'
+    }
+    
+    @classmethod
+    def get_chain_id(cls, chain: str) -> str:
+        """获取链 ID"""
+        chain_id = cls.CHAIN_MAPPING.get(chain)
+        if not chain_id:
+            raise ValueError(f"不支持的链: {chain}")
+        return chain_id
     
     # API 请求超时时间(秒)
     TIMEOUT = 30

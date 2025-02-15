@@ -1,19 +1,21 @@
-import aiohttp
-import asyncio
+"""Solana 交易历史服务"""
 import logging
 from typing import Dict, List, Optional
+from decimal import Decimal
+import aiohttp
+import asyncio
 from datetime import datetime
-from django.utils import timezone
 from asgiref.sync import sync_to_async
+import json
+from django.utils import timezone
 
-from ..base.history import BaseHistoryService
-from ...models import Transaction, Token
+from ...models import Transaction, Token, Wallet
 from ...api_config import MoralisConfig
 
 logger = logging.getLogger(__name__)
 
-class SolanaHistoryService(BaseHistoryService):
-    """Solana 历史记录服务实现类"""
+class SolanaHistoryService:
+    """Solana 交易历史服务实现类"""
 
     def __init__(self):
         self.headers = {

@@ -632,7 +632,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 获取价格走势图数据
             try:
-                ohlcv_data = await token_info_service.get_token_ohlcv(
+                ohlcv_data = await token_info_service.get_token_ohlcv( # type: ignore
                     token_address,
                     timeframe=timeframe,
                     currency=currency,
@@ -724,7 +724,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 执行转账
             try:
-                async with transfer_service:  # 使用异步上下文管理器
+                async with transfer_service:  # type: ignore # 使用异步上下文管理器
                     if token_address:
                         # SPL代币转账
                         result = await transfer_service.transfer_token(
@@ -892,7 +892,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
             # 获取兑换报价
-            quote = await swap_service.get_swap_quote(
+            quote = await swap_service.get_swap_quote( # type: ignore
                 from_token=from_token,
                 to_token=to_token,
                 amount=Decimal(str(amount)),
@@ -965,7 +965,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
             # 执行兑换
-            result = await swap_service.execute_swap(
+            result = await swap_service.execute_swap( # type: ignore
                 quote_id=quote_id,
                 from_token=from_token,
                 to_token=to_token,

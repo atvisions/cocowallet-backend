@@ -1,3 +1,4 @@
+"""Solana NFT 服务"""
 import logging
 import aiohttp
 import asyncio
@@ -16,21 +17,20 @@ from solana.rpc.types import TxOpts
 from solana.blockhash import Blockhash
 from solana.system_program import create_account, CreateAccountParams
 import base58
+import json
+from django.core.cache import cache
 
-from ..base.nft import BaseNFTService
 from ...models import Wallet, Transaction as DBTransaction, Token, NFTCollection
 from ...exceptions import InsufficientBalanceError, InvalidAddressError, TransferError
-from ...api_config import HeliusConfig, RPCConfig
+from ...api_config import HeliusConfig, RPCConfig, MoralisConfig
 
 logger = logging.getLogger(__name__)
 
-class SolanaNFTService(BaseNFTService):
+class SolanaNFTService:
     """Solana NFT 服务实现类"""
 
     def __init__(self):
         """初始化 Solana NFT 服务"""
-        super().__init__()
-        
         # 初始化 RPC 配置
         self.rpc_url = RPCConfig.SOLANA_MAINNET_RPC_URL
         

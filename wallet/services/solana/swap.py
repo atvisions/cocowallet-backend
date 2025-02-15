@@ -1,6 +1,7 @@
+"""Solana 代币兑换服务"""
 import logging
 from decimal import Decimal
-from typing import Dict, Any, Optional, cast
+from typing import Dict, Any, Optional
 import asyncio
 import aiohttp
 from django.utils import timezone
@@ -18,12 +19,11 @@ import base64
 import ssl
 
 from ...api_config import MoralisConfig, RPCConfig
-from ...exceptions import SwapError, InsufficientBalanceError # type: ignore
-from ..base.swap import BaseSwapService
+from ...exceptions import SwapError, InsufficientBalanceError
 
 logger = logging.getLogger(__name__)
 
-class SolanaSwapService(BaseSwapService):
+class SolanaSwapService:
     """Solana 代币兑换服务"""
     
     def get_quote(self, wallet_id: str, device_id: str, from_token: str, to_token: str, amount: str, slippage: Optional[str] = None) -> Dict[str, Any]:

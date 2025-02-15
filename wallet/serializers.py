@@ -120,11 +120,39 @@ class WalletSetupSerializer(serializers.Serializer):
 class ChainSelectionSerializer(serializers.Serializer):
     """链选择序列化器"""
     device_id = serializers.CharField(max_length=100)
-    chain = serializers.ChoiceField(choices=['ETH', 'BASE', 'SOL'])
+    chain = serializers.CharField(max_length=20)
 
     def validate_chain(self, value):
-        """验证链类型"""
-        supported_chains = ['ETH', 'BASE', 'SOL']
+        """验证链类型
+        
+        支持的链标识符:
+        - ETH: 以太坊主网
+        - BSC: 币安智能链
+        - MATIC: Polygon主网
+        - AVAX: Avalanche C-Chain
+        - BASE: Base主网
+        - ARBITRUM: Arbitrum One
+        - OPTIMISM: Optimism主网
+        - SOL: Solana主网
+        - BTC: 比特币主网 (即将支持)
+        """
+        # 获取支持的链列表
+        supported_chains = {
+            'ETH': {'status': 'active'},
+            'BSC': {'status': 'active'},
+            'MATIC': {'status': 'active'},
+            'AVAX': {'status': 'active'},
+            'BASE': {'status': 'active'},
+            'ARBITRUM': {'status': 'active'},
+            'OPTIMISM': {'status': 'active'},
+            'SOL': {'status': 'active'},
+            'BTC': {'status': 'coming_soon'}
+        }
+        
         if value not in supported_chains:
             raise serializers.ValidationError('不支持的链类型')
-        return value 
+            
+        if supported_chains[value]['status'] == 'coming_soon':
+            raise serializers.ValidationError(f"{value} 即将支持")
+            
+        return value

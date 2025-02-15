@@ -8,7 +8,6 @@ from asgiref.sync import sync_to_async
 from moralis import evm_api, sol_api
 import json
 
-from ..base.token_info import BaseTokenInfoService
 from ...models import Token, Wallet, Transaction
 from ...api_config import MoralisConfig, APIConfig, HeliusConfig
 from datetime import timedelta, datetime
@@ -16,7 +15,7 @@ import async_timeout
 
 logger = logging.getLogger(__name__)
 
-class SolanaTokenInfoService(BaseTokenInfoService):
+class SolanaTokenInfoService:
     """Solana 代币信息服务实现类"""
 
     def __init__(self):
@@ -468,7 +467,7 @@ class SolanaTokenInfoService(BaseTokenInfoService):
                     # 如果直接是列表格式
                     pairs_list = pairs_data
                 else:
-                    logger.error(f"交易对数据格式错误: {type(pairs_data)}")
+                    logger.error(f"交易对数据格式错误，期望是列表或包含pairs字段的字典，实际是: {type(pairs_data)}")
                     return {}
                 
                 # 过滤出活跃的交易对
