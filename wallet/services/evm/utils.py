@@ -1,7 +1,7 @@
 """EVM 链通用工具函数"""
 import logging
 from typing import Dict, Optional, Any, Union
-from web3 import Web3, AsyncWeb3
+from web3 import Web3
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from decimal import Decimal
@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 class EVMUtils:
     """EVM 链通用工具类"""
     
+    # 原生代币地址
+    NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    
     CHAIN_CONFIG = {
         'ETH': {
             'chain_id': 1,
@@ -24,7 +27,10 @@ class EVMUtils:
             'decimals': 18,
             'explorer': 'https://etherscan.io',
             'rpc_url': RPCConfig.ETH_RPC_URL,
-            'native_token': RPCConfig.NATIVE_TOKENS['ETH']
+            'native_token': {
+                **RPCConfig.NATIVE_TOKENS['ETH'],
+                'address': NATIVE_TOKEN_ADDRESS
+            }
         },
         'BSC': {
             'chain_id': 56,
@@ -33,7 +39,10 @@ class EVMUtils:
             'decimals': 18,
             'explorer': 'https://bscscan.com',
             'rpc_url': RPCConfig.BSC_RPC_URL,
-            'native_token': RPCConfig.NATIVE_TOKENS['BSC']
+            'native_token': {
+                **RPCConfig.NATIVE_TOKENS['BSC'],
+                'address': NATIVE_TOKEN_ADDRESS
+            }
         },
         'MATIC': {
             'chain_id': 137,
@@ -42,7 +51,10 @@ class EVMUtils:
             'decimals': 18,
             'explorer': 'https://polygonscan.com',
             'rpc_url': RPCConfig.POLYGON_RPC_URL,
-            'native_token': RPCConfig.NATIVE_TOKENS['MATIC']
+            'native_token': {
+                **RPCConfig.NATIVE_TOKENS['MATIC'],
+                'address': NATIVE_TOKEN_ADDRESS
+            }
         },
         'AVAX': {
             'chain_id': 43114,
@@ -51,7 +63,10 @@ class EVMUtils:
             'decimals': 18,
             'explorer': 'https://snowtrace.io',
             'rpc_url': RPCConfig.AVAX_RPC_URL,
-            'native_token': RPCConfig.NATIVE_TOKENS['AVAX']
+            'native_token': {
+                **RPCConfig.NATIVE_TOKENS['AVAX'],
+                'address': NATIVE_TOKEN_ADDRESS
+            }
         },
         'BASE': {
             'chain_id': 8453,
@@ -60,7 +75,10 @@ class EVMUtils:
             'decimals': 18,
             'explorer': 'https://basescan.org',
             'rpc_url': RPCConfig.BASE_RPC_URL,
-            'native_token': RPCConfig.NATIVE_TOKENS['BASE']
+            'native_token': {
+                **RPCConfig.NATIVE_TOKENS['BASE'],
+                'address': NATIVE_TOKEN_ADDRESS
+            }
         },
         'ARBITRUM': {
             'chain_id': 42161,
@@ -69,7 +87,10 @@ class EVMUtils:
             'decimals': 18,
             'explorer': 'https://arbiscan.io',
             'rpc_url': RPCConfig.ARBITRUM_RPC_URL,
-            'native_token': RPCConfig.NATIVE_TOKENS['ARBITRUM']
+            'native_token': {
+                **RPCConfig.NATIVE_TOKENS['ARBITRUM'],
+                'address': NATIVE_TOKEN_ADDRESS
+            }
         },
         'OPTIMISM': {
             'chain_id': 10,
@@ -78,7 +99,10 @@ class EVMUtils:
             'decimals': 18,
             'explorer': 'https://optimistic.etherscan.io',
             'rpc_url': RPCConfig.OPTIMISM_RPC_URL,
-            'native_token': RPCConfig.NATIVE_TOKENS['OPTIMISM']
+            'native_token': {
+                **RPCConfig.NATIVE_TOKENS['OPTIMISM'],
+                'address': NATIVE_TOKEN_ADDRESS
+            }
         }
     }
     

@@ -164,6 +164,48 @@ class EVMHistoryService:
                     address=token_address
                 ).first)()
                 
+                # 如果数据库中没有代币信息，尝试从链上获取
+                if not token and token_address:
+                    try:
+                        token_contract = self.web3.eth.contract(
+                            address=Web3.to_checksum_address(token_address),
+                            abi=ERC20_ABI
+                        )
+                        name = await token_contract.functions.name().call()
+                        symbol = await token_contract.functions.symbol().call()
+                        decimals = await token_contract.functions.decimals().call()
+                        
+                        token_info = {
+                            'logo': '',
+                            'name': name,
+                            'symbol': symbol,
+                            'address': token_address,
+                            'decimals': decimals,
+                            'verified': False,
+                            'thumbnail': ''
+                        }
+                    except Exception as e:
+                        logger.error(f"获取代币信息失败: {str(e)}")
+                        token_info = {
+                            'logo': '',
+                            'name': 'Unknown Token',
+                            'symbol': 'Unknown',
+                            'address': token_address,
+                            'decimals': 18,
+                            'verified': False,
+                            'thumbnail': ''
+                        }
+                else:
+                    token_info = {
+                        'logo': token.logo if token else '',
+                        'name': token.name if token else 'Unknown Token',
+                        'symbol': token.symbol if token else 'Unknown',
+                        'address': token_address,
+                        'decimals': token.decimals if token else 18,
+                        'verified': token.verified if token else False,
+                        'thumbnail': token.thumbnail if token else ''
+                    }
+                
                 transactions = []
                 for tx in unique_results:
                     try:
@@ -172,17 +214,11 @@ class EVMHistoryService:
                         if raw_value == '0':  # 跳过零值交易
                             continue
                             
-                        # 如果有代币信息，使用代币精度
-                        if token:
-                            # 将原始金额转换为十进制数
-                            value = Decimal(raw_value)
-                            # 使用代币精度格式化金额
-                            formatted_value = str(value / Decimal(str(10 ** token.decimals)))
-                        else:
-                            # 如果没有代币信息，使用默认精度18
-                            value = Decimal(raw_value)
-                            formatted_value = str(value / Decimal(str(10 ** 18)))
-                            
+                        # 将原始金额转换为十进制数
+                        value = Decimal(raw_value)
+                        # 使用代币精度格式化金额
+                        formatted_value = str(value / Decimal(str(10 ** token_info['decimals'])))
+                        
                         transactions.append({
                             'tx_hash': tx.get('transaction_hash'),
                             'block_number': tx.get('block_number'),
@@ -190,13 +226,11 @@ class EVMHistoryService:
                             'from_address': tx.get('from_address'),
                             'to_address': tx.get('to_address'),
                             'value': formatted_value,
-                            'token_address': token_address,
-                            'token_name': token.name if token else 'Unknown Token',
-                            'token_symbol': token.symbol if token else 'Unknown',
-                            'token_decimals': token.decimals if token else 18,
+                            'token_address': token_address,  # 确保设置正确的代币地址
+                            'token_info': token_info,  # 使用完整的代币信息
                             'gas_price': EVMUtils.from_wei(int(tx.get('gas_price', '0'), 16)),
                             'gas_used': int(tx.get('receipt_gas_used', '0'), 16),
-                            'status': 'SUCCESS',  # ERC20 transfer 通常都是成功的
+                            'status': 'SUCCESS',
                             'is_native': False
                         })
                     except Exception as e:

@@ -542,6 +542,16 @@ class EVMTokenInfoService:
             if cached_price:
                 return cached_price
             
+            # 如果是 BASE 链的原生代币，使用 ETH 主网的价格
+            if self.chain == 'BASE' and (
+                token_address == EVMUtils.NATIVE_TOKEN_ADDRESS or 
+                token_address.lower() == '0x4200000000000000000000000000000000000006'  # BASE 的 WETH
+            ):
+                chain = 'eth'  # 使用 ETH 主网
+                token_address = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'  # ETH 主网 WETH
+            else:
+                chain = MoralisConfig.get_chain_id(self.chain)
+            
             # 获取 Moralis API 配置
             if not MoralisConfig.API_KEY:
                 logger.error("未配置 MORALIS_API_KEY")
@@ -549,9 +559,6 @@ class EVMTokenInfoService:
                     'price_usd': '0',
                     'price_change_24h': '+0.00%'
                 }
-            
-            # 获取链 ID
-            chain = MoralisConfig.get_chain_id(self.chain)
             
             # 构建 API URL
             url = MoralisConfig.EVM_TOKEN_PRICE_URL.format(token_address)
@@ -563,21 +570,9 @@ class EVMTokenInfoService:
             logger.debug(f"请求 Moralis API - URL: {url}, 参数: {params}")
             
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(
-                    url, 
-                    headers=MoralisConfig.get_headers(), 
-                    params=params
-                ) as response:
+                async with session.get(url, headers=MoralisConfig.get_headers(), params=params) as response:
                     response_text = await response.text()
                     logger.debug(f"Moralis API 响应: {response_text}")
-                    
-                    # 检查是否是已知的错误响应
-                    if "No liquidity pools found" in response_text:
-                        logger.info(f"代币 {token_address} 没有流动性池")
-                        return {
-                            'price_usd': '0',
-                            'price_change_24h': '+0.00%'
-                        }
                     
                     if response.status == 200:
                         try:

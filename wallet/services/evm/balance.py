@@ -6,12 +6,47 @@ import aiohttp
 import json
 from web3 import Web3
 from django.core.cache import cache
+from asgiref.sync import sync_to_async
 
+from ...models import Wallet
 from ...api_config import MoralisConfig
+from ...exceptions import WalletNotFoundError, ChainNotSupportError, GetBalanceError
 from .utils import EVMUtils
 from .token_info import EVMTokenInfoService
 
 logger = logging.getLogger(__name__)
+
+# ERC20 代币 ABI
+ERC20_ABI = [
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "name",
+        "outputs": [{"name": "", "type": "string"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "symbol",
+        "outputs": [{"name": "", "type": "string"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{"name": "", "type": "uint8"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function"
+    }
+]
 
 class EVMBalanceService:
     """EVM 余额查询服务实现类"""
@@ -32,6 +67,21 @@ class EVMBalanceService:
         self.headers = MoralisConfig.get_headers()
         self.timeout = aiohttp.ClientTimeout(total=MoralisConfig.TIMEOUT)
 
+    async def get_wallet(self, wallet_id: int) -> Optional[Wallet]:
+        """获取钱包
+        
+        Args:
+            wallet_id: 钱包ID
+            
+        Returns:
+            Optional[Wallet]: 钱包对象
+        """
+        try:
+            wallet = await sync_to_async(Wallet.objects.get)(id=wallet_id, is_active=True)
+            return wallet
+        except Wallet.DoesNotExist:
+            return None
+
     async def get_native_balance(self, address: str) -> Decimal:
         """获取原生代币余额
         
@@ -50,78 +100,62 @@ class EVMBalanceService:
             logger.error(f"获取原生代币余额失败: {str(e)}")
             return Decimal('0')
 
-    async def get_token_balance(self, address: str, token_address: str) -> Decimal:
+    async def get_token_balance(self, wallet_id: int, token_address: Optional[str] = None) -> dict:
         """获取代币余额
         
         Args:
-            address: 钱包地址
-            token_address: 代币合约地址
+            wallet_id: 钱包ID
+            token_address: 代币合约地址，如果是原生代币则使用 NATIVE_TOKEN_ADDRESS
             
         Returns:
-            Decimal: 余额
+            dict: 代币余额信息
         """
         try:
-            # 验证地址
-            if not EVMUtils.validate_address(address):
-                logger.error(f"无效的钱包地址: {address}")
-                return Decimal('0')
-            if not EVMUtils.validate_address(token_address):
-                logger.error(f"无效的代币地址: {token_address}")
-                return Decimal('0')
+            wallet = await self.get_wallet(wallet_id)
+            if not wallet:
+                raise WalletNotFoundError()
                 
-            logger.info(f"开始查询代币余额: address={address}, token={token_address}")
+            # 获取链配置
+            chain_config = EVMUtils.get_chain_config(wallet.chain)
+            if not chain_config:
+                raise ChainNotSupportError()
+                
+            # 获取 Web3 实例
+            w3 = Web3(Web3.HTTPProvider(chain_config['rpc_url']))
             
-            # 使用 web3 直接从链上获取代币余额
-            contract = self.web3.eth.contract(
-                address=Web3.to_checksum_address(token_address),
-                abi=[{
-                    "constant": True,
-                    "inputs": [{
-                        "name": "_owner",
-                        "type": "address"
-                    }],
-                    "name": "balanceOf",
-                    "outputs": [{
-                        "name": "balance",
-                        "type": "uint256"
-                    }],
-                    "type": "function"
-                }, {
-                    "constant": True,
-                    "inputs": [],
-                    "name": "decimals",
-                    "outputs": [{
-                        "name": "",
-                        "type": "uint8"
-                    }],
-                    "type": "function"
-                }]
-            )
-            
-            # 获取代币精度
-            try:
+            # 查询余额
+            if token_address == EVMUtils.NATIVE_TOKEN_ADDRESS or not token_address:
+                # 原生代币余额
+                balance = w3.eth.get_balance(wallet.address)
+                decimals = chain_config['decimals']
+                symbol = chain_config['symbol']
+                name = chain_config['name']
+            else:
+                # ERC20 代币余额
+                contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(token_address),
+                    abi=ERC20_ABI
+                )
+                balance = contract.functions.balanceOf(wallet.address).call()
                 decimals = contract.functions.decimals().call()
-                logger.info(f"代币精度: {decimals}")
-            except Exception as e:
-                logger.error(f"获取代币精度失败: {str(e)}")
-                decimals = 18  # 默认精度
+                symbol = contract.functions.symbol().call()
+                name = contract.functions.name().call()
+                
+            # 格式化余额
+            balance_formatted = balance / (10 ** decimals)
             
-            # 获取余额
-            try:
-                balance = contract.functions.balanceOf(Web3.to_checksum_address(address)).call()
-                logger.info(f"原始余额: {balance}")
-            except Exception as e:
-                logger.error(f"获取余额失败: {str(e)}")
-                return Decimal('0')
-            
-            formatted_balance = EVMUtils.from_wei(balance, decimals)
-            logger.info(f"格式化后余额: {formatted_balance}")
-            
-            return formatted_balance
+            return {
+                'address': token_address or EVMUtils.NATIVE_TOKEN_ADDRESS,
+                'name': name,
+                'symbol': symbol,
+                'decimals': decimals,
+                'balance': str(balance),
+                'balance_formatted': str(balance_formatted)
+            }
             
         except Exception as e:
-            logger.error(f"获取代币余额失败: address={address}, token={token_address}, error={str(e)}")
-            return Decimal('0')
+            logger.error(f"获取代币余额失败: {str(e)}")
+            raise GetBalanceError(str(e))
 
     async def get_token_price(self, token_address: Optional[str] = None) -> Dict:
         """获取代币价格
@@ -164,14 +198,21 @@ class EVMBalanceService:
                 native_token = self.chain_config['native_token']
                 
                 # 获取原生代币价格
-                native_price_data = await self.token_info_service.get_token_price(native_token['address'])
+                # 对于 ETH 和其他使用 ETH 作为原生代币的链，使用 ETH 主网的 WETH 价格
+                if self.chain in ['ETH', 'BASE', 'ARBITRUM', 'OPTIMISM']:
+                    eth_mainnet_weth = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'  # ETH 主网 WETH 地址
+                    temp_service = EVMTokenInfoService('ETH')  # 临时创建 ETH 主网的服务
+                    native_price_data = await temp_service.get_token_price(eth_mainnet_weth)
+                else:
+                    native_price_data = await self.token_info_service.get_token_price(native_token['address'])
+                    
                 native_price = float(native_price_data.get('price_usd', '0'))
                 native_value = float(native_balance) * native_price
                 total_value += native_value
                 
                 tokens.append({
                     'chain': self.chain,
-                    'address': native_token['address'],
+                    'address': EVMUtils.NATIVE_TOKEN_ADDRESS,  # 使用统一的原生代币地址
                     'name': native_token['name'],
                     'symbol': native_token['symbol'],
                     'decimals': native_token['decimals'],

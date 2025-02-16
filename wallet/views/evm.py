@@ -55,6 +55,8 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     authentication_classes = [SessionAuthentication, BasicAuthentication]
     parser_classes = [JSONParser]
+    queryset = Wallet.objects.filter(is_active=True)
+    serializer_class = WalletSerializer
 
     async def get_wallet_async(self, wallet_id: int, device_id: str = None) -> Wallet:
         """获取钱包"""
@@ -291,6 +293,9 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                     'message': f'解密私钥失败: {str(e)}'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
+            # 获取转账服务
+            transfer_service = ChainServiceFactory.get_transfer_service(wallet.chain)
+
             # 根据是否有 token_address 参数决定调用哪个转账方法
             if token_address:
                 # ERC20 代币转账
@@ -409,16 +414,11 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             if wallet.chain not in EVMUtils.CHAIN_CONFIG:
                 return Response({
                     'status': 'error',
-                    'message': '不支持的链类型'
+                    'message': '不支持的链'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取代币信息服务
             token_info_service = ChainServiceFactory.get_token_info_service(wallet.chain)
-            if not token_info_service:
-                return Response({
-                    'status': 'error',
-                    'message': '代币信息服务不可用'
-                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
             # 获取代币元数据
             token_data = await token_info_service.get_token_metadata(token_address)
@@ -426,119 +426,38 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                 return Response({
                     'status': 'error',
                     'message': '获取代币信息失败'
-                }, status=status.HTTP_404_NOT_FOUND)
+                }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取代币余额
             balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
-            balance = await balance_service.get_token_balance(wallet.address, token_address)
+            balance_info = await balance_service.get_token_balance(pk, token_address)
             
-            # 格式化余额
-            formatted_balance = str(balance)
-            
-            # 格式化价格
-            price_usd = token_data.get('price_usd', '0')
-            try:
-                price = float(price_usd)
-                if price < 0.000001:
-                    formatted_price = '{:.12f}'.format(price)
-                elif price < 0.00001:
-                    formatted_price = '{:.10f}'.format(price)
-                elif price < 0.0001:
-                    formatted_price = '{:.8f}'.format(price)
-                elif price < 0.01:
-                    formatted_price = '{:.6f}'.format(price)
-                else:
-                    formatted_price = '{:.4f}'.format(price)
-                formatted_price = formatted_price.rstrip('0').rstrip('.')
-            except (ValueError, TypeError):
-                formatted_price = '0'
-            
-            # 格式化价格变化
-            price_change = token_data.get('price_change_24h', '0')
-            try:
-                change = float(price_change.rstrip('%'))  # 移除百分号
-                formatted_price_change = '{:+.2f}%'.format(change)
-            except (ValueError, TypeError):
-                formatted_price_change = '+0.00%'
+            # 获取代币价格
+            price_data = await token_info_service.get_token_price(token_address)
             
             # 计算价值
-            try:
-                # 使用 Decimal 进行精确计算
-                balance_decimal = Decimal(str(balance))
-                price_decimal = Decimal(str(price))
-                value = balance_decimal * price_decimal
-                
-                # 根据价值大小格式化
-                if value < 0.0001:
-                    formatted_value = '{:.8f}'.format(float(value))
-                elif value < 0.01:
-                    formatted_value = '{:.6f}'.format(float(value))
-                else:
-                    formatted_value = '{:.4f}'.format(float(value))
-                formatted_value = formatted_value.rstrip('0').rstrip('.')
-            except (ValueError, TypeError, DecimalInvalidOperation):
-                formatted_value = '0'
+            balance = Decimal(balance_info['balance_formatted'])
+            price = Decimal(price_data.get('price_usd', '0'))
+            value = balance * price
             
-            # 获取代币可见性设置
-            is_visible = True  # 默认可见
-            token = await sync_to_async(Token.objects.filter(
-                chain=wallet.chain,
-                address=token_address
-            ).first)()
-            if token:
-                is_visible = token.is_visible
-            
-            # 构建响应数据
-            response_data = {
-                'token_address': token_address,
-                'name': token_data['name'],
-                'symbol': token_data['symbol'],
-                'decimals': token_data['decimals'],
-                'logo': token_data['logo'],
-                'thumbnail': token_data.get('thumbnail', ''),
-                'type': token_data['type'],
-                'contract_type': token_data['contract_type'],
-                'description': token_data['description'],
-                'website': token_data['website'],
-                'twitter': token_data['twitter'],
-                'telegram': token_data['telegram'],
-                'discord': token_data['discord'],
-                'github': token_data['github'],
-                'medium': token_data['medium'],
-                'reddit': token_data.get('reddit', ''),
-                'instagram': token_data.get('instagram', ''),
-                'email': token_data.get('email', ''),
-                'moralis': token_data.get('moralis', ''),
-                'total_supply': token_data['total_supply'],
-                'total_supply_formatted': token_data['total_supply_formatted'],
-                'circulating_supply': token_data.get('circulating_supply', '0'),
-                'market_cap': token_data.get('market_cap', '0'),
-                'fully_diluted_valuation': token_data.get('fully_diluted_valuation', '0'),
-                'categories': token_data.get('categories', []),
-                'security_score': token_data['security_score'],
-                'verified': token_data['verified'],
-                'possible_spam': token_data['possible_spam'],
-                'block_number': token_data.get('block_number', ''),
-                'validated': token_data.get('validated', 0),
-                'created_at': token_data.get('created_at', ''),
-                'is_native': False,
-                'is_visible': is_visible,
-                'balance': formatted_balance,
-                'price_usd': formatted_price,
-                'price_change_24h': formatted_price_change,
-                'value_usd': formatted_value
-            }
-
             return Response({
                 'status': 'success',
-                'data': response_data
+                'message': '获取代币详情成功',
+                'data': {
+                    **token_data,
+                    'balance': balance_info['balance'],
+                    'balance_formatted': balance_info['balance_formatted'],
+                    'price_usd': str(price),
+                    'value_usd': str(value),
+                    'price_change_24h': price_data.get('price_change_24h', '+0.00%')
+                }
             })
             
         except Exception as e:
             logger.error(f"获取代币详情失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': f'获取代币详情失败: {str(e)}'
+                'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'], url_path=r'tokens/(?P<token_address>[^/.]+)/ohlcv')
@@ -642,9 +561,9 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             # 定义同步函数来处理数据库操作
             @sync_to_async
             def get_transfers():
+                # 移除 tx_type 过滤，显示所有类型的交易
                 transfers_qs = Transaction.objects.filter(
-                    wallet=wallet,
-                    tx_type='TRANSFER'
+                    wallet=wallet
                 ).order_by('-block_timestamp', '-id')
                 
                 total_count = transfers_qs.count()
@@ -695,4 +614,338 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': f'获取代币转账记录失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'], url_path='swap/quote', url_name='swap-quote')
+    @async_to_sync_api
+    async def swap_quote(self, request, pk=None):
+        """获取兑换报价"""
+        try:
+            # 验证参数
+            device_id = request.data.get('device_id')
+            from_token = request.data.get('from_token')
+            to_token = request.data.get('to_token')
+            amount = request.data.get('amount')
+            slippage = float(request.data.get('slippage', 1.0))
+            
+            if not all([device_id, from_token, to_token, amount]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=400)
+            
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链类型'
+                }, status=400)
+            
+            # 获取 Swap 服务
+            swap_service = ChainServiceFactory.get_swap_service(wallet.chain)
+            
+            # 获取报价
+            quote = await swap_service.get_quote(
+                from_token=from_token,
+                to_token=to_token,
+                amount=amount,
+                slippage=slippage
+            )
+            
+            if not quote:
+                return Response({
+                    'status': 'error',
+                    'message': '获取报价失败'
+                }, status=400)
+            
+            return Response(quote)
+            
+        except Exception as e:
+            logger.error(f"获取兑换报价失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f"获取报价失败: {str(e)}"
+            }, status=400)
+
+    @action(detail=True, methods=['post'], url_path='swap/execute')
+    @async_to_sync_api
+    async def swap_execute(self, request, pk=None):
+        """执行代币兑换"""
+        try:
+            device_id = request.data.get('device_id')
+            from_token = request.data.get('from_token')
+            to_token = request.data.get('to_token')
+            amount = request.data.get('amount')
+            payment_password = request.data.get('payment_password')
+            slippage = float(request.data.get('slippage', 1.0))
+            
+            if not all([device_id, from_token, to_token, amount, payment_password]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链类型'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 验证支付密码
+            payment_pwd = await sync_to_async(PaymentPassword.objects.filter(
+                device_id=device_id
+            ).first)()
+            
+            if not payment_pwd or not payment_pwd.verify_password(payment_password):
+                return Response({
+                    'status': 'error',
+                    'message': '支付密码错误'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 设置支付密码用于解密私钥
+            wallet.payment_password = payment_password
+            
+            # 解密私钥
+            try:
+                private_key = wallet.decrypt_private_key()
+            except Exception as e:
+                logger.error(f"解密私钥失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': f'解密私钥失败: {str(e)}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 获取 Swap 服务
+            swap_service = ChainServiceFactory.get_swap_service(wallet.chain)
+            
+            # 执行兑换
+            result = await swap_service.execute_swap(
+                from_token,
+                to_token,
+                amount,
+                wallet.address,
+                private_key,
+                slippage
+            )
+            
+            if result.get('status') == 'error':
+                return Response(result, status=400)
+
+            return Response(result)
+            
+        except Exception as e:
+            logger.error(f"执行代币兑换失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='swap/tokens')
+    @async_to_sync_api
+    async def swap_tokens(self, request, pk=None):
+        """获取支持的代币列表"""
+        try:
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链类型'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 获取 Swap 服务
+            swap_service = ChainServiceFactory.get_swap_service(wallet.chain)
+            
+            # 获取支持的代币列表
+            tokens = await swap_service.get_supported_tokens()
+
+            return Response({
+                'status': 'success',
+                'data': tokens
+            })
+            
+        except Exception as e:
+            logger.error(f"获取支持的代币列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get', 'post'], url_path='swap/allowance')
+    @async_to_sync_api
+    async def swap_allowance(self, request, pk=None):
+        """获取代币授权额度"""
+        try:
+            # 根据请求方法获取参数
+            if request.method == 'GET':
+                device_id = request.query_params.get('device_id')
+                token_address = request.query_params.get('token_address')
+                spender = request.query_params.get('spender')
+            else:
+                device_id = request.data.get('device_id')
+                token_address = request.data.get('token_address')
+                spender = request.data.get('spender')
+            
+            if not all([device_id, token_address, spender]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=400)
+            
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链'
+                }, status=400)
+            
+            # 获取授权额度
+            try:
+                swap_service = ChainServiceFactory.get_swap_service(wallet.chain)
+                allowance = await swap_service.get_token_allowance(
+                    token_address,
+                    wallet.address,
+                    spender
+                )
+                
+                return Response({
+                    'status': 'success',
+                    'message': '获取授权额度成功',
+                    'data': {
+                        'allowance': allowance
+                    }
+                })
+                
+            except Exception as e:
+                logger.error(f"获取授权额度失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': f'获取授权额度失败: {str(e)}'
+                }, status=400)
+            
+        except Exception as e:
+            logger.error(f"获取授权额度失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=400)
+
+    @action(detail=True, methods=['POST'], url_path='swap/approve')
+    @async_to_sync_api
+    async def swap_approve(self, request, pk=None):
+        """授权代币"""
+        try:
+            device_id = request.data.get('device_id')
+            token_address = request.data.get('token_address')
+            spender = request.data.get('spender')
+            amount = request.data.get('amount')
+            payment_password = request.data.get('payment_password')
+            
+            if not all([device_id, token_address, spender, amount, payment_password]):
+                return Response({
+                    'status': 'error',
+                    'message': '参数不完整'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链'
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+            # 验证支付密码
+            payment_pwd = await sync_to_async(PaymentPassword.objects.filter(
+                device_id=device_id
+            ).first)()
+            
+            if not payment_pwd or not payment_pwd.verify_password(payment_password):
+                return Response({
+                    'status': 'error',
+                    'message': '支付密码错误'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 设置支付密码用于解密私钥
+            wallet.payment_password = payment_password
+            
+            # 解密私钥
+            try:
+                private_key = wallet.decrypt_private_key()
+                # 如果返回的是字节类型，则需要转换为十六进制格式
+                if isinstance(private_key, bytes):
+                    # 确保私钥是32字节长度
+                    if len(private_key) != 32:
+                        raise ValueError(f'无效的私钥长度: {len(private_key)}字节，期望长度: 32字节')
+                    # 转换为十六进制格式，添加0x前缀
+                    hex_str = private_key.hex()
+                    private_key = '0x' + hex_str
+                elif isinstance(private_key, str):
+                    # 如果是字符串，确保是有效的十六进制格式
+                    hex_str = private_key[2:] if private_key.startswith('0x') else private_key
+                    # 移除所有非十六进制字符
+                    hex_str = ''.join(c for c in hex_str if c in '0123456789abcdefABCDEF')
+                    if len(hex_str) < 64:
+                        hex_str = hex_str.zfill(64)
+                    private_key = '0x' + hex_str.lower()
+                
+                # 验证私钥对应的地址是否匹配
+                account = Account.from_key(private_key)
+                derived_address = account.address
+                if derived_address.lower() != wallet.address.lower():
+                    raise ValueError(f'私钥地址不匹配: 期望 {wallet.address}, 实际 {derived_address}')
+                    
+            except Exception as e:
+                logger.error(f"解密私钥失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': f'解密私钥失败: {str(e)}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 构建授权交易
+            swap_service = ChainServiceFactory.get_swap_service(wallet.chain)
+            tx = await swap_service.build_approve_transaction(
+                token_address,
+                spender,
+                amount,
+                wallet.address
+            )
+            
+            if tx.get('status') == 'error':
+                return Response(tx, status=400)
+            
+            # 发送交易
+            result = await swap_service._send_transaction(tx, private_key)
+            
+            if result.get('status') == 'error':
+                return Response(result, status=400)
+            
+            return Response(result)
+            
+        except Exception as e:
+            logger.error(f"授权失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'授权失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 

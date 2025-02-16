@@ -28,6 +28,45 @@ class RPCConfig:
     # Alchemy API 配置
     ALCHEMY_BASE_URL = "https://{}.g.alchemy.com/v2"
     
+    # DEX 配置
+    DEX_CONFIG = {
+        'ETH': {
+            'router_address': '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',  # Uniswap V2 Router
+            'factory_address': '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f',  # Uniswap V2 Factory
+            'name': 'Uniswap V2'
+        },
+        'BSC': {
+            'router_address': '0x10ED43C718714eb63d5aA57B78B54704E256024E',  # PancakeSwap V2 Router
+            'factory_address': '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73',  # PancakeSwap V2 Factory
+            'name': 'PancakeSwap V2'
+        },
+        'MATIC': {
+            'router_address': '0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff',  # QuickSwap Router
+            'factory_address': '0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32',  # QuickSwap Factory
+            'name': 'QuickSwap'
+        },
+        'AVAX': {
+            'router_address': '0x60aE616a2155Ee3d9A68541Ba4544862310933d4',  # TraderJoe Router
+            'factory_address': '0x9Ad6C38BE94206cA50bb0d90783181662f0Cfa10',  # TraderJoe Factory
+            'name': 'TraderJoe'
+        },
+        'BASE': {
+            'router_address': '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86',  # BaseSwap Router
+            'factory_address': '0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB',  # BaseSwap Factory
+            'name': 'BaseSwap'
+        },
+        'ARBITRUM': {
+            'router_address': '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506',  # SushiSwap Router
+            'factory_address': '0xc35DADB65012eC5796536bD9864eD8773aBc74C4',  # SushiSwap Factory
+            'name': 'SushiSwap'
+        },
+        'OPTIMISM': {
+            'router_address': '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45',  # Uniswap V3 Router
+            'factory_address': '0x1F98431c8aD98523631AE4a59f267346ea31F984',  # Uniswap V3 Factory
+            'name': 'Uniswap V3'
+        }
+    }
+    
     # 原生代币配置
     NATIVE_TOKENS = {
         'ETH': {
@@ -150,6 +189,37 @@ class MoralisConfig:
     BASE_URL: str = 'https://deep-index.moralis.io/api/v2.2'
     SOLANA_URL: str = 'https://solana-gateway.moralis.io'
     
+    # 链 ID 映射
+    CHAIN_MAPPING = {
+        'ETH': 'eth',
+        'BSC': 'bsc',
+        'MATIC': 'polygon',
+        'AVAX': 'avalanche',
+        'ARBITRUM': 'arbitrum',
+        'OPTIMISM': 'optimism',
+        'BASE': 'base'  # 修改为 base，使用主网
+    }
+    
+    @classmethod
+    def get_headers(cls) -> Dict:
+        """获取请求头"""
+        if not cls.API_KEY:
+            raise ValueError("未配置 MORALIS_API_KEY")
+            
+        return {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "X-API-Key": cls.API_KEY
+        }
+    
+    @classmethod
+    def get_chain_id(cls, chain: str) -> str:
+        """获取链 ID"""
+        chain_id = cls.CHAIN_MAPPING.get(chain)
+        if not chain_id:
+            raise ValueError(f"不支持的链: {chain}")
+        return chain_id
+    
     # EVM 代币相关接口
     EVM_TOKEN_PRICE_URL: str = f"{BASE_URL}/erc20/{{0}}/price"  # 获取代币价格
     EVM_TOKEN_PAIRS_URL: str = f"{BASE_URL}/erc20/{{0}}/pairs"  # 获取代币交易对
@@ -158,6 +228,13 @@ class MoralisConfig:
     EVM_WALLET_TOKENS_URL: str = f"{BASE_URL}/{{0}}/erc20"  # 获取钱包代币列表
     EVM_TOKEN_TRANSFERS_URL: str = f"{BASE_URL}/{{0}}/erc20/transfers"  # 获取代币转账历史
     EVM_TOKEN_HOLDERS_URL: str = f"{BASE_URL}/erc20/{{0}}/holders"  # 获取代币持有者
+    
+    # EVM Swap 相关接口
+    EVM_SWAP_QUOTE_URL: str = f"{BASE_URL}/erc20/{{0}}/swaps"  # 获取兑换历史
+    EVM_SWAP_EXECUTE_URL: str = f"{BASE_URL}/erc20/{{0}}/swaps"  # 获取兑换历史
+    EVM_SWAP_PAIRS_URL: str = f"{BASE_URL}/pairs/{{0}}/swaps"  # 获取交易对兑换历史
+    EVM_SWAP_WALLET_URL: str = f"{BASE_URL}/wallets/{{0}}/swaps"  # 获取钱包兑换历史
+    EVM_SWAP_TOKEN_URL: str = f"{BASE_URL}/erc20/{{0}}/swaps"  # 获取代币兑换历史
     
     # Solana 价格和元数据查询接口
     SOLANA_TOKEN_PRICE_URL: str = f"{SOLANA_URL}/token/mainnet/{{}}/price"  # 获取代币价格
@@ -176,34 +253,6 @@ class MoralisConfig:
     SOLANA_ACCOUNT_SWAPS_URL: str = f"{SOLANA_URL}/account/mainnet/{{}}/swaps"  # 获取账户 swap 历史
     SOLANA_SWAP_QUOTE_URL: str = f"{SOLANA_URL}/swap/mainnet/quote"  # 获取 swap 报价
     SOLANA_SWAP_EXECUTE_URL: str = f"{SOLANA_URL}/swap/mainnet/execute"  # 执行 swap 交易
-    
-    # API 请求头
-    @classmethod
-    def get_headers(cls) -> Dict:
-        """获取请求头"""
-        return {
-            "accept": "application/json",
-            "X-API-Key": cls.API_KEY
-        }
-    
-    # 链 ID 映射
-    CHAIN_MAPPING = {
-        'ETH': 'eth',
-        'BSC': 'bsc',
-        'MATIC': 'polygon',
-        'AVAX': 'avalanche',
-        'ARBITRUM': 'arbitrum',
-        'OPTIMISM': 'optimism',
-        'BASE': 'base'
-    }
-    
-    @classmethod
-    def get_chain_id(cls, chain: str) -> str:
-        """获取链 ID"""
-        chain_id = cls.CHAIN_MAPPING.get(chain)
-        if not chain_id:
-            raise ValueError(f"不支持的链: {chain}")
-        return chain_id
     
     # API 请求超时时间(秒)
     TIMEOUT = 30

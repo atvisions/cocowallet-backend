@@ -61,6 +61,38 @@ class Wallet(models.Model):
     def payment_password(self, value):
         self._payment_password = value
 
+    def check_device(self, device_id: str) -> bool:
+        """检查设备ID是否匹配
+        
+        Args:
+            device_id: 设备ID
+            
+        Returns:
+            bool: 是否匹配
+        """
+        return self.device_id == device_id
+        
+    def check_payment_password(self, payment_password: str) -> bool:
+        """检查支付密码是否正确
+        
+        Args:
+            payment_password: 支付密码
+            
+        Returns:
+            bool: 是否正确
+        """
+        try:
+            # 获取支付密码记录
+            payment_pwd = PaymentPassword.objects.filter(device_id=self.device_id).first()
+            if not payment_pwd:
+                return False
+            
+            # 验证密码
+            return payment_pwd.verify_password(payment_password)
+        except Exception as e:
+            logger.error(f"验证支付密码失败: {str(e)}")
+            return False
+
     class Meta:
         verbose_name = '钱包'
         verbose_name_plural = '钱包'
@@ -140,7 +172,7 @@ class Wallet(models.Model):
                     from eth_account import Account
                     
                     # 如果解密后的数据是十六进制格式的私钥
-                    if isinstance(decrypted, str) and decrypted.startswith('0x'):
+                    if isinstance(decrypted, str) and decrypted.startswith('0x'): # type: ignore
                         private_key = decrypted
                     else:
                         # 如果解密后的数据长度大于32字节，尝试提取最后32字节
