@@ -71,7 +71,7 @@ class Wallet(models.Model):
         return f"{self.name} ({self.address})"
 
     def decrypt_private_key(self) -> str:
-        """解密私钥，返回64字节的完整密钥对格式"""
+        """解密私钥"""
         if not self.encrypted_private_key:
             logger.error("钱包没有私钥")
             raise ValueError("钱包没有私钥")
@@ -101,7 +101,7 @@ class Wallet(models.Model):
             logger.debug(f"解密后数据长度: {len(decrypted)}")
             
             if self.chain == 'SOL':
-                # 验证解密后的数据是否为有效的私钥
+                # Solana 链的处理逻辑保持不变
                 try:
                     # 将Base58格式的数据解码回字节
                     decrypted_bytes = base58.b58decode(decrypted)
@@ -133,8 +133,46 @@ class Wallet(models.Model):
                 except Exception as e:
                     logger.error(f"验证私钥失败: {str(e)}")
                     raise ValueError(f"私钥验证失败: {str(e)}")
+                    
+            elif self.chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
+                # EVM 链私钥处理
+                try:
+                    from eth_account import Account
+                    
+                    # 如果解密后的数据是十六进制格式的私钥
+                    if isinstance(decrypted, str) and decrypted.startswith('0x'):
+                        private_key = decrypted
+                    else:
+                        # 如果解密后的数据长度大于32字节，尝试提取最后32字节
+                        if len(decrypted) > 32:
+                            decrypted = decrypted[-32:]
+                        elif len(decrypted) < 32:
+                            # 如果长度小于32字节，在前面补0
+                            decrypted = b'\x00' * (32 - len(decrypted)) + decrypted
+                        
+                        # 确保私钥是32字节
+                        if len(decrypted) != 32:
+                            raise ValueError(f"无效的私钥长度: {len(decrypted)}字节，期望长度: 32字节")
+                        
+                        # 转换为十六进制格式
+                        private_key = '0x' + decrypted.hex()
+                    
+                    # 验证私钥是否有效
+                    account = Account.from_key(private_key)
+                    generated_address = account.address
+                    
+                    # 使用小写进行比较
+                    if generated_address.lower() != self.address.lower():
+                        logger.error(f"私钥地址不匹配: 期望={self.address}, 实际={generated_address}")
+                        raise ValueError(f"私钥地址不匹配: 期望 {self.address}, 实际 {generated_address}")
+                    
+                    return private_key
+                    
+                except Exception as e:
+                    logger.error(f"验证私钥失败: {str(e)}")
+                    raise ValueError(f"私钥验证失败: {str(e)}")
             
-            return base58.b58encode(decrypted).decode()
+            raise ValueError(f"不支持的链类型: {self.chain}")
             
         except Exception as e:
             logger.error(f"解密私钥失败: {str(e)}")
@@ -306,7 +344,7 @@ class Transaction(models.Model):
         verbose_name = '交易记录'
         verbose_name_plural = '交易记录'
         ordering = ['-block_timestamp']
-        unique_together = ['chain', 'tx_hash']
+        unique_together = ['chain', 'tx_hash', 'wallet']
 
     def __str__(self):
         return f"{self.tx_hash} ({self.tx_type})"

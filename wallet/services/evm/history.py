@@ -103,44 +103,85 @@ class EVMHistoryService:
     ) -> List[Dict]:
         """获取代币交易历史"""
         try:
-            url = f"{MoralisConfig.BASE_URL}/erc20/transfers"
-            params = {
+            # 分别获取作为发送方和接收方的交易
+            sent_params = {
                 'chain': self.chain.lower(),
-                'address': address,
+                'from_address': address,
+                'contract_addresses': [token_address],
+                'limit': str(limit),
+                'offset': str(offset)
+            }
+            
+            received_params = {
+                'chain': self.chain.lower(),
+                'to_address': address,
                 'contract_addresses': [token_address],
                 'limit': str(limit),
                 'offset': str(offset)
             }
             
             if start_time:
-                params['from_date'] = start_time.isoformat()
+                sent_params['from_date'] = start_time.isoformat()
+                received_params['from_date'] = start_time.isoformat()
             if end_time:
-                params['to_date'] = end_time.isoformat()
+                sent_params['to_date'] = end_time.isoformat()
+                received_params['to_date'] = end_time.isoformat()
                 
+            url = f"{MoralisConfig.BASE_URL}/erc20/transfers"
+            
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(url, headers=self.headers, params=params) as response:
-                    if response.status != 200:
-                        raise Exception(f"获取代币交易历史失败: {await response.text()}")
+                # 获取发送的交易
+                async with session.get(url, headers=self.headers, params=sent_params) as sent_response:
+                    if sent_response.status != 200:
+                        logger.error(f"获取发送交易失败: {await sent_response.text()}")
+                        sent_result = []
+                    else:
+                        sent_result = await sent_response.json()
+                
+                # 获取接收的交易
+                async with session.get(url, headers=self.headers, params=received_params) as received_response:
+                    if received_response.status != 200:
+                        logger.error(f"获取接收交易失败: {await received_response.text()}")
+                        received_result = []
+                    else:
+                        received_result = await received_response.json()
                     
-                    result = await response.json()
-                    if not result:
-                        return []
-                    
-                    # 获取代币信息
-                    token = await sync_to_async(Token.objects.filter(
-                        chain=self.chain,
-                        address=token_address
-                    ).first)()
-                    
-                    transactions = []
-                    for tx in result:
-                        value = Decimal(tx.get('value', '0'))
-                        if value == 0:  # 跳过零值交易
+                # 合并结果
+                all_results = sent_result + received_result
+                
+                # 去重（根据交易哈希）
+                seen_tx_hashes = set()
+                unique_results = []
+                for tx in all_results:
+                    tx_hash = tx.get('transaction_hash')
+                    if tx_hash and tx_hash not in seen_tx_hashes:
+                        seen_tx_hashes.add(tx_hash)
+                        unique_results.append(tx)
+                
+                # 获取代币信息
+                token = await sync_to_async(Token.objects.filter(
+                    chain=self.chain,
+                    address=token_address
+                ).first)()
+                
+                transactions = []
+                for tx in unique_results:
+                    try:
+                        # 获取原始金额
+                        raw_value = tx.get('value', '0')
+                        if raw_value == '0':  # 跳过零值交易
                             continue
                             
                         # 如果有代币信息，使用代币精度
                         if token:
-                            value = value / Decimal(str(10 ** token.decimals))
+                            # 将原始金额转换为十进制数
+                            value = Decimal(raw_value)
+                            # 使用代币精度格式化金额
+                            formatted_value = str(value / Decimal(str(10 ** token.decimals)))
+                        else:
+                            # 如果没有代币信息，使用默认精度18
+                            value = Decimal(raw_value)
+                            formatted_value = str(value / Decimal(str(10 ** 18)))
                             
                         transactions.append({
                             'tx_hash': tx.get('transaction_hash'),
@@ -148,7 +189,7 @@ class EVMHistoryService:
                             'timestamp': tx.get('block_timestamp'),
                             'from_address': tx.get('from_address'),
                             'to_address': tx.get('to_address'),
-                            'value': str(value),
+                            'value': formatted_value,
                             'token_address': token_address,
                             'token_name': token.name if token else 'Unknown Token',
                             'token_symbol': token.symbol if token else 'Unknown',
@@ -158,8 +199,11 @@ class EVMHistoryService:
                             'status': 'SUCCESS',  # ERC20 transfer 通常都是成功的
                             'is_native': False
                         })
-                    
-                    return transactions
+                    except Exception as e:
+                        logger.error(f"处理代币交易记录失败: {str(e)}, 交易数据: {tx}")
+                        continue
+                
+                return transactions
             
         except Exception as e:
             logger.error(f"获取代币交易历史失败: {str(e)}")

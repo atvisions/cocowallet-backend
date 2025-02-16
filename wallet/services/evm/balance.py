@@ -61,30 +61,66 @@ class EVMBalanceService:
             Decimal: 余额
         """
         try:
-            # 使用 Moralis API 获取代币余额
-            url = MoralisConfig.EVM_WALLET_TOKENS_URL.format(Web3.to_checksum_address(address))
-            params = {
-                'chain': self.chain_id,
-                'token_addresses': [Web3.to_checksum_address(token_address)]
-            }
+            # 验证地址
+            if not EVMUtils.validate_address(address):
+                logger.error(f"无效的钱包地址: {address}")
+                return Decimal('0')
+            if not EVMUtils.validate_address(token_address):
+                logger.error(f"无效的代币地址: {token_address}")
+                return Decimal('0')
+                
+            logger.info(f"开始查询代币余额: address={address}, token={token_address}")
             
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(url, headers=self.headers, params=params) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        if result:
-                            for token in result:
-                                if token['token_address'].lower() == token_address.lower():
-                                    balance = int(token.get('balance', '0'))
-                                    decimals = int(token.get('decimals', 18))
-                                    return EVMUtils.from_wei(balance, decimals)
-                    else:
-                        logger.error(f"获取代币余额失败: {await response.text()}")
-                        
-            return Decimal('0')
+            # 使用 web3 直接从链上获取代币余额
+            contract = self.web3.eth.contract(
+                address=Web3.to_checksum_address(token_address),
+                abi=[{
+                    "constant": True,
+                    "inputs": [{
+                        "name": "_owner",
+                        "type": "address"
+                    }],
+                    "name": "balanceOf",
+                    "outputs": [{
+                        "name": "balance",
+                        "type": "uint256"
+                    }],
+                    "type": "function"
+                }, {
+                    "constant": True,
+                    "inputs": [],
+                    "name": "decimals",
+                    "outputs": [{
+                        "name": "",
+                        "type": "uint8"
+                    }],
+                    "type": "function"
+                }]
+            )
+            
+            # 获取代币精度
+            try:
+                decimals = contract.functions.decimals().call()
+                logger.info(f"代币精度: {decimals}")
+            except Exception as e:
+                logger.error(f"获取代币精度失败: {str(e)}")
+                decimals = 18  # 默认精度
+            
+            # 获取余额
+            try:
+                balance = contract.functions.balanceOf(Web3.to_checksum_address(address)).call()
+                logger.info(f"原始余额: {balance}")
+            except Exception as e:
+                logger.error(f"获取余额失败: {str(e)}")
+                return Decimal('0')
+            
+            formatted_balance = EVMUtils.from_wei(balance, decimals)
+            logger.info(f"格式化后余额: {formatted_balance}")
+            
+            return formatted_balance
             
         except Exception as e:
-            logger.error(f"获取代币余额失败: {str(e)}")
+            logger.error(f"获取代币余额失败: address={address}, token={token_address}, error={str(e)}")
             return Decimal('0')
 
     async def get_token_price(self, token_address: Optional[str] = None) -> Dict:

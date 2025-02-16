@@ -13,8 +13,10 @@ from typing import Union, Optional, Dict, List
 from django.http import Http404
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
+from eth_account import Account
+from base58 import b58encode
 
-from ..models import Wallet, PaymentPassword, Token
+from ..models import Wallet, PaymentPassword, Token, Transaction
 from ..serializers import WalletSerializer
 from ..services.factory import ChainServiceFactory
 from ..services.evm.utils import EVMUtils
@@ -198,12 +200,30 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     @async_to_sync_api
     async def transfer(self, request, pk=None):
-        """转账原生代币"""
+        """转账接口(支持原生代币和 ERC20 代币)
+        
+        如果不传 token_address 参数,则转账原生代币
+        如果传入 token_address 参数,则转账指定的 ERC20 代币
+        """
         try:
+            # 获取请求参数
             device_id = request.data.get('device_id')
             to_address = request.data.get('to_address')
             amount = request.data.get('amount')
             payment_password = request.data.get('payment_password')
+            token_address = request.data.get('token_address')  # 可选参数
+            
+            # 处理可选的gas参数
+            try:
+                gas_limit = int(request.data.get('gas_limit')) if request.data.get('gas_limit') and request.data.get('gas_limit').isdigit() else None
+                gas_price = int(request.data.get('gas_price')) if request.data.get('gas_price') and request.data.get('gas_price').isdigit() else None
+                max_priority_fee = int(request.data.get('max_priority_fee')) if request.data.get('max_priority_fee') and request.data.get('max_priority_fee').isdigit() else None
+                max_fee = int(request.data.get('max_fee')) if request.data.get('max_fee') and request.data.get('max_fee').isdigit() else None
+            except ValueError:
+                return Response({
+                    'status': 'error',
+                    'message': 'gas参数必须为数字'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
             if not all([device_id, to_address, amount, payment_password]):
                 return Response({
@@ -222,7 +242,11 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # 验证支付密码
-            if not wallet.verify_payment_password(payment_password):
+            payment_pwd = await sync_to_async(PaymentPassword.objects.filter(
+                device_id=device_id
+            ).first)()
+            
+            if not payment_pwd or not payment_pwd.verify_password(payment_password):
                 return Response({
                     'status': 'error',
                     'message': '支付密码错误'
@@ -231,101 +255,80 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             # 获取转账服务
             transfer_service = ChainServiceFactory.get_transfer_service(wallet.chain)
             
+            # 设置支付密码用于解密私钥
+            wallet.payment_password = payment_password
+            
             # 解密私钥
             try:
                 private_key = wallet.decrypt_private_key()
+                # 如果返回的是字节类型，则需要转换为十六进制格式
+                if isinstance(private_key, bytes):
+                    # 确保私钥是32字节长度
+                    if len(private_key) != 32:
+                        raise ValueError(f'无效的私钥长度: {len(private_key)}字节，期望长度: 32字节')
+                    # 转换为十六进制格式，添加0x前缀
+                    hex_str = private_key.hex()
+                    private_key = '0x' + hex_str
+                elif isinstance(private_key, str):
+                    # 如果是字符串，确保是有效的十六进制格式
+                    hex_str = private_key[2:] if private_key.startswith('0x') else private_key
+                    # 移除所有非十六进制字符
+                    hex_str = ''.join(c for c in hex_str if c in '0123456789abcdefABCDEF')
+                    if len(hex_str) < 64:
+                        hex_str = hex_str.zfill(64)
+                    private_key = '0x' + hex_str.lower()
+                
+                # 验证私钥对应的地址是否匹配
+                account = Account.from_key(private_key)
+                derived_address = account.address
+                if derived_address.lower() != wallet.address.lower():
+                    raise ValueError(f'私钥地址不匹配: 期望 {wallet.address}, 实际 {derived_address}')
+                    
             except Exception as e:
+                logger.error(f"解密私钥失败: {str(e)}")
                 return Response({
                     'status': 'error',
                     'message': f'解密私钥失败: {str(e)}'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            # 执行转账
-            result = await transfer_service.transfer_native(
-                wallet.address,
-                to_address,
-                Decimal(amount),
-                private_key
-            )
-
-            return Response({
-                'status': 'success',
-                'data': result
-            })
-
+            # 根据是否有 token_address 参数决定调用哪个转账方法
+            if token_address:
+                # ERC20 代币转账
+                result = await transfer_service.transfer_token(
+                    from_address=wallet.address,
+                    to_address=to_address,
+                    token_address=token_address,
+                    amount=amount,
+                    private_key=private_key,
+                    gas_limit=gas_limit,
+                    gas_price=gas_price,
+                    max_priority_fee=max_priority_fee,
+                    max_fee=max_fee
+                )
+            else:
+                # 原生代币转账
+                result = await transfer_service.transfer(
+                    from_address=wallet.address,
+                    to_address=to_address,
+                    amount=amount,
+                    private_key=private_key,
+                    gas_limit=gas_limit,
+                    gas_price=gas_price,
+                    max_priority_fee=max_priority_fee,
+                    max_fee=max_fee
+                )
+            
+            if result['status'] == 'error':
+                return Response(result, status=400)
+                
+            return Response(result)
+            
         except Exception as e:
             logger.error(f"转账失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-    @action(detail=True, methods=['post'])
-    @async_to_sync_api
-    async def transfer_token(self, request, pk=None):
-        """转账代币"""
-        try:
-            device_id = request.data.get('device_id')
-            to_address = request.data.get('to_address')
-            token_address = request.data.get('token_address')
-            amount = request.data.get('amount')
-            payment_password = request.data.get('payment_password')
-
-            if not all([device_id, to_address, token_address, amount, payment_password]):
-                return Response({
-                    'status': 'error',
-                    'message': '缺少必要参数'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 获取钱包
-            wallet = await self.get_wallet_async(pk, device_id)
-            
-            # 验证是否是EVM链
-            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
-                return Response({
-                    'status': 'error',
-                    'message': '不支持的链类型'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 验证支付密码
-            if not wallet.verify_payment_password(payment_password):
-                return Response({
-                    'status': 'error',
-                    'message': '支付密码错误'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 获取转账服务
-            transfer_service = ChainServiceFactory.get_transfer_service(wallet.chain)
-            
-            # 解密私钥
-            try:
-                private_key = wallet.decrypt_private_key()
-            except Exception as e:
-                return Response({
-                    'status': 'error',
-                    'message': f'解密私钥失败: {str(e)}'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 执行转账
-            result = await transfer_service.transfer_token(
-                wallet.address,
-                to_address,
-                token_address,
-                Decimal(amount),
-                private_key
-            )
-
-            return Response({
-                'status': 'success',
-                'data': result
-            })
-
-        except Exception as e:
-            logger.error(f"代币转账失败: {str(e)}")
-            return Response({
-                'status': 'error',
-                'message': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
+                'message': f"转账失败: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'])
     @async_to_sync_api
@@ -358,24 +361,25 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             
             # 估算费用
             if token_address:
-                fee = await transfer_service.estimate_token_transfer_fee(
+                result = await transfer_service.estimate_token_transfer_fee(
                     wallet.address,
                     to_address,
                     token_address,
-                    Decimal(amount)
+                    amount
                 )
             else:
-                fee = await transfer_service.estimate_native_transfer_fee(
+                result = await transfer_service.estimate_native_transfer_fee(
                     wallet.address,
                     to_address,
-                    Decimal(amount)
+                    amount
                 )
+                
+            if result.get('status') == 'error':
+                return Response(result, status=400)
 
             return Response({
                 'status': 'success',
-                'data': {
-                    'estimated_fee': str(fee)
-                }
+                'data': result
             })
 
         except Exception as e:
@@ -608,4 +612,87 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': f'获取代币价格走势图数据失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='token-transfers')
+    @async_to_sync_api
+    async def token_transfers(self, request, pk=None):
+        """获取代币转账记录"""
+        try:
+            device_id = request.query_params.get('device_id')
+            page = int(request.query_params.get('page', 1))
+            page_size = int(request.query_params.get('page_size', 20))
+            
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链类型'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 定义同步函数来处理数据库操作
+            @sync_to_async
+            def get_transfers():
+                transfers_qs = Transaction.objects.filter(
+                    wallet=wallet,
+                    tx_type='TRANSFER'
+                ).order_by('-block_timestamp', '-id')
+                
+                total_count = transfers_qs.count()
+                
+                # 分页
+                start = (page - 1) * page_size
+                end = start + page_size
+                
+                transfers = list(transfers_qs[start:end])
+                
+                # 格式化数据
+                transfer_list = []
+                for transfer in transfers:
+                    transfer_data = {
+                        'tx_hash': transfer.tx_hash,
+                        'tx_type': transfer.tx_type,
+                        'status': transfer.status,
+                        'from_address': transfer.from_address,
+                        'to_address': transfer.to_address,
+                        'amount': str(transfer.amount),
+                        'token_address': transfer.token.address if transfer.token else None,
+                        'token_info': transfer.token_info,
+                        'gas_price': str(transfer.gas_price),
+                        'gas_used': str(transfer.gas_used),
+                        'block_number': transfer.block_number,
+                        'block_timestamp': transfer.block_timestamp.isoformat() if transfer.block_timestamp else None,
+                        'explorer_url': EVMUtils.get_explorer_url(wallet.chain, transfer.tx_hash)
+                    }
+                    transfer_list.append(transfer_data)
+                
+                return total_count, transfer_list
+
+            # 获取转账记录
+            total_count, transfer_list = await get_transfers()
+
+            return Response({
+                'status': 'success',
+                'data': {
+                    'total': total_count,
+                    'page': page,
+                    'page_size': page_size,
+                    'transfers': transfer_list
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"获取代币转账记录失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'获取代币转账记录失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 

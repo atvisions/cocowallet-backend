@@ -16,6 +16,7 @@ import base58
 from web3 import Web3
 from solana.keypair import Keypair
 from base58 import b58encode, b58decode
+from eth_account import Account
 
 from ..models import Wallet, PaymentPassword
 from ..serializers import (
@@ -52,15 +53,20 @@ class WalletViewSet(viewsets.ModelViewSet):
             logger.debug(f"加密数据类型: {type(data)}")
             logger.debug(f"加密数据长度: {len(data) if hasattr(data, '__len__') else 'unknown'}")
             
-            # 如果输入是字节类型，直接使用
-            if isinstance(data, bytes):
-                data_bytes = data
-            # 如果是字符串类型，转换为字节
+            # 如果是十六进制格式的私钥，先移除0x前缀
+            if isinstance(data, str) and data.startswith('0x'):
+                data = data[2:]
+                
+            # 如果是十六进制字符串，转换为字节
+            if isinstance(data, str) and all(c in '0123456789abcdefABCDEF' for c in data):
+                data_bytes = bytes.fromhex(data)
             elif isinstance(data, str):
                 data_bytes = data.encode()
+            elif isinstance(data, bytes):
+                data_bytes = data
             else:
                 raise ValueError(f"不支持的数据类型: {type(data)}")
-            
+                
             # 确保密钥是字节类型
             if isinstance(key, str):
                 key_bytes = key.encode()
@@ -78,17 +84,21 @@ class WalletViewSet(viewsets.ModelViewSet):
             # Base64编码
             result = base64.b64encode(encrypted).decode()
             return result
-            
+                
         except Exception as e:
             logger.error(f"加密数据失败: {str(e)}, 数据类型: {type(data)}")
             raise ValueError("加密失败")
 
     def decrypt_data(self, encrypted_text, key):
-        """使用简单的异或解密方法，返回字节类型"""
+        """使用简单的异或解密方法"""
         try:
             key_hash = hashlib.sha256(key.encode()).digest()
             encrypted_bytes = base64.b64decode(encrypted_text)
             decrypted = bytes(a ^ b for a, b in zip(encrypted_bytes, key_hash * (len(encrypted_bytes) // len(key_hash) + 1)))
+            
+            # 如果解密后的数据是32字节，说明是私钥，返回十六进制格式
+            if len(decrypted) == 32:
+                return '0x' + decrypted.hex()
             return decrypted
         except Exception as e:
             logger.error(f"解密数据失败: {str(e)}")
@@ -291,10 +301,16 @@ class WalletViewSet(viewsets.ModelViewSet):
                 # 使用 BIP44 路径生成 EVM 链钱包
                 hdwallet.from_path("m/44'/60'/0'/0/0")
                 private_key = hdwallet.private_key()
-                # 使用 HDWallet 的 public_key() 方法获取公钥，然后从公钥生成地址
-                public_key = hdwallet.public_key()
-                address = Web3.to_checksum_address(Web3.keccak(bytes.fromhex(public_key)[1:])[-20:].hex())
-                private_key_to_store = private_key
+                # 确保私钥是32字节
+                private_key_bytes = bytes.fromhex(private_key)
+                if len(private_key_bytes) != 32:
+                    logger.error(f"生成的私钥长度不正确: {len(private_key_bytes)}字节")
+                    raise ValueError(f"生成的私钥长度不正确: {len(private_key_bytes)}字节")
+                # 使用 web3.eth.account 来生成地址
+                account = Account.from_key(private_key_bytes)
+                address = account.address
+                # 存储十六进制格式的私钥
+                private_key_to_store = '0x' + private_key_bytes.hex()
             elif chain == "SOL":
                 # 使用助记词生成种子
                 seed = hashlib.pbkdf2_hmac(
@@ -646,16 +662,25 @@ class WalletViewSet(viewsets.ModelViewSet):
             # 根据不同链处理私钥
             if chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
                 # 所有 EVM 兼容链使用相同的私钥处理逻辑
-                from eth_account import Account
-                account = Account.from_key(private_key)
-                address = account.address
-                # 确保私钥是十六进制格式，不带0x前缀
-                if private_key.startswith('0x'):
-                    private_key_to_store = private_key[2:]
-                else:
-                    private_key_to_store = private_key
-                # 转换为字节类型
-                private_key_to_store = bytes.fromhex(private_key_to_store)
+                # 移除0x前缀（如果有）
+                private_key_str = private_key[2:] if private_key.startswith('0x') else private_key
+                # 移除所有非十六进制字符
+                private_key_str = ''.join(c for c in private_key_str if c in '0123456789abcdefABCDEF')
+                # 确保私钥长度为64个字符（32字节）
+                if len(private_key_str) < 64:
+                    private_key_str = private_key_str.zfill(64)
+                elif len(private_key_str) > 64:
+                    raise ValueError('私钥长度超过64个字符')
+                
+                # 验证私钥是否有效
+                try:
+                    account = Account.from_key('0x' + private_key_str)
+                    address = account.address
+                except Exception as e:
+                    raise ValueError(f'无效的私钥: {str(e)}')
+                
+                # 转换为字节类型存储
+                private_key_to_store = bytes.fromhex(private_key_str)
                 
             elif chain == "SOL":
                 # 使用助记词生成种子
