@@ -756,7 +756,7 @@ class EVMTransferService:
             # 获取钱包
             sender_wallet = await sync_to_async(Wallet.objects.filter(
                 chain=self.chain,
-                address=wallet_address,
+                address__iexact=wallet_address,
                 is_active=True
             ).first)()
             
@@ -767,96 +767,34 @@ class EVMTransferService:
             # 获取接收方钱包（如果存在）
             receiver_wallet = await sync_to_async(Wallet.objects.filter(
                 chain=self.chain,
-                address=to_address,
+                address__iexact=to_address,
                 is_active=True
             ).first)()
             
             # 获取代币信息
+            token = None
             if token_address:
                 token = await sync_to_async(Token.objects.filter(
                     chain=self.chain,
-                    address=token_address
+                    address__iexact=token_address
                 ).first)()
-                
-                if token:
-                    token_info = {
-                        'name': token.name,
-                        'symbol': token.symbol,
-                        'decimals': token.decimals,
-                        'logo': token.logo,
-                        'address': token.address,
-                        'thumbnail': token.thumbnail,
-                        'verified': token.verified
-                    }
-                else:
-                    # 从链上获取基本信息
-                    token_metadata = await self._get_token_metadata(token_address)
-                    token_info = {
-                        'name': token_metadata.get('name', ''),
-                        'symbol': token_metadata.get('symbol', ''),
-                        'decimals': token_metadata.get('decimals', 18),
-                        'logo': token_metadata.get('logo', ''),
-                        'address': token_address,
-                        'thumbnail': token_metadata.get('thumbnail', ''),
-                        'verified': token_metadata.get('verified', False)
-                    }
-            else:
-                # 原生代币信息
-                token = None
-                token_info = {
-                    'name': self.chain_config['name'],
-                    'symbol': self.chain_config['symbol'],
-                    'decimals': self.chain_config['decimals'],
-                    'logo': self.chain_config['native_token'].get('logo', ''),
-                    'address': None,
-                    'thumbnail': '',
-                    'verified': True
-                }
             
-            # 获取区块时间
-            block = await sync_to_async(lambda: self.web3.eth.get_block(tx_info['blockNumber']))()
-            block_timestamp = block.get('timestamp', None)
-            
-            # 创建发送方交易记录
-            await sync_to_async(Transaction.objects.get_or_create)(
+            # 创建交易记录
+            await sync_to_async(Transaction.objects.create)(
+                wallet=sender_wallet,
                 chain=self.chain,
                 tx_hash=tx_hash,
-                wallet=sender_wallet,
-                defaults={
-                    'tx_type': 'TRANSFER',
-                    'status': 'SUCCESS' if tx_info['status'] == 1 else 'FAILED',
-                    'from_address': wallet_address,
-                    'to_address': to_address,
-                    'amount': amount,
-                    'token': token,
-                    'token_info': token_info,
-                    'gas_price': EVMUtils.from_wei(tx_info.get('effectiveGasPrice', 0)),
-                    'gas_used': tx_info['gasUsed'],
-                    'block_number': tx_info['blockNumber'],
-                    'block_timestamp': timezone.datetime.fromtimestamp(block_timestamp, tz=timezone.utc) if block_timestamp else None
-                }
+                tx_type='TRANSFER',
+                status='SUCCESS',
+                from_address=wallet_address.lower(),
+                to_address=to_address.lower(),
+                amount=Decimal(str(amount)),  # 确保使用 Decimal 转换
+                token=token,
+                gas_price=Decimal(str(tx_info.get('effectiveGasPrice', 0))),
+                gas_used=Decimal(str(tx_info.get('gasUsed', 0))),
+                block_number=tx_info.get('blockNumber', 0),
+                block_timestamp=timezone.now()
             )
-            
-            # 如果接收方也是我们的用户，为接收方创建交易记录
-            if receiver_wallet:
-                await sync_to_async(Transaction.objects.get_or_create)(
-                    chain=self.chain,
-                    tx_hash=tx_hash,
-                    wallet=receiver_wallet,
-                    defaults={
-                        'tx_type': 'TRANSFER',
-                        'status': 'SUCCESS' if tx_info['status'] == 1 else 'FAILED',
-                        'from_address': wallet_address,
-                        'to_address': to_address,
-                        'amount': amount,
-                        'token': token,
-                        'token_info': token_info,
-                        'gas_price': EVMUtils.from_wei(tx_info.get('effectiveGasPrice', 0)),
-                        'gas_used': tx_info['gasUsed'],
-                        'block_number': tx_info['blockNumber'],
-                        'block_timestamp': timezone.datetime.fromtimestamp(block_timestamp, tz=timezone.utc) if block_timestamp else None
-                    }
-                )
             
         except Exception as e:
             logger.error(f"保存交易记录失败: {str(e)}")

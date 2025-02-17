@@ -49,6 +49,34 @@ ERC721_ABI = [
         "name": "symbol",
         "outputs": [{"name": "", "type": "string"}],
         "type": "function"
+    },
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "from", "type": "address"},
+            {"name": "to", "type": "address"},
+            {"name": "tokenId", "type": "uint256"}
+        ],
+        "name": "transferFrom",
+        "outputs": [],
+        "type": "function"
+    },
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "to", "type": "address"},
+            {"name": "tokenId", "type": "uint256"}
+        ],
+        "name": "approve",
+        "outputs": [],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [{"name": "tokenId", "type": "uint256"}],
+        "name": "getApproved",
+        "outputs": [{"name": "", "type": "address"}],
+        "type": "function"
     }
 ]
 
@@ -558,4 +586,184 @@ class EVMNFTService:
                     
         except Exception as e:
             logger.error(f"获取 NFT 合集列表失败: {str(e)}")
-            return [] 
+            return []
+
+    async def transfer_nft(
+        self,
+        from_address: str,
+        to_address: str,
+        token_address: str,
+        token_id: str,
+        private_key: str
+    ) -> Dict[str, Any]:
+        """转移 NFT
+        
+        Args:
+            from_address: 发送方地址
+            to_address: 接收方地址
+            token_address: NFT 合约地址
+            token_id: NFT Token ID
+            private_key: 发送方私钥
+            
+        Returns:
+            Dict: 交易结果
+        """
+        try:
+            # 验证地址
+            if not EVMUtils.validate_address(to_address):
+                raise InvalidAddressError("无效的接收方地址")
+                
+            # 获取 NFT 合约
+            token_address = Web3.to_checksum_address(token_address)
+            nft_contract = self.web3.eth.contract(
+                address=token_address,
+                abi=ERC721_ABI
+            )
+            
+            # 验证 NFT 所有权
+            owner = nft_contract.functions.ownerOf(int(token_id)).call()
+            if owner.lower() != from_address.lower():
+                raise TransferError("您不是该 NFT 的所有者")
+            
+            # 构建交易
+            from_address = EVMUtils.to_checksum_address(from_address)
+            to_address = EVMUtils.to_checksum_address(to_address)
+            
+            # 获取 nonce
+            nonce = self.web3.eth.get_transaction_count(from_address)
+            
+            # 获取 gas 价格
+            gas_price = EVMUtils.get_gas_price(self.chain)
+            
+            # 构建交易数据
+            tx_data = nft_contract.functions.transferFrom(
+                from_address,
+                to_address,
+                int(token_id)
+            ).build_transaction({
+                'chainId': self.chain_config['chain_id'],
+                'gas': 0,  # 稍后估算
+                'nonce': nonce,
+                'maxFeePerGas': gas_price.get('max_fee', gas_price.get('gas_price')),
+                'maxPriorityFeePerGas': gas_price.get('max_priority_fee', 0)
+            })
+            
+            # 估算 gas
+            gas_limit = self.web3.eth.estimate_gas(tx_data)
+            tx_data['gas'] = int(gas_limit * 1.1)  # 添加 10% 缓冲
+            
+            # 签名交易
+            signed_tx = self.web3.eth.account.sign_transaction(tx_data, private_key)
+            
+            # 发送交易
+            tx_hash = self.web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            
+            # 等待交易确认
+            receipt = EVMUtils.wait_for_transaction_receipt(self.chain, tx_hash)
+            if not receipt:
+                raise TransferError("交易确认超时")
+                
+            if receipt['status'] != 1:
+                raise TransferError("交易执行失败")
+            
+            # 保存交易记录
+            await self._save_transaction(
+                from_address,
+                to_address,
+                token_address,
+                token_id,
+                tx_hash.hex(),
+                receipt
+            )
+            
+            return {
+                'status': 'success',
+                'message': 'NFT 转移成功',
+                'data': {
+                    'tx_hash': tx_hash.hex(),
+                    'block_number': receipt['blockNumber'],
+                    'gas_used': receipt['gasUsed'],
+                    'from': from_address,
+                    'to': to_address,
+                    'token_address': token_address,
+                    'token_id': token_id
+                }
+            }
+            
+        except InvalidAddressError as e:
+            logger.error(f"无效地址: {str(e)}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+        except TransferError as e:
+            logger.error(f"转移失败: {str(e)}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+        except Exception as e:
+            logger.error(f"NFT 转移异常: {str(e)}")
+            return {
+                'status': 'error',
+                'message': f"转移失败: {str(e)}"
+            }
+            
+    async def _save_transaction(
+        self,
+        from_address: str,
+        to_address: str,
+        token_address: str,
+        token_id: str,
+        tx_hash: str,
+        tx_info: Dict[str, Any]
+    ) -> None:
+        """保存交易记录
+        
+        Args:
+            from_address: 发送方地址
+            to_address: 接收方地址
+            token_address: NFT 合约地址
+            token_id: NFT Token ID
+            tx_hash: 交易哈希
+            tx_info: 交易信息
+        """
+        try:
+            # 获取发送方钱包
+            sender_wallet = await sync_to_async(Wallet.objects.filter)(
+                chain=self.chain,
+                address=from_address.lower(),
+                is_active=True
+            ).first()
+
+            if not sender_wallet:
+                logger.error(f"找不到发送方钱包: {from_address}")
+                return
+            
+            # 获取 NFT 合集
+            collection = await sync_to_async(NFTCollection.objects.filter(
+                chain=self.chain,
+                contract_address=token_address.lower()
+            ).first)()
+            
+            # 创建交易记录
+            await sync_to_async(Transaction.objects.create)(
+                wallet=sender_wallet,
+                chain=self.chain,
+                tx_hash=tx_hash,
+                tx_type='NFT_TRANSFER',
+                status='SUCCESS',
+                from_address=from_address.lower(),
+                to_address=to_address.lower(),
+                amount=1,  # NFT 数量固定为 1
+                nft_collection=collection,
+                nft_token_id=token_id,
+                gas_price=tx_info.get('effectiveGasPrice', 0),
+                gas_used=tx_info.get('gasUsed', 0),
+                block_number=tx_info.get('blockNumber', 0),
+                block_timestamp=timezone.now()
+            )
+            
+        except Exception as e:
+            logger.error(f"保存交易记录失败: {str(e)}")
+            # 不抛出异常，因为转账已经成功了 

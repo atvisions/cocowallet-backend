@@ -20,6 +20,7 @@ from ..api_config import HeliusConfig
 from ..services.factory import ChainServiceFactory
 from ..exceptions import InvalidAddressError, TransferError, WalletNotFoundError
 from ..services.evm.nft import EVMNFTService
+from ..services.evm.utils import EVMUtils
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # 验证钱包
-            wallet = await self.get_wallet_async(int(wallet_id), device_id) # type: ignore
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
             if wallet.chain != 'SOL':
                 return Response({
                     'status': 'error',
@@ -532,15 +533,19 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
         operation_description="将 NFT 从一个地址转移到另一个地址",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
-            required=['to_address', 'nft_address', 'payment_password'],
+            required=['to_address', 'token_address', 'token_id', 'payment_password'],
             properties={
                 'to_address': openapi.Schema(
                     type=openapi.TYPE_STRING,
                     description='接收方地址'
                 ),
-                'nft_address': openapi.Schema(
+                'token_address': openapi.Schema(
                     type=openapi.TYPE_STRING,
-                    description='NFT 地址'
+                    description='NFT 合约地址'
+                ),
+                'token_id': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='NFT Token ID'
                 ),
                 'payment_password': openapi.Schema(
                     type=openapi.TYPE_STRING,
@@ -548,6 +553,15 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                 )
             }
         ),
+        manual_parameters=[
+            openapi.Parameter(
+                'device_id',
+                openapi.IN_QUERY,
+                description='设备ID',
+                type=openapi.TYPE_STRING,
+                required=True
+            )
+        ],
         responses={
             200: "转账成功",
             400: "参数错误",
@@ -567,71 +581,78 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                     'status': 'error',
                     'message': '缺少device_id参数'
                 }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 获取钱包
-            wallet = await self.get_wallet_async(int(wallet_id), device_id) # type: ignore
-            if wallet.chain != 'SOL':
-                return Response({
-                    'status': 'error',
-                    'message': '该接口仅支持SOL链钱包'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
+                
             # 获取请求参数
             to_address = request.data.get('to_address')
-            nft_address = request.data.get('nft_address')
+            token_address = request.data.get('token_address')
+            token_id = request.data.get('token_id')
             payment_password = request.data.get('payment_password')
             
             # 参数验证
-            if not to_address or not nft_address or not payment_password:
+            if not all([to_address, token_address, token_id, payment_password]):
                 return Response({
                     'status': 'error',
                     'message': '缺少必要参数'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # 获取 NFT 服务
-            nft_service = ChainServiceFactory.get_nft_service(wallet.chain)
-            if not nft_service:
+            # 获取钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
                 return Response({
                     'status': 'error',
-                    'message': f'不支持的链: {wallet.chain}'
+                    'message': '该接口仅支持EVM链钱包'
                 }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 验证支付密码
+            if not await sync_to_async(wallet.check_payment_password)(payment_password):
+                return Response({
+                    'status': 'error',
+                    'message': '支付密码错误'
+                }, status=status.HTTP_401_UNAUTHORIZED)
             
             # 设置支付密码
             wallet.payment_password = payment_password
             
+            # 解密私钥
+            try:
+                private_key = wallet.decrypt_private_key()
+            except Exception as e:
+                logger.error(f"解密私钥失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': '解密私钥失败'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            # 初始化 NFT 服务
+            nft_service = EVMNFTService(wallet.chain)
+            
             # 执行转账
-            result = await nft_service.transfer_nft( # type: ignore
+            result = await nft_service.transfer_nft(
                 from_address=wallet.address,
                 to_address=to_address,
-                nft_address=nft_address,
-                private_key=wallet.decrypt_private_key()
+                token_address=token_address,
+                token_id=token_id,
+                private_key=private_key
             )
             
-            return Response({
-                'status': 'success',
-                'data': result
-            })
+            if result['status'] == 'error':
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
             
-        except Wallet.DoesNotExist:
+            return Response(result)
+            
+        except WalletNotFoundError:
             return Response({
                 'status': 'error',
                 'message': '钱包不存在'
             }, status=status.HTTP_404_NOT_FOUND)
-        except InvalidAddressError as e:
-            return Response({
-                'status': 'error',
-                'message': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
-        except TransferError as e:
-            return Response({
-                'status': 'error',
-                'message': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
+            
         except Exception as e:
             logger.error(f"NFT 转账失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': str(e)
+                'message': f'NFT 转账失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['post'], url_path=r'collections/(?P<wallet_id>[^/.]+)/toggle-visibility')
@@ -826,15 +847,19 @@ class NFTTransferView(APIView):
         operation_description="将 NFT 从一个地址转移到另一个地址",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
-            required=['to_address', 'nft_address', 'payment_password'],
+            required=['to_address', 'token_address', 'token_id', 'payment_password'],
             properties={
                 'to_address': openapi.Schema(
                     type=openapi.TYPE_STRING,
                     description='接收方地址'
                 ),
-                'nft_address': openapi.Schema(
+                'token_address': openapi.Schema(
                     type=openapi.TYPE_STRING,
-                    description='NFT 地址'
+                    description='NFT 合约地址'
+                ),
+                'token_id': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='NFT Token ID'
                 ),
                 'payment_password': openapi.Schema(
                     type=openapi.TYPE_STRING,
@@ -842,6 +867,15 @@ class NFTTransferView(APIView):
                 )
             }
         ),
+        manual_parameters=[
+            openapi.Parameter(
+                'device_id',
+                openapi.IN_QUERY,
+                description='设备ID',
+                type=openapi.TYPE_STRING,
+                required=True
+            )
+        ],
         responses={
             200: "转账成功",
             400: "参数错误",
@@ -1261,4 +1295,131 @@ class EVMNFTViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': '获取 NFT 合集列表失败'
-            }, status=500) 
+            }, status=500)
+
+    @swagger_auto_schema(
+        operation_summary="转移 NFT",
+        operation_description="将 NFT 从一个地址转移到另一个地址",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['to_address', 'token_address', 'token_id', 'payment_password'],
+            properties={
+                'to_address': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='接收方地址'
+                ),
+                'token_address': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='NFT 合约地址'
+                ),
+                'token_id': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='NFT Token ID'
+                ),
+                'payment_password': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description='支付密码'
+                )
+            }
+        ),
+        manual_parameters=[
+            openapi.Parameter(
+                'device_id',
+                openapi.IN_QUERY,
+                description='设备ID',
+                type=openapi.TYPE_STRING,
+                required=True
+            )
+        ],
+        responses={
+            200: "转账成功",
+            400: "参数错误",
+            401: "未授权",
+            500: "服务器错误"
+        }
+    )
+    @action(detail=False, methods=['post'], url_path=r'transfer/(?P<wallet_id>[^/.]+)')
+    @async_to_sync_api
+    async def transfer_nft(self, request, wallet_id=None):
+        """处理 NFT 转账请求"""
+        try:
+            # 验证设备ID
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+            # 获取请求参数
+            to_address = request.data.get('to_address')
+            token_address = request.data.get('token_address')
+            token_id = request.data.get('token_id')
+            payment_password = request.data.get('payment_password')
+            
+            # 参数验证
+            if not all([to_address, token_address, token_id, payment_password]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持EVM链钱包'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 验证支付密码
+            if not await sync_to_async(wallet.check_payment_password)(payment_password):
+                return Response({
+                    'status': 'error',
+                    'message': '支付密码错误'
+                }, status=status.HTTP_401_UNAUTHORIZED)
+            
+            # 设置支付密码
+            wallet.payment_password = payment_password
+            
+            # 解密私钥
+            try:
+                private_key = wallet.decrypt_private_key()
+            except Exception as e:
+                logger.error(f"解密私钥失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': '解密私钥失败'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            # 初始化 NFT 服务
+            nft_service = EVMNFTService(wallet.chain)
+            
+            # 执行转账
+            result = await nft_service.transfer_nft(
+                from_address=wallet.address,
+                to_address=to_address,
+                token_address=token_address,
+                token_id=token_id,
+                private_key=private_key
+            )
+            
+            if result['status'] == 'error':
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+            
+            return Response(result)
+            
+        except WalletNotFoundError:
+            return Response({
+                'status': 'error',
+                'message': '钱包不存在'
+            }, status=status.HTTP_404_NOT_FOUND)
+            
+        except Exception as e:
+            logger.error(f"NFT 转账失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'NFT 转账失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 
