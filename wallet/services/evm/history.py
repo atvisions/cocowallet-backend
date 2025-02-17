@@ -13,6 +13,7 @@ from hexbytes import HexBytes
 from ...models import Transaction, Token, Wallet
 from ...api_config import RPCConfig, MoralisConfig
 from .utils import EVMUtils
+from .token_info import EVMTokenInfoService
 
 logger = logging.getLogger(__name__)
 
@@ -159,51 +160,82 @@ class EVMHistoryService:
                         unique_results.append(tx)
                 
                 # 获取代币信息
-                token = await sync_to_async(Token.objects.filter(
-                    chain=self.chain,
-                    address=token_address
-                ).first)()
+                token_info = {}
                 
-                # 如果数据库中没有代币信息，尝试从链上获取
-                if not token and token_address:
-                    try:
-                        token_contract = self.web3.eth.contract(
-                            address=Web3.to_checksum_address(token_address),
-                            abi=ERC20_ABI
-                        )
-                        name = await token_contract.functions.name().call()
-                        symbol = await token_contract.functions.symbol().call()
-                        decimals = await token_contract.functions.decimals().call()
-                        
+                if token_address:
+                    # 首先尝试从数据库获取代币信息
+                    token = await sync_to_async(Token.objects.filter(
+                        chain=self.chain,
+                        address=token_address
+                    ).first)()
+                    
+                    if token:
                         token_info = {
-                            'logo': '',
-                            'name': name,
-                            'symbol': symbol,
+                            'logo': token.logo if token else '',
+                            'name': token.name if token else 'Unknown Token',
+                            'symbol': token.symbol if token else 'Unknown',
                             'address': token_address,
-                            'decimals': decimals,
-                            'verified': False,
-                            'thumbnail': ''
+                            'decimals': token.decimals if token else 18,
+                            'verified': token.verified if token else False,
+                            'thumbnail': token.thumbnail if token else ''
                         }
-                    except Exception as e:
-                        logger.error(f"获取代币信息失败: {str(e)}")
-                        token_info = {
-                            'logo': '',
-                            'name': 'Unknown Token',
-                            'symbol': 'Unknown',
-                            'address': token_address,
-                            'decimals': 18,
-                            'verified': False,
-                            'thumbnail': ''
-                        }
+                    else:
+                        try:
+                            # 尝试从 Moralis API 获取元数据
+                            token_info_service = EVMTokenInfoService(self.chain)
+                            metadata = await token_info_service.get_token_metadata(token_address)
+                            
+                            if metadata:
+                                token_info = {
+                                    'logo': metadata.get('logo', ''),
+                                    'name': metadata.get('name', 'Unknown Token'),
+                                    'symbol': metadata.get('symbol', 'Unknown'),
+                                    'address': token_address,
+                                    'decimals': int(metadata.get('decimals', 18)),
+                                    'verified': metadata.get('verified', False),
+                                    'thumbnail': metadata.get('thumbnail', '')
+                                }
+                            else:
+                                # 从合约获取基本信息
+                                token_contract = self.web3.eth.contract(
+                                    address=Web3.to_checksum_address(token_address),
+                                    abi=ERC20_ABI
+                                )
+                                name = await token_contract.functions.name().call()
+                                symbol = await token_contract.functions.symbol().call()
+                                decimals = await token_contract.functions.decimals().call()
+                                
+                                token_info = {
+                                    'logo': '',
+                                    'name': name,
+                                    'symbol': symbol,
+                                    'address': token_address,
+                                    'decimals': decimals,
+                                    'verified': False,
+                                    'thumbnail': ''
+                                }
+                        except Exception as e:
+                            logger.error(f"获取代币信息失败: {str(e)}")
+                            token_info = {
+                                'logo': '',
+                                'name': 'Unknown Token',
+                                'symbol': 'Unknown',
+                                'address': token_address,
+                                'decimals': 18,
+                                'verified': False,
+                                'thumbnail': ''
+                            }
                 else:
+                    # 原生代币信息
+                    native_token = RPCConfig.NATIVE_TOKENS.get(self.chain, {})
                     token_info = {
-                        'logo': token.logo if token else '',
-                        'name': token.name if token else 'Unknown Token',
-                        'symbol': token.symbol if token else 'Unknown',
-                        'address': token_address,
-                        'decimals': token.decimals if token else 18,
-                        'verified': token.verified if token else False,
-                        'thumbnail': token.thumbnail if token else ''
+                        'name': native_token.get('name', self.chain),
+                        'symbol': native_token.get('symbol', self.chain),
+                        'decimals': native_token.get('decimals', 18),
+                        'logo': native_token.get('logo', ''),
+                        'address': EVMUtils.NATIVE_TOKEN_ADDRESS,
+                        'thumbnail': native_token.get('thumbnail', ''),
+                        'verified': True
                     }
                 
                 transactions = []

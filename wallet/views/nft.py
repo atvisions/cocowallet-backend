@@ -14,11 +14,12 @@ from rest_framework.views import APIView
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
-from ..models import Wallet
+from ..models import Wallet, NFTCollection
 from ..serializers import WalletSerializer
 from ..api_config import HeliusConfig
 from ..services.factory import ChainServiceFactory
-from ..exceptions import InvalidAddressError, TransferError
+from ..exceptions import InvalidAddressError, TransferError, WalletNotFoundError
+from ..services.evm.nft import EVMNFTService
 
 logger = logging.getLogger(__name__)
 
@@ -174,15 +175,56 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                             logger.error(f"处理NFT数据时出错: {str(e)}")
                             continue
                     
-                    # 转换为列表并排序
+                    # 获取隐藏的合集列表
+                    hidden_collections = await sync_to_async(list)(
+                        NFTCollection.objects.filter(
+                            chain='SOL',
+                            is_visible=False
+                        ).values_list('symbol', flat=True)
+                    )
+                    
+                    # 保存合集信息到数据库
+                    for collection_data in collections.values():
+                        try:
+                            # 检查合集是否已存在
+                            collection = await sync_to_async(NFTCollection.objects.filter(
+                                chain='SOL',
+                                symbol=collection_data['symbol']
+                            ).first)()
+                            
+                            if collection:
+                                # 更新现有合集
+                                collection.name = collection_data['name']
+                                collection.contract_address = collection_data['address']
+                                collection.logo = collection_data['image_url']
+                                await sync_to_async(collection.save)()
+                            else:
+                                # 创建新合集
+                                collection = NFTCollection(
+                                    chain='SOL',
+                                    name=collection_data['name'],
+                                    symbol=collection_data['symbol'],
+                                    contract_address=collection_data['address'],
+                                    logo=collection_data['image_url'],
+                                    is_visible=collection_data['symbol'] not in hidden_collections
+                                )
+                                await sync_to_async(collection.save)()
+                                
+                        except Exception as e:
+                            logger.error(f"保存合集信息失败: {str(e)}")
+                            continue
+                    
+                    # 转换为列表并过滤掉隐藏的合集
                     collection_list = [{
                         'name': data['name'],
                         'symbol': data['symbol'],
                         'address': data['address'],
                         'nft_count': data['nft_count'],
                         'image_url': data['image_url']
-                    } for data in collections.values()]
+                    } for data in collections.values() 
+                      if data['symbol'] not in hidden_collections]
                     
+                    # 按NFT数量排序
                     collection_list.sort(key=lambda x: x['nft_count'], reverse=True)
                     
                     return Response({
@@ -592,6 +634,190 @@ class SolanaNFTViewSet(viewsets.ModelViewSet):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=False, methods=['post'], url_path=r'collections/(?P<wallet_id>[^/.]+)/toggle-visibility')
+    @async_to_sync_api
+    async def toggle_collection_visibility(self, request, wallet_id=None):
+        """切换NFT合集的显示状态"""
+        try:
+            # 获取请求参数
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            collection_symbol = request.data.get('collection_symbol')
+            if not collection_symbol:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少collection_symbol参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持SOL链钱包'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 查找并更新合集
+            try:
+                collection = await sync_to_async(NFTCollection.objects.get)(
+                    chain='SOL',
+                    symbol=collection_symbol
+                )
+                
+                # 切换显示状态
+                collection.is_visible = not collection.is_visible
+                await sync_to_async(collection.save)()
+
+                return Response({
+                    'status': 'success',
+                    'message': '更新成功',
+                    'data': {
+                        'collection_symbol': collection.symbol,
+                        'is_visible': collection.is_visible
+                    }
+                })
+
+            except NFTCollection.DoesNotExist:
+                # 如果合集不存在，创建一个新的合集记录
+                collection = NFTCollection(
+                    chain='SOL',
+                    symbol=collection_symbol,
+                    is_visible=False  # 默认设置为不可见
+                )
+                await sync_to_async(collection.save)()
+                
+                return Response({
+                    'status': 'success',
+                    'message': '创建并更新成功',
+                    'data': {
+                        'collection_symbol': collection.symbol,
+                        'is_visible': collection.is_visible
+                    }
+                })
+
+            except Exception as e:
+                logger.error(f"更新合集显示状态失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': '更新合集显示状态失败'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        except Exception as e:
+            logger.error(f"切换合集显示状态失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '切换合集显示状态失败'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path=r'collections/(?P<wallet_id>[^/.]+)/hidden')
+    @async_to_sync_api
+    async def get_hidden_collections(self, request, wallet_id=None):
+        """获取已隐藏的 NFT 合集列表"""
+        try:
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少设备ID'
+                }, status=400)
+            
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持SOL链钱包'
+                }, status=400)
+            
+            # 获取隐藏的合集
+            hidden_collections = await sync_to_async(list)(
+                NFTCollection.objects.filter(
+                    chain='SOL',
+                    is_visible=False
+                ).values(
+                    'symbol',
+                    'name',
+                    'logo',
+                    'is_verified',
+                    'is_spam',
+                    'floor_price',
+                    'floor_price_usd'
+                )
+            )
+            
+            return Response({
+                'status': 'success',
+                'message': '获取成功',
+                'data': hidden_collections
+            })
+            
+        except Exception as e:
+            logger.error(f"获取隐藏的 NFT 合集列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'获取失败: {str(e)}'
+            }, status=500)
+
+    @action(detail=False, methods=['get'], url_path=r'collections/(?P<wallet_id>[^/.]+)/manage')
+    @async_to_sync_api
+    async def manage_nft_collections(self, request, wallet_id=None):
+        """获取所有 NFT 合集（包括不可见的）"""
+        try:
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少设备ID'
+                }, status=400)
+            
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持SOL链钱包'
+                }, status=400)
+            
+            # 获取钱包的所有 NFT 合集
+            nft_service = ChainServiceFactory.get_nft_service('SOL')
+            collections = await nft_service.get_all_nft_collections(wallet.address)
+            
+            # 获取合集的显示状态
+            collection_symbols = [c['symbol'] for c in collections]
+            db_collections = await sync_to_async(list)(
+                NFTCollection.objects.filter(
+                    chain='SOL',
+                    symbol__in=collection_symbols
+                ).values('symbol', 'is_visible')
+            )
+            
+            # 创建显示状态映射
+            visibility_map = {c['symbol']: c['is_visible'] for c in db_collections}
+            
+            # 更新合集的显示状态
+            for collection in collections:
+                collection['is_visible'] = visibility_map.get(collection['symbol'], True)
+            
+            return Response({
+                'status': 'success',
+                'message': '获取成功',
+                'data': collections
+            })
+            
+        except Exception as e:
+            logger.error(f"获取 NFT 合集列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取 NFT 合集列表失败'
+            }, status=500)
+
 class NFTTransferView(APIView):
     """NFT 转账视图"""
 
@@ -682,4 +908,357 @@ class NFTTransferView(APIView):
             return Response(
                 {"error": "服务器错误"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            ) 
+            )
+
+class EVMNFTViewSet(viewsets.ModelViewSet):
+    """EVM NFT视图集"""
+    serializer_class = WalletSerializer
+    permission_classes = [AllowAny]
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+    parser_classes = [JSONParser]
+
+    async def get_wallet_async(self, wallet_id: int, device_id: Optional[str] = None) -> Wallet:
+        """异步获取钱包对象"""
+        try:
+            # 使用sync_to_async包装数据库查询
+            get_wallet = sync_to_async(Wallet.objects.filter(id=wallet_id).first)
+            wallet = await get_wallet()
+            
+            if not wallet:
+                logger.error(f"找不到钱包，ID: {wallet_id}")
+                raise ObjectDoesNotExist(f"找不到ID为{wallet_id}的钱包")
+            
+            # 验证device_id
+            if device_id and wallet.device_id != device_id:
+                logger.error(f"设备ID不匹配，钱包device_id: {wallet.device_id}, 请求device_id: {device_id}")
+                raise ObjectDoesNotExist("无权访问该钱包")
+                
+            # 验证是否是EVM链
+            if wallet.chain not in ['ETH', 'BSC', 'POLYGON', 'AVAX', 'BASE']:
+                logger.error(f"不支持的链类型: {wallet.chain}")
+                raise ValueError("该接口仅支持EVM链钱包")
+                
+            logger.debug(f"成功获取钱包: {wallet.address}")
+            return wallet
+            
+        except Exception as e:
+            logger.error(f"获取钱包时出错: {str(e)}")
+            raise
+
+    @action(detail=False, methods=['get'], url_path=r'collections/(?P<wallet_id>[^/.]+)')
+    @async_to_sync_api
+    async def get_nft_collections(self, request, wallet_id=None):
+        """获取钱包的 NFT 合集列表"""
+        try:
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            # 初始化 NFT 服务
+            nft_service = EVMNFTService(wallet.chain)
+            
+            # 获取 NFT 合集列表
+            collections = await nft_service.get_nft_collections(wallet.address)
+            
+            return Response({
+                'status': 'success',
+                'data': collections
+            })
+            
+        except ValueError as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"获取NFT合集列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'获取NFT合集列表失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path=r'(?P<wallet_id>[^/.]+)/list')
+    @async_to_sync_api
+    async def get_collection_nfts(self, request, wallet_id=None):
+        """获取NFT集合中的NFTs"""
+        try:
+            device_id = request.query_params.get('device_id')
+            collection_address = request.query_params.get('collection_address')
+            
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if not collection_address:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少collection_address参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            # 初始化 NFT 服务
+            nft_service = EVMNFTService(wallet.chain)
+            
+            # 获取 NFT 列表
+            nfts = await nft_service.get_nfts(wallet.address, collection_address)
+            
+            return Response({
+                'status': 'success',
+                'data': nfts
+            })
+            
+        except ValueError as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"获取NFT列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'获取NFT列表失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path=r'(?P<wallet_id>[^/.]+)/details')
+    @async_to_sync_api
+    async def get_nft_details(self, request, wallet_id=None):
+        """获取 NFT 详情"""
+        try:
+            device_id = request.query_params.get('device_id')
+            token_address = request.query_params.get('token_address')
+            token_id = request.query_params.get('token_id')
+            
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=400)
+            
+            if not token_address:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少token_address参数'
+                }, status=400)
+            
+            if not token_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少token_id参数'
+                }, status=400)
+            
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            # 初始化 NFT 服务
+            nft_service = EVMNFTService(wallet.chain)
+            
+            # 获取 NFT 详情
+            nft_details = await nft_service.get_nft_details(token_address, token_id)
+            
+            # 如果没有获取到数据，返回空对象
+            if not nft_details:
+                return Response({
+                    'status': 'success',
+                    'message': '获取NFT详情成功',
+                    'data': {}
+                })
+            
+            # 格式化返回数据
+            formatted_data = {
+                'token_address': token_address,
+                'token_id': token_id,
+                'contract_type': nft_details.get('contract_type', 'ERC721'),
+                'name': nft_details.get('name', ''),
+                'description': nft_details.get('description', ''),
+                'image': nft_details.get('image', ''),
+                'animation_url': nft_details.get('animation_url'),
+                'attributes': [
+                    {
+                        'trait_type': attr.get('trait_type', ''),
+                        'value': attr.get('value', ''),
+                        'display_type': attr.get('display_type'),
+                        'max_value': attr.get('max_value'),
+                        'trait_count': attr.get('trait_count', 0),
+                        'order': attr.get('order'),
+                        'rarity_label': attr.get('rarity_label'),
+                        'count': attr.get('count'),
+                        'percentage': attr.get('percentage')
+                    }
+                    for attr in nft_details.get('attributes', [])
+                ],
+                'owner_of': nft_details.get('owner_of', ''),
+                'token_uri': nft_details.get('token_uri', ''),
+                'amount': nft_details.get('amount', '1'),
+                'block_number_minted': nft_details.get('block_number_minted'),
+                'last_token_uri_sync': nft_details.get('last_token_uri_sync'),
+                'last_metadata_sync': nft_details.get('last_metadata_sync'),
+                'media_collection': nft_details.get('media_collection', {}),
+                'media_items': nft_details.get('media_items', []),
+                'media_status': nft_details.get('media_status', 'host_unavailable')
+            }
+            
+            return Response({
+                'status': 'success',
+                'message': '获取NFT详情成功',
+                'data': formatted_data
+            })
+            
+        except ValueError as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=400)
+        except Exception as e:
+            logger.error(f"获取NFT详情失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取NFT详情失败'
+            }, status=500)
+
+    @action(detail=False, methods=['post'], url_path=r'collections/(?P<wallet_id>[^/.]+)/toggle-visibility')
+    @async_to_sync_api
+    async def toggle_collection_visibility(self, request, wallet_id=None):
+        """切换 NFT 合集显示状态"""
+        try:
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少设备ID'
+                }, status=400)
+                
+            contract_address = request.data.get('contract_address')
+            if not contract_address:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少合约地址'
+                }, status=400)
+                
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            # 查找并更新合集
+            try:
+                collection = await sync_to_async(NFTCollection.objects.get)(
+                    chain=wallet.chain,
+                    contract_address=contract_address
+                )
+                
+                # 切换显示状态
+                collection.is_visible = not collection.is_visible
+                await sync_to_async(collection.save)()
+                
+                return Response({
+                    'status': 'success',
+                    'message': '更新成功',
+                    'data': {
+                        'contract_address': collection.contract_address,
+                        'is_visible': collection.is_visible
+                    }
+                })
+            except NFTCollection.DoesNotExist:
+                return Response({
+                    'status': 'error',
+                    'message': '找不到指定的合集'
+                }, status=404)
+            except Exception as e:
+                logger.error(f"更新合集显示状态失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': '更新合集显示状态失败'
+                }, status=500)
+                
+        except Exception as e:
+            logger.error(f"切换合集显示状态失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '切换合集显示状态失败'
+            }, status=500)
+            
+    @action(detail=False, methods=['get'], url_path=r'collections/(?P<wallet_id>[^/.]+)/hidden')
+    @async_to_sync_api
+    async def get_hidden_collections(self, request, wallet_id=None):
+        """获取已隐藏的 NFT 合集列表"""
+        try:
+            # 获取请求参数
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少设备ID'
+                }, status=400)
+                
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            
+            # 获取隐藏的合集
+            hidden_collections = await sync_to_async(list)(
+                NFTCollection.objects.filter(
+                    chain=wallet.chain,
+                    is_visible=False
+                ).values(
+                    'contract_address',
+                    'name',
+                    'logo',
+                    'is_verified',
+                    'is_spam'
+                )
+            )
+            
+            return Response({
+                'status': 'success',
+                'message': '获取成功',
+                'data': hidden_collections
+            })
+            
+        except Exception as e:
+            logger.error(f"获取隐藏的 NFT 合集列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'获取失败: {str(e)}'
+            }, status=500)
+
+    @action(detail=False, methods=['get'], url_path=r'collections/(?P<wallet_id>[^/.]+)/manage')
+    @async_to_sync_api
+    async def manage_nft_collections(self, request, wallet_id=None):
+        """获取所有 NFT 合集（包括不可见的）"""
+        try:
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少设备ID'
+                }, status=400)
+                
+            # 验证钱包
+            wallet = await self.get_wallet_async(int(wallet_id), device_id)
+            logger.debug(f"成功获取钱包: {wallet.address}")
+            
+            # 初始化 NFT 服务
+            nft_service = EVMNFTService(wallet.chain)
+            
+            # 获取所有合集（包括不可见的）
+            collections = await nft_service.get_all_nft_collections(wallet.address)
+            
+            return Response({
+                'status': 'success',
+                'message': '获取成功',
+                'data': collections
+            })
+            
+        except Exception as e:
+            logger.error(f"获取 NFT 合集列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取 NFT 合集列表失败'
+            }, status=500) 

@@ -518,3 +518,114 @@ class SolanaNFTService:
         except Exception as e:
             logger.error(f"查找NFT代币账户失败: {str(e)}")
             return None 
+
+    async def get_all_nft_collections(self, address: str) -> List[Dict]:
+        """获取所有 NFT 合集
+        
+        Args:
+            address: 钱包地址
+            
+        Returns:
+            List[Dict]: NFT 合集列表
+        """
+        try:
+            # 调用 Helius API 获取 NFT 资产
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": "my-id",
+                    "method": HeliusConfig.GET_ASSETS_BY_OWNER,
+                    "params": {
+                        "ownerAddress": address,
+                        "page": 1,
+                        "limit": 1000,
+                        "displayOptions": {
+                            "showUnverifiedCollections": True,
+                            "showCollectionMetadata": True
+                        }
+                    }
+                }
+                
+                async with session.post(HeliusConfig.get_rpc_url(), json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if 'result' in result and 'items' in result['result']:
+                            items = result['result']['items']
+                            
+                            # 用于存储合集信息的字典
+                            collections_map = {}
+                            
+                            for item in items:
+                                try:
+                                    # 获取合集信息
+                                    content = item.get('content', {})
+                                    metadata = content.get('metadata', {})
+                                    collection_data = item.get('collection', {})
+                                    
+                                    # 获取合集标识
+                                    collection_symbol = metadata.get('symbol', '')
+                                    if not collection_symbol:
+                                        continue
+                                        
+                                    # 如果合集已存在，跳过
+                                    if collection_symbol in collections_map:
+                                        continue
+                                        
+                                    # 获取图片 URL
+                                    image_url = None
+                                    files = content.get('files', [])
+                                    if files and isinstance(files, list) and len(files) > 0:
+                                        image_url = files[0].get('uri', '')
+                                    
+                                    if not image_url:
+                                        image_url = metadata.get('image', '')
+                                        
+                                    # 获取合集地址
+                                    collection_address = collection_data.get('address', '')
+                                    
+                                    # 构建合集信息
+                                    collection_info = {
+                                        'symbol': collection_symbol,
+                                        'name': collection_data.get('name', '') or metadata.get('collection', {}).get('name', '') or collection_symbol,
+                                        'contract_address': collection_address,
+                                        'description': collection_data.get('description', ''),
+                                        'logo': image_url,
+                                        'is_verified': collection_data.get('verified', False),
+                                        'is_spam': collection_data.get('isSpam', False),
+                                        'floor_price': collection_data.get('floorPrice', 0),
+                                        'floor_price_usd': collection_data.get('floorPriceUsd', 0)
+                                    }
+                                    
+                                    collections_map[collection_symbol] = collection_info
+                                    
+                                except Exception as e:
+                                    logger.error(f"处理 NFT 合集数据时出错: {str(e)}")
+                                    continue
+                                    
+                            # 获取合集的显示状态
+                            collection_symbols = list(collections_map.keys())
+                            db_collections = await sync_to_async(list)(
+                                NFTCollection.objects.filter(
+                                    chain='SOL',
+                                    symbol__in=collection_symbols
+                                ).values('symbol', 'is_visible')
+                            )
+                            
+                            # 创建显示状态映射
+                            visibility_map = {c['symbol']: c['is_visible'] for c in db_collections}
+                            
+                            # 更新合集的显示状态
+                            for collection in collections_map.values():
+                                collection['is_visible'] = visibility_map.get(collection['symbol'], True)
+                            
+                            # 按地板价排序
+                            collections = list(collections_map.values())
+                            collections.sort(key=lambda x: float(x['floor_price_usd'] or 0), reverse=True)
+                            
+                            return collections
+                            
+            return []
+            
+        except Exception as e:
+            logger.error(f"获取 NFT 合集列表失败: {str(e)}")
+            return [] 

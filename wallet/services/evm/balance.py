@@ -8,7 +8,7 @@ from web3 import Web3
 from django.core.cache import cache
 from asgiref.sync import sync_to_async
 
-from ...models import Wallet
+from ...models import Wallet, Token
 from ...api_config import MoralisConfig
 from ...exceptions import WalletNotFoundError, ChainNotSupportError, GetBalanceError
 from .utils import EVMUtils
@@ -186,8 +186,16 @@ class EVMBalanceService:
                 'price_change_24h': '+0.00%'
             }
 
-    async def get_all_token_balances(self, address: str) -> Dict:
-        """获取所有代币余额"""
+    async def get_all_token_balances(self, address: str, include_hidden: bool = False) -> Dict:
+        """获取所有代币余额
+        
+        Args:
+            address: 钱包地址
+            include_hidden: 是否包含隐藏的代币，默认为 False
+            
+        Returns:
+            Dict: 代币余额信息
+        """
         try:
             tokens = []
             total_value = 0
@@ -222,7 +230,8 @@ class EVMBalanceService:
                     'price_usd': native_price_data.get('price_usd', '0'),
                     'value_usd': str(native_value),
                     'price_change_24h': native_price_data.get('price_change_24h', '+0.00%'),
-                    'is_native': True
+                    'is_native': True,
+                    'is_visible': True  # 原生代币始终可见
                 })
             
             # 获取 ERC20 代币余额
@@ -242,42 +251,65 @@ class EVMBalanceService:
                     
                     token_balances = await response.json()
                     
+                    # 获取所有代币的显示状态
+                    token_addresses = [token['token_address'] for token in token_balances]
+                    db_tokens = await sync_to_async(list)(Token.objects.filter(
+                        chain=self.chain,
+                        address__in=token_addresses
+                    ).values('address', 'is_visible'))
+                    
+                    # 创建地址到显示状态的映射
+                    visibility_map = {t['address']: t['is_visible'] for t in db_tokens}
+                    
                     # 处理 ERC20 代币
                     for token_data in token_balances:
-                        token_address = token_data['token_address']
-                        decimals = int(token_data.get('decimals', 18))
-                        
-                        # 跳过 decimals 为 0 的代币（可能是 NFT）
-                        if decimals == 0:
-                            continue
+                        try:
+                            token_address = token_data['token_address']
                             
-                        # 计算余额
-                        balance = int(token_data.get('balance', '0'))
-                        if balance <= 0:  # 跳过余额为0的代币
-                            continue
+                            # 如果代币被隐藏且不包含隐藏代币，则跳过
+                            if not include_hidden and not visibility_map.get(token_address, True):
+                                continue
+                                
+                            decimals = int(token_data.get('decimals', 18))
                             
-                        formatted_balance = str(EVMUtils.from_wei(balance, decimals))
-                        
-                        # 获取代币价格
-                        price_data = await self.token_info_service.get_token_price(token_address)
-                        price = float(price_data.get('price_usd', '0'))
-                        value = float(formatted_balance) * price
-                        total_value += value
-                        
-                        tokens.append({
-                            'chain': self.chain,
-                            'address': token_address,
-                            'name': token_data.get('name', ''),
-                            'symbol': token_data.get('symbol', ''),
-                            'decimals': decimals,
-                            'logo': token_data.get('logo', ''),
-                            'balance': str(balance),
-                            'balance_formatted': formatted_balance,
-                            'price_usd': price_data.get('price_usd', '0'),
-                            'value_usd': str(value),
-                            'price_change_24h': price_data.get('price_change_24h', '+0.00%'),
-                            'is_native': False
-                        })
+                            # 跳过 decimals 为 0 的代币（可能是 NFT）
+                            if decimals == 0:
+                                continue
+                                
+                            # 计算余额
+                            balance = int(token_data.get('balance', '0'))
+                            if balance <= 0:  # 跳过余额为0的代币
+                                continue
+                                
+                            formatted_balance = str(EVMUtils.from_wei(balance, decimals))
+                            
+                            # 获取代币价格
+                            price_data = await self.token_info_service.get_token_price(token_address)
+                            price = float(price_data.get('price_usd', '0'))
+                            value = float(formatted_balance) * price
+                            total_value += value
+                            
+                            token_info = {
+                                'chain': self.chain,
+                                'address': token_address,
+                                'name': token_data.get('name', ''),
+                                'symbol': token_data.get('symbol', ''),
+                                'decimals': decimals,
+                                'logo': token_data.get('logo', ''),
+                                'balance': str(balance),
+                                'balance_formatted': formatted_balance,
+                                'price_usd': price_data.get('price_usd', '0'),
+                                'value_usd': str(value),
+                                'price_change_24h': price_data.get('price_change_24h', '+0.00%'),
+                                'is_native': False,
+                                'is_visible': visibility_map.get(token_address, True)
+                            }
+                            
+                            tokens.append(token_info)
+                            
+                        except Exception as e:
+                            logger.error(f"处理代币数据失败: {str(e)}")
+                            continue
                     
                     # 按价值排序
                     tokens.sort(key=lambda x: float(x['value_usd']), reverse=True)

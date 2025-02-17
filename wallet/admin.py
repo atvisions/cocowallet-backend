@@ -163,10 +163,16 @@ class WalletAdmin(admin.ModelAdmin):
 
 @admin.register(NFTCollection)
 class NFTCollectionAdmin(admin.ModelAdmin):
-    list_display = ['name', 'chain', 'contract_address', 'is_verified', 'is_recommended', 'floor_price']
-    list_filter = ['chain', 'is_verified', 'is_recommended']
+    def logo_img(self, obj):
+        if obj.logo:
+            return format_html('<img src="{}" style="width: 32px; height: 32px; border-radius: 50%;" />', obj.logo)
+        return '-'
+    logo_img.short_description = '图标'
+    
+    list_display = ['logo_img', 'name', 'chain', 'contract_address', 'is_verified', 'is_spam', 'floor_price_usd']
+    list_filter = ['chain', 'is_verified', 'is_spam']
     search_fields = ['name', 'contract_address']
-    list_editable = ['is_verified', 'is_recommended']
+    list_editable = ['is_verified', 'is_spam']
     readonly_fields = ['created_at', 'updated_at']
 
 @admin.register(Transaction)

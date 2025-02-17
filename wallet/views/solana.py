@@ -120,118 +120,25 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 获取所有代币余额
             logger.debug(f"开始获取代币余额，钱包地址: {wallet.address}")
-            result = await balance_service.get_all_token_balances(wallet.address)
-
+            result = await balance_service.get_all_token_balances(wallet.address, include_hidden=False)
             
-            # 获取隐藏的代币列表
-            hidden_tokens = await sync_to_async(list)(
-                Token.objects.filter(chain='SOL', is_visible=False).values_list('address', flat=True)
-            )
-            logger.debug(f"获取到隐藏代币列表: {hidden_tokens}")
-            
-            # 过滤和处理代币数据
-            filtered_tokens = []
-            
-            for token in result.get('tokens', []): # type: ignore
-                # 跳过隐藏的代币
-                if token.get('token_address') in hidden_tokens:
-                    logger.debug(f"跳过隐藏代币: {token.get('token_address')}")
-                    continue
-                    
-                # 跳过decimals为0的代币（可能是垃圾币或NFT）
-                if token.get('decimals', 0) == 0:
-                    continue
-                    
-                # 格式化余额，去除科学计数法
-                balance = float(token.get('balance', '0'))
-                if balance == 0:
-                    continue  # 跳过余额为0的代币
-                
-                # 智能格式化余额
-                if balance < 0.000001:
-                    formatted_balance = '{:.8f}'.format(balance)
-                elif balance < 0.01:
-                    formatted_balance = '{:.6f}'.format(balance)
-                else:
-                    formatted_balance = '{:.4f}'.format(balance)
-                formatted_balance = formatted_balance.rstrip('0').rstrip('.')
-                
-                # 获取价格变化
-                price_change = float(token.get('price_change_24h', '0'))
-                formatted_price_change = '{:+.2f}%'.format(price_change)
-                
-                # 获取USD价值和价格
-                price_usd = float(token.get('price_usd', '0'))
-                value_usd = float(token.get('value_usd', '0'))
-                
-                # 格式化价格
-                if price_usd < 0.00001:
-                    formatted_price = '${:.8f}'.format(price_usd)
-                elif price_usd < 0.01:
-                    formatted_price = '${:.6f}'.format(price_usd)
-                else:
-                    formatted_price = '${:.2f}'.format(price_usd)
-                formatted_price = formatted_price.rstrip('0').rstrip('.')
-                if formatted_price.endswith('.'):
-                    formatted_price += '00'
-                
-                # 格式化USD价值
-                if value_usd < 0.00001:
-                    formatted_value = '${:.8f}'.format(value_usd)
-                elif value_usd < 0.01:
-                    formatted_value = '${:.6f}'.format(value_usd)
-                else:
-                    formatted_value = '${:.2f}'.format(value_usd)
-                formatted_value = formatted_value.rstrip('0').rstrip('.')
-                if formatted_value.endswith('.'):
-                    formatted_value += '00'
-                
-                filtered_tokens.append({
-                    'token_address': token.get('token_address'),
-                    'symbol': token.get('symbol'),
-                    'name': token.get('name'),
-                    'balance': formatted_balance,
-                    'decimals': token.get('decimals'),
-                    'logo': token.get('logo'),
-                    'price_usd': formatted_price,
-                    'price_change_24h': formatted_price_change,
-                    'value_usd': formatted_value,
-                    'is_native': token.get('is_native', False)
-                })
-            
-            # 按USD价值排序
-            filtered_tokens.sort(key=lambda x: float(x['value_usd'].replace('$', '')), reverse=True)
-            
-            # 获取总价值
-            total_value_usd = float(result.get('total_value_usd', '0')) # type: ignore
-            
-            # 格式化总价值
-            formatted_total_value = '${:.2f}'.format(total_value_usd)
-            if total_value_usd < 0.01:
-                formatted_total_value = '${:.6f}'.format(total_value_usd)
-            formatted_total_value = formatted_total_value.rstrip('0').rstrip('.')
-            if formatted_total_value.endswith('.'):
-                formatted_total_value += '00'
-            
+            # 返回结果
             return Response({
                 'status': 'success',
-                'data': {
-                    'total_value_usd': formatted_total_value,
-                    'tokens': filtered_tokens
-                }
+                'data': result
             })
             
-        except ObjectDoesNotExist as e:
-            logger.error(f"找不到钱包: {str(e)}")
+        except WalletNotFoundError:
             return Response({
                 'status': 'error',
-                'message': str(e)
+                'message': '钱包不存在'
             }, status=status.HTTP_404_NOT_FOUND)
+            
         except Exception as e:
-            logger.error(f"获取SOL代币余额失败: {str(e)}")
+            logger.error(f"获取代币余额失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': f'获取代币余额失败: {str(e)}'
+                'message': '获取代币余额失败'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'])
@@ -350,62 +257,71 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 'message': f'获取代币余额失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    @action(detail=True, methods=['post'], url_path='toggle-token-visibility')
+    @action(detail=True, methods=['post'], url_path='tokens/toggle-visibility')
     @async_to_sync_api
     async def toggle_token_visibility(self, request, pk=None):
-        """设置代币显示状态"""
+        """切换代币的显示状态"""
         try:
-            device_id = request.data.get('device_id')
-            token_address = request.data.get('token_address')
-            is_visible = request.data.get('is_visible')
-            
-            if not all([device_id, token_address, is_visible is not None]):
+            # 获取请求参数
+            device_id = request.query_params.get('device_id')
+            if not device_id:
                 return Response({
                     'status': 'error',
-                    'message': '缺少必要参数'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
+                    'message': '缺少设备ID'
+                }, status=400)
+                
+            token_address = request.data.get('token_address')
+            if not token_address:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少代币地址'
+                }, status=400)
+                
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
+            wallet = await self.get_wallet_async(pk, device_id)
             
             if wallet.chain != 'SOL':
                 return Response({
                     'status': 'error',
                     'message': '该接口仅支持SOL链钱包'
-                }, status=status.HTTP_400_BAD_REQUEST)
+                }, status=400)
             
-            # 更新或创建Token记录
-            token, created = await sync_to_async(Token.objects.get_or_create)(
-                chain='SOL',
-                address=token_address,
-                defaults={
-                    'is_visible': is_visible
-                }
-            )
-            
-            if not created:
-                token.is_visible = is_visible
+            # 查找并更新代币
+            try:
+                token, created = await sync_to_async(Token.objects.get_or_create)(
+                    chain='SOL',
+                    address=token_address,
+                    defaults={
+                        'is_visible': True,  # 默认可见
+                        'name': '',  # 这些字段可以稍后更新
+                        'symbol': '',
+                        'decimals': 9
+                    }
+                )
+                token.is_visible = not token.is_visible
                 await sync_to_async(token.save)()
-            
-            return Response({
-                'status': 'success',
-                'data': {
-                    'token_address': token_address,
-                    'is_visible': is_visible
-                }
-            })
-            
-        except ObjectDoesNotExist as e:
-            return Response({
-                'status': 'error',
-                'message': str(e)
-            }, status=status.HTTP_404_NOT_FOUND)
+                
+                return Response({
+                    'status': 'success',
+                    'message': '更新成功',
+                    'data': {
+                        'token_address': token.address,
+                        'is_visible': token.is_visible
+                    }
+                })
+            except Exception as e:
+                logger.error(f"更新代币显示状态失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': '更新代币显示状态失败'
+                }, status=500)
+                
         except Exception as e:
-            logger.error(f"设置代币显示状态失败: {str(e)}")
+            logger.error(f"切换代币显示状态失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': f'设置代币显示状态失败: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                'message': '切换代币显示状态失败'
+            }, status=500)
 
     @action(detail=True, methods=['get'], url_path=r'tokens/SOL/(?P<token_address>[^/.]+)/detail')
     @async_to_sync_api
@@ -1265,5 +1181,46 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 'status': 'error',
                 'message': '获取推荐代币失败'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='tokens/manage')
+    @async_to_sync_api
+    async def manage_tokens(self, request, pk=None):
+        """获取代币管理列表（包括隐藏的代币）"""
+        try:
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=400)
+                
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是 Solana 链
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持 Solana 链钱包'
+                }, status=400)
+            
+            # 获取余额服务
+            balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
+            
+            # 获取所有代币余额，包括隐藏的
+            balances = await balance_service.get_all_token_balances(wallet.address, include_hidden=True)
+            
+            return Response({
+                'status': 'success',
+                'message': '获取成功',
+                'data': balances
+            })
+            
+        except Exception as e:
+            logger.error(f"获取代币管理列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取代币管理列表失败'
+            }, status=500)
 
    

@@ -350,8 +350,23 @@ class EVMTokenInfoService:
     ) -> Dict:
         """获取代币价格走势图数据"""
         try:
-            # 获取当前价格
-            current_price_data = await self.get_token_price(token_address)
+            # 初始化变量
+            original_chain = self.chain
+            original_token_address = token_address
+            
+            # 如果是原生代币，使用对应的包装代币地址
+            if token_address == EVMUtils.NATIVE_TOKEN_ADDRESS:
+                if self.chain in ['ETH', 'BASE', 'ARBITRUM', 'OPTIMISM']:
+                    # 对于 ETH 和其他使用 ETH 作为原生代币的链，使用 ETH 主网的 WETH
+                    self.chain = 'ETH'  # 切换到 ETH 主网
+                    token_address = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'  # ETH 主网 WETH
+                else:
+                    # 其他链使用各自的包装代币
+                    native_token = RPCConfig.NATIVE_TOKENS.get(self.chain)
+                    if not native_token or 'address' not in native_token:
+                        logger.error(f"找不到 {self.chain} 的包装代币地址")
+                        return {}
+                    token_address = native_token['address']
             
             # 获取 Moralis API 配置
             if not MoralisConfig.API_KEY:
@@ -360,6 +375,9 @@ class EVMTokenInfoService:
             
             # 获取链 ID
             chain = MoralisConfig.get_chain_id(self.chain)
+            
+            # 获取当前价格
+            current_price_data = await self.get_token_price(token_address)
             
             # 如果代币没有价格数据，说明可能没有流动性或未在交易所上市
             if current_price_data.get('price_usd', '0') == '0':
@@ -525,6 +543,9 @@ class EVMTokenInfoService:
         except Exception as e:
             logger.error(f"获取代币价格数据失败: {str(e)}")
             return {}
+        finally:
+            # 恢复原始链设置
+            self.chain = original_chain
 
     async def get_token_price(self, token_address: str) -> Dict:
         """获取代币价格
@@ -542,92 +563,107 @@ class EVMTokenInfoService:
             if cached_price:
                 return cached_price
             
-            # 如果是 BASE 链的原生代币，使用 ETH 主网的价格
-            if self.chain == 'BASE' and (
-                token_address == EVMUtils.NATIVE_TOKEN_ADDRESS or 
-                token_address.lower() == '0x4200000000000000000000000000000000000006'  # BASE 的 WETH
-            ):
-                chain = 'eth'  # 使用 ETH 主网
-                token_address = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'  # ETH 主网 WETH
-            else:
-                chain = MoralisConfig.get_chain_id(self.chain)
-            
-            # 获取 Moralis API 配置
-            if not MoralisConfig.API_KEY:
-                logger.error("未配置 MORALIS_API_KEY")
-                return {
-                    'price_usd': '0',
-                    'price_change_24h': '+0.00%'
-                }
-            
-            # 构建 API URL
-            url = MoralisConfig.EVM_TOKEN_PRICE_URL.format(token_address)
-            params = {
-                'chain': chain,
-                'include': 'percent_change'
-            }
-            
-            logger.debug(f"请求 Moralis API - URL: {url}, 参数: {params}")
-            
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(url, headers=MoralisConfig.get_headers(), params=params) as response:
-                    response_text = await response.text()
-                    logger.debug(f"Moralis API 响应: {response_text}")
-                    
-                    if response.status == 200:
-                        try:
-                            result = json.loads(response_text)
-                        except json.JSONDecodeError:
-                            logger.error(f"解析价格数据失败: {response_text}")
+            # 如果是原生代币，使用对应的包装代币地址
+            original_chain = self.chain
+            try:
+                if token_address == EVMUtils.NATIVE_TOKEN_ADDRESS:
+                    if self.chain in ['ETH', 'BASE', 'ARBITRUM', 'OPTIMISM']:
+                        # 对于 ETH 和其他使用 ETH 作为原生代币的链，使用 ETH 主网的 WETH
+                        self.chain = 'ETH'  # 切换到 ETH 主网
+                        token_address = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'  # ETH 主网 WETH
+                    else:
+                        # 其他链使用各自的包装代币
+                        native_token = RPCConfig.NATIVE_TOKENS.get(self.chain)
+                        if not native_token or 'address' not in native_token:
+                            logger.error(f"找不到 {self.chain} 的包装代币地址")
                             return {
                                 'price_usd': '0',
                                 'price_change_24h': '+0.00%'
                             }
+                        token_address = native_token['address']
+                
+                # 获取 Moralis API 配置
+                if not MoralisConfig.API_KEY:
+                    logger.error("未配置 MORALIS_API_KEY")
+                    return {
+                        'price_usd': '0',
+                        'price_change_24h': '+0.00%'
+                    }
+                
+                # 获取链 ID
+                chain = MoralisConfig.get_chain_id(self.chain)
+                
+                # 构建 API URL
+                url = MoralisConfig.EVM_TOKEN_PRICE_URL.format(token_address)
+                params = {
+                    'chain': chain,
+                    'include': 'percent_change'
+                }
+                
+                logger.debug(f"请求 Moralis API - URL: {url}, 参数: {params}")
+                
+                async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                    async with session.get(url, headers=MoralisConfig.get_headers(), params=params) as response:
+                        response_text = await response.text()
+                        logger.debug(f"Moralis API 响应: {response_text}")
                         
-                        # 获取价格
-                        try:
-                            price = float(result.get('usdPrice', result.get('usdPriceFormatted', 0)))
-                        except (TypeError, ValueError):
-                            price = 0
-                        
-                        # 获取24小时价格变化
-                        try:
-                            price_change = float(result.get('24hrPercentChange', 0))
-                        except (TypeError, ValueError):
-                            price_change = 0
-                        
-                        # 格式化价格
-                        if price < 0.000001:
-                            formatted_price = '{:.12f}'.format(price)
-                        elif price < 0.00001:
-                            formatted_price = '{:.10f}'.format(price)
-                        elif price < 0.0001:
-                            formatted_price = '{:.8f}'.format(price)
-                        elif price < 0.01:
-                            formatted_price = '{:.6f}'.format(price)
-                        else:
-                            formatted_price = '{:.4f}'.format(price)
-                        formatted_price = formatted_price.rstrip('0').rstrip('.')
-                        
-                        # 格式化价格变化
-                        formatted_price_change = '{:+.2f}%'.format(price_change)
-                        
-                        price_data = {
-                            'price_usd': formatted_price,
-                            'price_change_24h': formatted_price_change
-                        }
-                        
-                        # 缓存价格数据
-                        if price_data['price_usd'] != '0':
-                            cache.set(cache_key, price_data, timeout=300)  # 5分钟缓存
+                        if response.status == 200:
+                            try:
+                                result = json.loads(response_text)
+                            except json.JSONDecodeError:
+                                logger.error(f"解析价格数据失败: {response_text}")
+                                return {
+                                    'price_usd': '0',
+                                    'price_change_24h': '+0.00%'
+                                }
                             
-                        return price_data
-                    else:
-                        logger.error(f"获取代币价格失败: {response_text}")
-                        return {
-                            'price_usd': '0',
-                            'price_change_24h': '+0.00%'
-                        }
+                            # 获取价格
+                            try:
+                                price = float(result.get('usdPrice', result.get('usdPriceFormatted', 0)))
+                            except (TypeError, ValueError):
+                                price = 0
+                            
+                            # 获取24小时价格变化
+                            try:
+                                price_change = float(result.get('24hrPercentChange', 0))
+                            except (TypeError, ValueError):
+                                price_change = 0
+                            
+                            # 格式化价格
+                            if price < 0.000001:
+                                formatted_price = '{:.12f}'.format(price)
+                            elif price < 0.00001:
+                                formatted_price = '{:.10f}'.format(price)
+                            elif price < 0.0001:
+                                formatted_price = '{:.8f}'.format(price)
+                            elif price < 0.01:
+                                formatted_price = '{:.6f}'.format(price)
+                            else:
+                                formatted_price = '{:.4f}'.format(price)
+                            formatted_price = formatted_price.rstrip('0').rstrip('.')
+                            
+                            # 格式化价格变化
+                            formatted_price_change = '{:+.2f}%'.format(price_change)
+                            
+                            price_data = {
+                                'price_usd': formatted_price,
+                                'price_change_24h': formatted_price_change
+                            }
+                            
+                            # 缓存价格数据
+                            if price_data['price_usd'] != '0':
+                                cache.set(cache_key, price_data, timeout=300)  # 5分钟缓存
+                                
+                            return price_data
+                        else:
+                            logger.error(f"获取代币价格失败: {response_text}")
+                            return {
+                                'price_usd': '0',
+                                'price_change_24h': '+0.00%'
+                            }
+            finally:
+                # 恢复原始链设置
+                self.chain = original_chain
                         
         except Exception as e:
             logger.error(f"获取代币价格失败: {str(e)}")

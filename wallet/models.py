@@ -314,24 +314,24 @@ class NFTCollection(models.Model):
     chain = models.CharField(max_length=20, verbose_name='区块链')
     contract_address = models.CharField(max_length=100, verbose_name='合约地址', null=True, blank=True)
     name = models.CharField(max_length=100, verbose_name='合集名称')
-    symbol = models.CharField(max_length=20, verbose_name='合集符号')
+    symbol = models.CharField(max_length=100, verbose_name='合集符号')
+    contract_type = models.CharField(max_length=20, default='ERC721', verbose_name='合约类型')
     description = models.TextField(verbose_name='描述', null=True, blank=True)
     logo = models.URLField(verbose_name='Logo URL', null=True, blank=True)
     banner = models.URLField(verbose_name='Banner URL', null=True, blank=True)
-    website = models.URLField(verbose_name='官网', null=True, blank=True)
-    discord = models.URLField(verbose_name='Discord', null=True, blank=True)
-    twitter = models.URLField(verbose_name='Twitter', null=True, blank=True)
     is_verified = models.BooleanField(default=False, verbose_name='是否已验证')
-    is_recommended = models.BooleanField(default=False, verbose_name='是否推荐')
+    is_spam = models.BooleanField(default=False, verbose_name='是否垃圾合集')
+    is_visible = models.BooleanField(default=True, verbose_name='是否显示')
     floor_price = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='地板价', default=Decimal('0'))
-    volume_24h = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='24h交易量', default=Decimal('0'))
+    floor_price_usd = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='地板价(USD)', default=Decimal('0'))
+    floor_price_currency = models.CharField(max_length=10, default='eth', verbose_name='地板价币种')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
 
     class Meta:
         verbose_name = 'NFT合集'
         verbose_name_plural = 'NFT合集'
-        ordering = ['-is_recommended', '-floor_price']
+        ordering = ['-floor_price_usd', '-created_at']
         unique_together = ['chain', 'contract_address']
 
     def __str__(self):

@@ -39,6 +39,7 @@ from django.db.models.functions import ExtractMinute
 from django.db.models.functions import ExtractSecond
 from django.db.models.functions import ExtractWeek
 from django.db.models.functions import ExtractQuarter
+from ..services.evm.nft import EVMNFTService
 
 logger = logging.getLogger(__name__)
 
@@ -91,27 +92,32 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             if wallet.chain not in EVMUtils.CHAIN_CONFIG:
                 return Response({
                     'status': 'error',
-                    'message': '不支持的链类型'
+                    'message': '不支持的链'
                 }, status=status.HTTP_400_BAD_REQUEST)
-
+            
             # 获取余额服务
             balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
             balance = await balance_service.get_native_balance(wallet.address)
-
+            
             return Response({
                 'status': 'success',
+                'message': '获取余额成功',
                 'data': {
-                    'balance': str(balance),
-                    'symbol': EVMUtils.CHAIN_CONFIG[wallet.chain]['symbol']
+                    'balance': str(balance)
                 }
             })
-
-        except Exception as e:
-            logger.error(f"获取原生代币余额失败: {str(e)}")
+            
+        except ValueError as e:
             return Response({
                 'status': 'error',
                 'message': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"获取原生代币余额失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f"获取原生代币余额失败: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'])
     @async_to_sync_api
@@ -948,4 +954,112 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': f'授权失败: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='tokens/manage')
+    @async_to_sync_api
+    async def manage_tokens(self, request, pk=None):
+        """获取所有代币列表（包括隐藏的）"""
+        try:
+            # 获取请求参数
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少设备ID'
+                }, status=400)
+                
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链'
+                }, status=400)
+            
+            # 获取余额服务
+            balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
+            
+            # 获取所有代币余额，包括隐藏的
+            balances = await balance_service.get_all_token_balances(wallet.address, include_hidden=True)
+            
+            return Response({
+                'status': 'success',
+                'data': balances['tokens']
+            })
+            
+        except Exception as e:
+            logger.error(f"获取代币管理列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取代币管理列表失败'
+            }, status=500)
+
+    @action(detail=True, methods=['post'], url_path='tokens/toggle-visibility')
+    @async_to_sync_api
+    async def toggle_token_visibility(self, request, pk=None):
+        """切换代币的显示状态"""
+        try:
+            # 获取请求参数
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少设备ID'
+                }, status=400)
+                
+            token_address = request.data.get('token_address')
+            if not token_address:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少代币地址'
+                }, status=400)
+                
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是EVM链
+            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链'
+                }, status=400)
+            
+            # 查找并更新代币
+            try:
+                token, created = await sync_to_async(Token.objects.get_or_create)(
+                    chain=wallet.chain,
+                    address=token_address,
+                    defaults={
+                        'is_visible': True,  # 默认可见
+                        'name': '',  # 这些字段可以稍后更新
+                        'symbol': '',
+                        'decimals': 18
+                    }
+                )
+                token.is_visible = not token.is_visible
+                await sync_to_async(token.save)()
+                
+                return Response({
+                    'status': 'success',
+                    'message': '更新成功',
+                    'data': {
+                        'token_address': token.address,
+                        'is_visible': token.is_visible
+                    }
+                })
+            except Exception as e:
+                logger.error(f"更新代币显示状态失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': '更新代币显示状态失败'
+                }, status=500)
+                
+        except Exception as e:
+            logger.error(f"切换代币显示状态失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '切换代币显示状态失败'
+            }, status=500) 
