@@ -426,38 +426,66 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             # 获取代币信息服务
             token_info_service = ChainServiceFactory.get_token_info_service(wallet.chain)
             
-            # 获取代币元数据
-            token_data = await token_info_service.get_token_metadata(token_address)
-            if not token_data:
+            try:
+                # 获取代币元数据
+                token_data = await token_info_service.get_token_metadata(token_address)
+                if not token_data:
+                    logger.warning(f"从 Moralis 获取代币元数据失败，尝试从合约直接获取: {token_address}")
+                    token_data = await token_info_service._get_token_info(token_address)
+                
+                if not token_data or not token_data.get('name'):
+                    return Response({
+                        'status': 'error',
+                        'message': '获取代币信息失败，该合约可能不是标准的 ERC20 合约'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # 获取代币余额
+                try:
+                    balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
+                    balance_info = await balance_service.get_token_balance(wallet.address, token_address)
+                    logger.info(f"获取到代币余额: {balance_info}")
+                except Exception as balance_error:
+                    logger.error(f"获取代币余额失败: {str(balance_error)}")
+                    balance_info = {'balance': '0', 'balance_formatted': '0'}
+                
+                # 获取代币价格
+                try:
+                    price_data = await token_info_service.get_token_price(token_address)
+                    logger.info(f"获取到代币价格: {price_data}")
+                except Exception as price_error:
+                    logger.error(f"获取代币价格失败: {str(price_error)}")
+                    price_data = {'price_usd': '0', 'price_change_24h': '+0.00%'}
+                
+                # 计算价值
+                try:
+                    balance = Decimal(balance_info.get('balance_formatted', '0'))
+                    price = Decimal(price_data.get('price_usd', '0'))
+                    value = balance * price
+                except (DecimalInvalidOperation, TypeError) as calc_error:
+                    logger.error(f"计算代币价值失败: {str(calc_error)}")
+                    balance = Decimal('0')
+                    price = Decimal('0')
+                    value = Decimal('0')
+                
+                return Response({
+                    'status': 'success',
+                    'message': '获取代币详情成功',
+                    'data': {
+                        **token_data,
+                        'balance': balance_info.get('balance', '0'),
+                        'balance_formatted': balance_info.get('balance_formatted', '0'),
+                        'price_usd': str(price),
+                        'value_usd': str(value),
+                        'price_change_24h': price_data.get('price_change_24h', '+0.00%')
+                    }
+                })
+                
+            except Exception as token_error:
+                logger.error(f"处理代币信息失败: {str(token_error)}")
                 return Response({
                     'status': 'error',
-                    'message': '获取代币信息失败'
+                    'message': f'获取代币信息失败: {str(token_error)}'
                 }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # 获取代币余额
-            balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
-            balance_info = await balance_service.get_token_balance(pk, token_address)
-            
-            # 获取代币价格
-            price_data = await token_info_service.get_token_price(token_address)
-            
-            # 计算价值
-            balance = Decimal(balance_info['balance_formatted'])
-            price = Decimal(price_data.get('price_usd', '0'))
-            value = balance * price
-            
-            return Response({
-                'status': 'success',
-                'message': '获取代币详情成功',
-                'data': {
-                    **token_data,
-                    'balance': balance_info['balance'],
-                    'balance_formatted': balance_info['balance_formatted'],
-                    'price_usd': str(price),
-                    'value_usd': str(value),
-                    'price_change_24h': price_data.get('price_change_24h', '+0.00%')
-                }
-            })
             
         except Exception as e:
             logger.error(f"获取代币详情失败: {str(e)}")

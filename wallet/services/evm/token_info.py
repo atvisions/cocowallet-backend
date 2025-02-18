@@ -31,8 +31,12 @@ class EVMTokenInfoService:
         self.chain_config = EVMUtils.get_chain_config(chain)
         self.web3 = EVMUtils.get_web3(chain)
         
-        # Alchemy API 配置
-        self.api_url = RPCConfig.get_alchemy_url(chain)
+        # 根据链类型设置 API URL
+        if chain in ['BNB', 'BSC']:
+            self.api_url = RPCConfig.BSC_RPC_URL
+        else:
+            self.api_url = RPCConfig.get_alchemy_url(chain)
+            
         self.headers = {
             "accept": "application/json",
             "content-type": "application/json"
@@ -77,6 +81,7 @@ class EVMTokenInfoService:
             
             # 如果元数据获取失败，尝试直接从合约获取基本信息
             try:
+                logger.info(f"尝试从合约获取代币信息: {token_address}")
                 contract = self.web3.eth.contract(
                     address=Web3.to_checksum_address(token_address),
                     abi=[{
@@ -100,10 +105,39 @@ class EVMTokenInfoService:
                     }]
                 )
                 
-                # 获取基本信息
-                name = contract.functions.name().call()
-                symbol = contract.functions.symbol().call()
-                decimals = contract.functions.decimals().call()
+                try:
+                    # 分别获取每个字段，并记录日志
+                    name = await self.web3.eth.call_async({
+                        'to': token_address,
+                        'data': contract.encodeABI('name')
+                    })
+                    name = self.web3.decode_function_result(contract.get_function_by_name('name'), name)[0]
+                    logger.info(f"获取到代币名称: {name}")
+                except Exception as e:
+                    logger.error(f"获取代币名称失败: {str(e)}")
+                    name = 'Unknown Token'
+
+                try:
+                    symbol = await self.web3.eth.call_async({
+                        'to': token_address,
+                        'data': contract.encodeABI('symbol')
+                    })
+                    symbol = self.web3.decode_function_result(contract.get_function_by_name('symbol'), symbol)[0]
+                    logger.info(f"获取到代币符号: {symbol}")
+                except Exception as e:
+                    logger.error(f"获取代币符号失败: {str(e)}")
+                    symbol = '???'
+
+                try:
+                    decimals = await self.web3.eth.call_async({
+                        'to': token_address,
+                        'data': contract.encodeABI('decimals')
+                    })
+                    decimals = self.web3.decode_function_result(contract.get_function_by_name('decimals'), decimals)[0]
+                    logger.info(f"获取到代币精度: {decimals}")
+                except Exception as e:
+                    logger.error(f"获取代币精度失败: {str(e)}")
+                    decimals = 18
                 
                 return {
                     'address': token_address,
@@ -166,8 +200,14 @@ class EVMTokenInfoService:
                 logger.error("未配置 MORALIS_API_KEY")
                 return {}
             
-            # 获取链 ID
-            chain = MoralisConfig.get_chain_id(self.chain)
+            try:
+                # 获取链 ID
+                chain = MoralisConfig.get_chain_id(self.chain)
+                logger.debug(f"获取到链 ID: {chain}, 原始链: {self.chain}")
+            except ValueError as e:
+                logger.error(f"获取链 ID 失败: {str(e)}")
+                # 如果获取链 ID 失败，尝试从合约获取信息
+                return await self._get_token_info_from_contract(token_address)
             
             # 构建 API URL
             url = MoralisConfig.EVM_TOKEN_METADATA_URL
@@ -189,21 +229,29 @@ class EVMTokenInfoService:
                     
                     if response.status != 200:
                         logger.error(f"获取代币元数据失败: {response_text}")
-                        return {}
+                        # 尝试从合约获取信息
+                        return await self._get_token_info_from_contract(token_address)
                     
                     try:
                         results = json.loads(response_text)
                     except json.JSONDecodeError:
                         logger.error(f"解析代币元数据失败: {response_text}")
-                        return {}
+                        return await self._get_token_info_from_contract(token_address)
                     
                     if not results or not isinstance(results, list) or len(results) == 0:
-                        return {}
+                        return await self._get_token_info_from_contract(token_address)
                     
                     result = results[0]  # 获取第一个结果
                     
                     # 获取代币价格
                     price_data = await self.get_token_price(token_address)
+                    
+                    # 如果缺少某些元数据，尝试从合约补充
+                    if not result.get('name') or not result.get('symbol'):
+                        contract_data = await self._get_token_info_from_contract(token_address)
+                        result['name'] = result.get('name') or contract_data.get('name')
+                        result['symbol'] = result.get('symbol') or contract_data.get('symbol')
+                        result['decimals'] = result.get('decimals') or contract_data.get('decimals')
                     
                     # 构建完整的元数据
                     token_data = {
@@ -245,7 +293,92 @@ class EVMTokenInfoService:
             
         except Exception as e:
             logger.error(f"获取代币元数据失败: {str(e)}")
-            return {}
+            return await self._get_token_info_from_contract(token_address)
+
+    async def _get_token_info_from_contract(self, token_address: str) -> Dict:
+        """直接从合约获取代币信息"""
+        try:
+            logger.info(f"从合约获取代币信息: {token_address}")
+            contract = self.web3.eth.contract(
+                address=Web3.to_checksum_address(token_address),
+                abi=[{
+                    "constant": True,
+                    "inputs": [],
+                    "name": "name",
+                    "outputs": [{"name": "", "type": "string"}],
+                    "type": "function"
+                }, {
+                    "constant": True,
+                    "inputs": [],
+                    "name": "symbol",
+                    "outputs": [{"name": "", "type": "string"}],
+                    "type": "function"
+                }, {
+                    "constant": True,
+                    "inputs": [],
+                    "name": "decimals",
+                    "outputs": [{"name": "", "type": "uint8"}],
+                    "type": "function"
+                }, {
+                    "constant": True,
+                    "inputs": [],
+                    "name": "totalSupply",
+                    "outputs": [{"name": "", "type": "uint256"}],
+                    "type": "function"
+                }]
+            )
+            
+            # 获取基本信息
+            name = await self._safe_call_contract(contract, 'name', 'Unknown Token')
+            symbol = await self._safe_call_contract(contract, 'symbol', '???')
+            decimals = await self._safe_call_contract(contract, 'decimals', 18)
+            total_supply = await self._safe_call_contract(contract, 'totalSupply', '0')
+            
+            # 获取价格信息
+            price_data = await self.get_token_price(token_address)
+            
+            return {
+                'name': name,
+                'symbol': symbol,
+                'decimals': decimals,
+                'total_supply': str(total_supply),
+                'total_supply_formatted': str(Decimal(total_supply) / Decimal(10 ** decimals)),
+                'logo': '',
+                'website': '',
+                'description': '',
+                'social_links': {},
+                'verified': False,
+                'price_usd': price_data.get('price_usd', '0'),
+                'price_change_24h': price_data.get('price_change_24h', '+0.00%')
+            }
+            
+        except Exception as e:
+            logger.error(f"从合约获取代币信息失败: {str(e)}")
+            return {
+                'name': 'Unknown Token',
+                'symbol': '???',
+                'decimals': 18,
+                'total_supply': '0',
+                'total_supply_formatted': '0',
+                'logo': '',
+                'website': '',
+                'description': '',
+                'social_links': {},
+                'verified': False,
+                'price_usd': '0',
+                'price_change_24h': '+0.00%'
+            }
+
+    async def _safe_call_contract(self, contract, method_name: str, default_value: Any) -> Any:
+        """安全调用合约方法"""
+        try:
+            method = getattr(contract.functions, method_name)
+            result = await method().call()
+            logger.info(f"获取到{method_name}: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"获取{method_name}失败: {str(e)}")
+            return default_value
 
     def validate_token_address(self, token_address: str) -> bool:
         """验证代币合约地址"""

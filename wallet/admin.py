@@ -19,6 +19,9 @@ from .management.commands.sync_token_metadata import Command as SyncTokenMetadat
 from django.utils.safestring import mark_safe
 from django.db import connection
 import logging
+from django import forms
+from .services.factory import ChainServiceFactory
+from django.core.exceptions import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -40,16 +43,118 @@ class DecimalsFilter(admin.SimpleListFilter):
             return queryset.filter(decimals=0)
         return queryset
 
+class ChainFilter(admin.SimpleListFilter):
+    """链筛选器"""
+    title = '链'
+    parameter_name = 'chain'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('ETH', 'Ethereum'),
+            ('BNB', 'BNB Chain'),  # 修改为 BNB 以匹配 MoralisConfig
+            ('MATIC', 'Polygon'),
+            ('AVAX', 'Avalanche'),
+            ('BASE', 'Base'),
+            ('ARBITRUM', 'Arbitrum'),
+            ('OPTIMISM', 'Optimism'),
+            ('SOL', 'Solana')
+        )
+
+    def queryset(self, request, queryset):
+        if self.value():
+            return queryset.filter(chain=self.value())
+        return queryset
+
+class TokenAdminForm(forms.ModelForm):
+    """代币管理表单"""
+    class Meta:
+        model = Token
+        fields = '__all__'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 将 chain 字段改为选择框
+        self.fields['chain'] = forms.ChoiceField(
+            choices=[
+                ('ETH', 'Ethereum'),
+                ('BNB', 'BNB Chain'),  # 修改为 BNB 以匹配 MoralisConfig
+                ('MATIC', 'Polygon'),
+                ('AVAX', 'Avalanche'),
+                ('BASE', 'Base'),
+                ('ARBITRUM', 'Arbitrum'),
+                ('OPTIMISM', 'Optimism'),
+                ('SOL', 'Solana')
+            ],
+            label='链'
+        )
+
 @admin.register(Token)
 class TokenAdmin(admin.ModelAdmin):
     """代币管理"""
+    form = TokenAdminForm
     list_display = ('logo_img', 'name', 'symbol', 'chain', 'address', 'decimals', 'is_native', 'is_visible', 'is_recommended')
-    list_filter = (DecimalsFilter, 'chain', 'is_native', 'is_visible', 'is_recommended')
+    list_filter = (ChainFilter, DecimalsFilter, 'is_native', 'is_visible', 'is_recommended')
     search_fields = ('name', 'symbol', 'address')
     readonly_fields = ('created_at', 'updated_at')
     list_editable = ['is_recommended']
     actions = ['sync_token_metadata']
     change_list_template = 'admin/wallet/token/change_list.html'
+    change_form_template = 'admin/wallet/token/change_form.html'
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path('sync-metadata/', self.admin_site.admin_view(self.sync_metadata_view), name='token_sync_metadata'),
+            path('sync-metadata/status/', self.admin_site.admin_view(self.sync_metadata_status), name='token_sync_metadata_status'),
+            path('fetch-token-metadata/', self.admin_site.admin_view(self.fetch_token_metadata), name='fetch_token_metadata'),
+        ]
+        return custom_urls + urls
+
+    def fetch_token_metadata(self, request):
+        """获取代币元数据"""
+        try:
+            chain = request.GET.get('chain')
+            address = request.GET.get('address')
+            
+            if not chain or not address:
+                return JsonResponse({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=400)
+
+            # 根据链类型获取对应的代币信息服务
+            token_info_service = ChainServiceFactory.get_token_info_service(chain)
+            if not token_info_service:
+                return JsonResponse({
+                    'status': 'error',
+                    'message': f'不支持的链类型: {chain}'
+                }, status=400)
+
+            # 创建新的事件循环
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # 获取代币元数据
+            token_data = loop.run_until_complete(token_info_service.get_token_metadata(address))
+            loop.close()
+
+            if not token_data:
+                return JsonResponse({
+                    'status': 'error',
+                    'message': '获取代币元数据失败'
+                }, status=400)
+
+            return JsonResponse({
+                'status': 'success',
+                'data': token_data
+            })
+
+        except Exception as e:
+            logger.error(f"获取代币元数据失败: {str(e)}")
+            return JsonResponse({
+                'status': 'error',
+                'message': str(e)
+            }, status=500)
 
     def get_queryset(self, request):
         """默认只显示非零小数位数的代币，并排除 NFT"""
@@ -76,14 +181,6 @@ class TokenAdmin(admin.ModelAdmin):
             return format_html('<img src="{}" style="width: 32px; height: 32px; border-radius: 50%;" />', obj.logo)
         return '-'
     logo_img.short_description = '图标'
-
-    def get_urls(self):
-        urls = super().get_urls()
-        custom_urls = [
-            path('sync-metadata/', self.admin_site.admin_view(self.sync_metadata_view), name='token_sync_metadata'),
-            path('sync-metadata/status/', self.admin_site.admin_view(self.sync_metadata_status), name='token_sync_metadata_status'),
-        ]
-        return custom_urls + urls
 
     def sync_metadata_view(self, request):
         if request.method == 'POST':

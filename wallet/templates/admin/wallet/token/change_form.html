@@ -1,0 +1,128 @@
+{% extends "admin/change_form.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block extrahead %}
+{{ block.super }}
+<style>
+    .fetch-metadata-button {
+        background: #79aec8;
+        padding: 8px 15px;
+        border-radius: 4px;
+        color: white;
+        border: none;
+        cursor: pointer;
+        margin-left: 10px;
+        transition: all 0.3s ease;
+    }
+    .fetch-metadata-button:hover {
+        background: #417690;
+    }
+    .fetch-metadata-button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+    }
+    .fetch-metadata-button.success {
+        background: #28a745;
+    }
+    .fetch-metadata-button.error {
+        background: #dc3545;
+    }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // 获取表单字段
+    const chainField = document.getElementById('id_chain');
+    const addressField = document.getElementById('id_address');
+    const nameField = document.getElementById('id_name');
+    const symbolField = document.getElementById('id_symbol');
+    const decimalsField = document.getElementById('id_decimals');
+    const logoField = document.getElementById('id_logo');
+    const descriptionField = document.getElementById('id_description');
+    const websiteField = document.getElementById('id_website');
+    const twitterField = document.getElementById('id_twitter');
+    const telegramField = document.getElementById('id_telegram');
+    const discordField = document.getElementById('id_discord');
+    const githubField = document.getElementById('id_github');
+    const mediumField = document.getElementById('id_medium');
+    const totalSupplyField = document.getElementById('id_total_supply');
+    const totalSupplyFormattedField = document.getElementById('id_total_supply_formatted');
+    const verifiedField = document.getElementById('id_verified');
+
+    // 创建获取元数据按钮
+    const fetchButton = document.createElement('button');
+    fetchButton.type = 'button';
+    fetchButton.className = 'fetch-metadata-button';
+    fetchButton.textContent = '获取代币元数据';
+    fetchButton.onclick = fetchMetadata;
+    
+    // 将按钮添加到地址字段后面
+    addressField.parentNode.appendChild(fetchButton);
+
+    let resetButtonTimeout;
+
+    async function fetchMetadata() {
+        try {
+            if (!chainField.value || !addressField.value) {
+                fetchButton.className = 'fetch-metadata-button error';
+                fetchButton.textContent = '请先选择链并输入合约地址';
+                clearTimeout(resetButtonTimeout);
+                resetButtonTimeout = setTimeout(() => {
+                    fetchButton.className = 'fetch-metadata-button';
+                    fetchButton.textContent = '获取代币元数据';
+                }, 3000);
+                return;
+            }
+
+            fetchButton.disabled = true;
+            fetchButton.textContent = '获取中...';
+
+            const response = await fetch(`/admin/wallet/token/fetch-token-metadata/?chain=${chainField.value}&address=${addressField.value}`);
+            const result = await response.json();
+
+            if (result.status === 'success') {
+                const data = result.data;
+                
+                // 填充表单数据
+                nameField.value = data.name || '';
+                symbolField.value = data.symbol || '';
+                decimalsField.value = data.decimals || 18;
+                logoField.value = data.logo || '';
+                descriptionField.value = data.description || '';
+                websiteField.value = data.website || '';
+                twitterField.value = data.twitter || '';
+                telegramField.value = data.telegram || '';
+                discordField.value = data.discord || '';
+                githubField.value = data.github || '';
+                mediumField.value = data.medium || '';
+                totalSupplyField.value = data.total_supply || '';
+                totalSupplyFormattedField.value = data.total_supply_formatted || '';
+                verifiedField.checked = data.verified || false;
+
+                // 更新按钮状态为成功
+                fetchButton.className = 'fetch-metadata-button success';
+                fetchButton.textContent = '获取成功';
+            } else {
+                // 更新按钮状态为错误
+                fetchButton.className = 'fetch-metadata-button error';
+                fetchButton.textContent = '获取失败：' + result.message;
+            }
+        } catch (error) {
+            console.error('获取元数据失败:', error);
+            fetchButton.className = 'fetch-metadata-button error';
+            fetchButton.textContent = '获取失败，请稍后重试';
+        } finally {
+            clearTimeout(resetButtonTimeout);
+            resetButtonTimeout = setTimeout(() => {
+                fetchButton.disabled = false;
+                fetchButton.className = 'fetch-metadata-button';
+                fetchButton.textContent = '获取代币元数据';
+            }, 3000);
+        }
+    }
+});
+</script>
+{% endblock %}
+
+{% block content %}
+{{ block.super }}
+{% endblock %} 

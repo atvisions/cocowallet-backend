@@ -127,7 +127,9 @@ class RPCConfig:
         'AVAX': 'avalanche-mainnet',
         'BASE': 'base-mainnet',
         'ARBITRUM': 'arb-mainnet',
-        'OPTIMISM': 'opt-mainnet'
+        'OPTIMISM': 'opt-mainnet',
+        'BNB': 'bsc',  # 添加 BNB 映射
+        'BSC': 'bsc'
     }
     
     @classmethod
@@ -140,6 +142,10 @@ class RPCConfig:
         Returns:
             str: Alchemy API URL
         """
+        # 对于 BNB/BSC 链，直接返回 BSC RPC URL
+        if chain in ['BNB', 'BSC']:
+            return cls.BSC_RPC_URL
+            
         network = cls.ALCHEMY_NETWORKS.get(chain)
         if not network:
             raise ValueError(f"不支持的链: {chain}")
@@ -171,6 +177,7 @@ class RPCConfig:
         return {
             'ETH': cls.ETH_RPC_URL,
             'BSC': cls.BSC_RPC_URL,
+            'BNB': cls.BSC_RPC_URL,  # 添加 BNB 作为 BSC 的别名
             'MATIC': cls.POLYGON_RPC_URL,
             'AVAX': cls.AVAX_RPC_URL,
             'ARBITRUM': cls.ARBITRUM_RPC_URL,
@@ -193,11 +200,12 @@ class MoralisConfig:
     CHAIN_MAPPING = {
         'ETH': 'eth',
         'BSC': 'bsc',
+        'BNB': 'bsc',  # 添加 BNB 作为 BSC 的别名
         'MATIC': 'polygon',
         'AVAX': 'avalanche',
         'ARBITRUM': 'arbitrum',
         'OPTIMISM': 'optimism',
-        'BASE': 'base'  # 修改为 base，使用主网
+        'BASE': 'base'
     }
     
     @classmethod

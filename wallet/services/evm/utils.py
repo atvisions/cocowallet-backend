@@ -44,6 +44,18 @@ class EVMUtils:
                 'address': NATIVE_TOKEN_ADDRESS
             }
         },
+        'BNB': {
+            'chain_id': 56,
+            'name': 'BNB Smart Chain',
+            'symbol': 'BNB',
+            'decimals': 18,
+            'explorer': 'https://bscscan.com',
+            'rpc_url': RPCConfig.BSC_RPC_URL,
+            'native_token': {
+                **RPCConfig.NATIVE_TOKENS['BSC'],
+                'address': NATIVE_TOKEN_ADDRESS
+            }
+        },
         'MATIC': {
             'chain_id': 137,
             'name': 'Polygon',

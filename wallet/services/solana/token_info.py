@@ -115,7 +115,7 @@ class SolanaTokenInfoService:
                 'possible_spam': False,
                 'is_native': token_address == 'So11111111111111111111111111111111111111112',
                 'price_usd': '0',
-                'price_change_24h': '0',
+                'price_change_24h': '+0.00%',
                 'from_cache': True
             }
             
@@ -146,8 +146,8 @@ class SolanaTokenInfoService:
                     'verified': token.verified,
                     'possible_spam': token.possible_spam,
                     'is_native': token.is_native,
-                    'price_usd': token.last_price or '0',
-                    'price_change_24h': token.last_price_change or '0'
+                    'price_usd': str(token.last_price or '0'),
+                    'price_change_24h': str(token.last_price_change or '+0.00%')
                 })
             
             # 使用 Moralis API 获取最新数据
@@ -195,10 +195,35 @@ class SolanaTokenInfoService:
                             logger.debug(f"Moralis API返回价格数据: {price_data}")
                             
                             if price_data:
-                                token_data.update({
-                                    'price_usd': str(price_data.get('usdPrice', token_data['price_usd'])),
-                                    'price_change_24h': str(price_data.get('24hrPercentChange', token_data['price_change_24h']))
-                                })
+                                try:
+                                    # 处理价格
+                                    price = float(price_data.get('usdPrice', 0))
+                                    if price < 0.000001:
+                                        price_str = '{:.12f}'.format(price)
+                                    elif price < 0.00001:
+                                        price_str = '{:.10f}'.format(price)
+                                    elif price < 0.0001:
+                                        price_str = '{:.8f}'.format(price)
+                                    elif price < 0.01:
+                                        price_str = '{:.6f}'.format(price)
+                                    else:
+                                        price_str = '{:.4f}'.format(price)
+                                    price_str = price_str.rstrip('0').rstrip('.')
+                                    
+                                    # 处理价格变化
+                                    price_change = float(price_data.get('24hrPercentChange', 0))
+                                    price_change_str = '{:+.2f}%'.format(price_change)
+                                    
+                                    token_data.update({
+                                        'price_usd': price_str,
+                                        'price_change_24h': price_change_str
+                                    })
+                                except (ValueError, TypeError) as e:
+                                    logger.error(f"处理价格数据失败: {str(e)}")
+                                    token_data.update({
+                                        'price_usd': '0',
+                                        'price_change_24h': '+0.00%'
+                                    })
                     
                     # 更新数据库
                     if token:
@@ -277,7 +302,28 @@ class SolanaTokenInfoService:
             
         except Exception as e:
             logger.error(f"获取代币元数据失败: {str(e)}")
-            return token_data
+            return {
+                'name': 'Unknown Token',
+                'symbol': 'Unknown',
+                'decimals': 0,
+                'logo': '',
+                'description': '',
+                'website': '',
+                'twitter': '',
+                'telegram': '',
+                'discord': '',
+                'github': '',
+                'medium': '',
+                'total_supply': '0',
+                'total_supply_formatted': '0',
+                'security_score': 0,
+                'verified': False,
+                'possible_spam': False,
+                'is_native': token_address == 'So11111111111111111111111111111111111111112',
+                'price_usd': '0',
+                'price_change_24h': '+0.00%',
+                'from_cache': True
+            }
 
     async def get_token_supply(self, token_address: str) -> Dict:
         """获取代币供应量信息"""

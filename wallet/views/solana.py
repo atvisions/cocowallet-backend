@@ -336,7 +336,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(int(pk), device_id) # type: ignore
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
             logger.debug(f"请求获取代币详情，钱包地址: {wallet.address}, 代币地址: {token_address}")
             
             if wallet.chain != 'SOL':
@@ -344,20 +344,6 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                     'status': 'error',
                     'message': '该接口仅支持SOL链钱包'
                 }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # 获取SOL余额服务
-            balance_service = ChainServiceFactory.get_balance_service('SOL')
-            if not balance_service:
-                return Response({
-                    'status': 'error',
-                    'message': 'SOL余额服务不可用'
-                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-            
-            # 获取代币余额
-            # 确保token_address不为None
-            if not token_address:
-                raise ValueError("token_address不能为空")
-            balance = await balance_service.get_token_balance(wallet.address, str(token_address))
             
             # 获取代币信息服务
             token_info_service = ChainServiceFactory.get_token_info_service('SOL')
@@ -367,126 +353,73 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                     'message': 'SOL代币信息服务不可用'
                 }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
-            # 获取代币元数据
-            token_data = await token_info_service.get_token_metadata(token_address)
-            if not token_data:
+            try:
+                # 获取代币元数据
+                token_data = await token_info_service.get_token_metadata(token_address)
+                if not token_data:
+                    logger.warning(f"从 Moralis 获取代币元数据失败，尝试从合约直接获取: {token_address}")
+                    token_data = await token_info_service.get_token_info(token_address)
+                
+                if not token_data or not token_data.get('name'):
+                    return Response({
+                        'status': 'error',
+                        'message': '获取代币信息失败，该代币可能不存在'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # 获取代币余额
+                try:
+                    balance_service = ChainServiceFactory.get_balance_service('SOL')
+                    if not balance_service:
+                        raise ValueError('SOL余额服务不可用')
+                        
+                    balance_info = await balance_service.get_token_balance(wallet.address, token_address)
+                    logger.info(f"获取到代币余额: {balance_info}")
+                    
+                    # 确保余额数据格式正确
+                    if isinstance(balance_info, (int, float, str, Decimal)):
+                        balance = str(balance_info)
+                        balance_formatted = str(balance_info)
+                    elif isinstance(balance_info, dict):
+                        balance = str(balance_info.get('balance', '0'))
+                        balance_formatted = str(balance_info.get('balance_formatted', '0'))
+                    else:
+                        balance = '0'
+                        balance_formatted = '0'
+                        
+                except Exception as balance_error:
+                    logger.error(f"获取代币余额失败: {str(balance_error)}")
+                    balance = '0'
+                    balance_formatted = '0'
+                
+                # 计算价值
+                try:
+                    balance_decimal = Decimal(balance_formatted)
+                    price_decimal = Decimal(token_data.get('price_usd', '0'))
+                    value = balance_decimal * price_decimal
+                    value_str = str(value)
+                except Exception as calc_error:
+                    logger.error(f"计算代币价值失败: {str(calc_error)}")
+                    value_str = '0'
+                
+                return Response({
+                    'status': 'success',
+                    'message': '获取代币详情成功',
+                    'data': {
+                        **token_data,
+                        'balance': balance,
+                        'balance_formatted': balance_formatted,
+                        'value_usd': value_str
+                    }
+                })
+                
+            except Exception as token_error:
+                logger.error(f"处理代币信息失败: {str(token_error)}")
                 return Response({
                     'status': 'error',
-                    'message': '无法获取代币信息'
-                }, status=status.HTTP_404_NOT_FOUND)
-            
-            # 格式化余额
-            formatted_balance = str(balance)
-            if balance > 0:
-                if balance < 0.000001:
-                    formatted_balance = '{:.8f}'.format(balance)
-                elif balance < 0.01:
-                    formatted_balance = '{:.6f}'.format(balance)
-                else:
-                    formatted_balance = '{:.4f}'.format(balance)
-                formatted_balance = formatted_balance.rstrip('0').rstrip('.')
-            
-            # 格式化价格和价值
-            try:
-                price_usd = Decimal(token_data.get('price_usd', '0'))
-                price_change = Decimal(token_data.get('price_change_24h', '0'))
-                logger.debug(f"原始价格数据 - price_usd: {price_usd}, price_change: {price_change}")
-            except (TypeError, ValueError) as e:
-                logger.error(f"价格数据转换出错: {str(e)}")
-                price_usd = Decimal('0')
-                price_change = Decimal('0')
-            
-            try:
-                value_usd = balance * price_usd
-                logger.debug(f"计算的价值 - value_usd: {value_usd}")
-            except Exception as e:
-                logger.error(f"计算价值时出错: {str(e)}")
-                value_usd = Decimal('0')
-            
-            # 格式化价格
-            try:
-                if price_usd == 0:
-                    formatted_price = '$0'
-                else:
-                    if price_usd < Decimal('0.00001'):
-                        formatted_price = '${:.8f}'.format(price_usd)
-                    elif price_usd < Decimal('0.01'):
-                        formatted_price = '${:.6f}'.format(price_usd)
-                    else:
-                        formatted_price = '${:.3f}'.format(price_usd)
-                    formatted_price = formatted_price.rstrip('0').rstrip('.')
-                    if formatted_price == '$':
-                        formatted_price = '$0'
-                logger.debug(f"格式化后的价格: {formatted_price}")
-            except Exception as e:
-                logger.error(f"格式化价格时出错: {str(e)}")
-                formatted_price = '$0'
-            
-            # 格式化价格变化
-            try:
-                formatted_price_change = '{:+.2f}%'.format(price_change)
-                logger.debug(f"格式化后的价格变化: {formatted_price_change}")
-            except Exception as e:
-                logger.error(f"格式化价格变化时出错: {str(e)}")
-                formatted_price_change = '+0.00%'
-            
-            # 格式化价值
-            try:
-                if value_usd == 0:
-                    formatted_value = '$0'
-                else:
-                    if value_usd < Decimal('0.00001'):
-                        formatted_value = '${:.8f}'.format(value_usd)
-                    elif value_usd < Decimal('0.01'):
-                        formatted_value = '${:.6f}'.format(value_usd)
-                    else:
-                        formatted_value = '${:.2f}'.format(value_usd)
-                    formatted_value = formatted_value.rstrip('0').rstrip('.')
-                    if formatted_value == '$':
-                        formatted_value = '$0'
-                logger.debug(f"格式化后的价值: {formatted_value}")
-            except Exception as e:
-                logger.error(f"格式化价值时出错: {str(e)}")
-                formatted_value = '$0'
-            
-            # 获取代币的可见性状态
-            token = await sync_to_async(Token.objects.filter(chain='SOL', address=token_address).first)()
-            is_visible = token.is_visible if token else True
-            
-            return Response({
-                'status': 'success',
-                'data': {
-                    'token_address': token_address,
-                    'name': token_data['name'],
-                    'symbol': token_data['symbol'],
-                    'decimals': token_data['decimals'],
-                    'logo': token_data['logo'],
-                    'type': 'token',
-                    'contract_type': 'SPL',
-                    'description': token_data['description'],
-                    'website': token_data['website'],
-                    'twitter': token_data['twitter'],
-                    'telegram': token_data['telegram'],
-                    'discord': token_data['discord'],
-                    'github': token_data['github'],
-                    'medium': token_data['medium'],
-                    'coingecko_id': token_data['coingecko_id'],
-                    'total_supply': token_data['total_supply'],
-                    'total_supply_formatted': token_data['total_supply_formatted'],
-                    'security_score': token_data['security_score'],
-                    'verified': token_data['verified'],
-                    'possible_spam': token_data['possible_spam'],
-                    'is_native': token_data['is_native'],
-                    'is_visible': is_visible,
-                    'balance': formatted_balance,
-                    'price_usd': formatted_price,
-                    'price_change_24h': formatted_price_change,
-                    'value_usd': formatted_value
-                }
-            })
+                    'message': f'获取代币信息失败: {str(token_error)}'
+                }, status=status.HTTP_400_BAD_REQUEST)
             
         except ObjectDoesNotExist as e:
-            logger.error(f"找不到钱包或代币: {str(e)}")
             return Response({
                 'status': 'error',
                 'message': str(e)
@@ -495,7 +428,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             logger.error(f"获取代币详情失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': f'获取代币详情失败: {str(e)}'
+                'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'], url_path=r'tokens/(?P<token_address>[^/.]+)/ohlcv')
