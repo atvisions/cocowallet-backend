@@ -20,10 +20,11 @@ from django.core.cache import cache
 import os
 import json
 
-from ..models import Wallet, Token, Transaction
+from ..models import Wallet, Token, Transaction, PaymentPassword
 from ..serializers import WalletSerializer
 from ..services.factory import ChainServiceFactory
 from ..api_config import RPCConfig, MoralisConfig, HeliusConfig
+from ..decorators import verify_payment_password
 
 # Helius API 配置
 HELIUS_API_KEY = os.getenv('HELIUS_API_KEY', '')
@@ -120,7 +121,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 获取所有代币余额
             logger.debug(f"开始获取代币余额，钱包地址: {wallet.address}")
-            result = await balance_service.get_all_token_balances(wallet.address, include_hidden=False)
+            result = await balance_service.get_all_token_balances(wallet.address, include_hidden=False) # type: ignore
             
             # 返回结果
             return Response({
@@ -128,7 +129,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 'data': result
             })
             
-        except WalletNotFoundError:
+        except WalletNotFoundError: # type: ignore
             return Response({
                 'status': 'error',
                 'message': '钱包不存在'
@@ -226,11 +227,11 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
             # 获取指定代币余额
-            balance = await balance_service.get_token_balance(wallet.address, token_address)
+            balance = await balance_service.get_token_balance(wallet.address, token_address) # type: ignore
             
             # 获取代币信息服务
             token_info_service = ChainServiceFactory.get_token_info_service('SOL')
-            token_info = await token_info_service.get_token_info(token_address) if token_info_service else {}
+            token_info = await token_info_service.get_token_info(token_address) if token_info_service else {} # type: ignore
             
             return Response({
                 'status': 'success',
@@ -278,7 +279,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=400)
                 
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(pk, device_id)
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
             
             if wallet.chain != 'SOL':
                 return Response({
@@ -355,10 +356,10 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             try:
                 # 获取代币元数据
-                token_data = await token_info_service.get_token_metadata(token_address)
+                token_data = await token_info_service.get_token_metadata(token_address) # type: ignore
                 if not token_data:
                     logger.warning(f"从 Moralis 获取代币元数据失败，尝试从合约直接获取: {token_address}")
-                    token_data = await token_info_service.get_token_info(token_address)
+                    token_data = await token_info_service.get_token_info(token_address) # type: ignore
                 
                 if not token_data or not token_data.get('name'):
                     return Response({
@@ -372,7 +373,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                     if not balance_service:
                         raise ValueError('SOL余额服务不可用')
                         
-                    balance_info = await balance_service.get_token_balance(wallet.address, token_address)
+                    balance_info = await balance_service.get_token_balance(wallet.address, token_address) # type: ignore
                     logger.info(f"获取到代币余额: {balance_info}")
                     
                     # 确保余额数据格式正确
@@ -525,6 +526,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     @async_to_sync_api
+    @verify_payment_password()
     async def transfer(self, request, pk=None):
         """转账接口"""
         try:
@@ -534,7 +536,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             token_address = request.data.get('token_address')
             payment_password = request.data.get('payment_password')
             
-            if not all([device_id, to_address, amount, payment_password]):
+            if not all([device_id, to_address, amount]):
                 return Response({
                     'status': 'error',
                     'message': '缺少必要参数'
@@ -560,7 +562,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 logger.error(f"解密私钥失败: {str(e)}")
                 return Response({
                     'status': 'error',
-                    'message': '支付密码错误或无法解密私钥'
+                    'message': f'解密私钥失败: {str(e)}'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取转账服务
@@ -580,12 +582,12 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                             from_address=wallet.address,
                             to_address=to_address,
                             token_address=token_address,
-                            amount=Decimal(amount),
+                            amount=Decimal(amount), # type: ignore
                             private_key=private_key
                         )
                     else:
                         # SOL原生代币转账
-                        result = await transfer_service.transfer_native(
+                        result = await transfer_service.transfer_native( # type: ignore
                             from_address=wallet.address,
                             to_address=to_address,
                             amount=Decimal(amount),
@@ -665,7 +667,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             try:
                 if token_address:
                     # SPL代币转账费用
-                    fee = await transfer_service.estimate_token_transfer_fee(
+                    fee = await transfer_service.estimate_token_transfer_fee( # type: ignore
                         from_address=wallet.address,
                         to_address=to_address,
                         token_address=token_address,
@@ -673,7 +675,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                     )
                 else:
                     # SOL原生代币转账费用
-                    fee = await transfer_service.estimate_native_transfer_fee(
+                    fee = await transfer_service.estimate_native_transfer_fee( # type: ignore
                         from_address=wallet.address,
                         to_address=to_address,
                         amount=amount
@@ -767,7 +769,8 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'], url_path='swap/execute')
     @async_to_sync_api
-    async def execute_swap(self, request, pk=None):
+    @verify_payment_password()
+    async def swap_execute(self, request, pk=None):
         """执行代币兑换"""
         try:
             device_id = request.data.get('device_id')
@@ -778,7 +781,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             payment_password = request.data.get('payment_password')
             slippage = request.data.get('slippage')
             
-            if not all([device_id, quote_id, from_token, to_token, amount, payment_password]):
+            if not all([device_id, quote_id, from_token, to_token, amount]):
                 return Response({
                     'status': 'error',
                     'message': '缺少必要参数'
@@ -815,7 +818,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 执行兑换
             result = await swap_service.execute_swap( # type: ignore
-                quote_id=quote_id,
+                quote_id=quote_id, # type: ignore
                 from_token=from_token,
                 to_token=to_token,
                 amount=Decimal(str(amount)),
@@ -1128,7 +1131,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=400)
                 
             # 获取钱包
-            wallet = await self.get_wallet_async(pk, device_id)
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
             
             # 验证是否是 Solana 链
             if wallet.chain != 'SOL':
@@ -1141,7 +1144,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
             
             # 获取所有代币余额，包括隐藏的
-            balances = await balance_service.get_all_token_balances(wallet.address, include_hidden=True)
+            balances = await balance_service.get_all_token_balances(wallet.address, include_hidden=True) # type: ignore
             
             return Response({
                 'status': 'success',

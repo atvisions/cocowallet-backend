@@ -199,7 +199,7 @@ class EVMHistoryService:
                                 # 从合约获取基本信息
                                 token_contract = self.web3.eth.contract(
                                     address=Web3.to_checksum_address(token_address),
-                                    abi=ERC20_ABI
+                                    abi=ERC20_ABI # type: ignore
                                 )
                                 name = await token_contract.functions.name().call()
                                 symbol = await token_contract.functions.symbol().call()
@@ -279,17 +279,17 @@ class EVMHistoryService:
         """获取交易详情"""
         try:
             # 获取交易信息
-            tx = await self.web3.eth.get_transaction(tx_hash)
+            tx = await self.web3.eth.get_transaction(tx_hash) # type: ignore
             if not tx:
                 return {}
                 
             # 获取交易收据
-            receipt = await self.web3.eth.get_transaction_receipt(tx_hash)
+            receipt = await self.web3.eth.get_transaction_receipt(tx_hash) # type: ignore
             if not receipt:
                 return {}
                 
             # 获取区块信息
-            block = await self.web3.eth.get_block(tx['blockNumber'])
+            block = await self.web3.eth.get_block(tx['blockNumber']) # type: ignore
             if not block:
                 return {}
                 

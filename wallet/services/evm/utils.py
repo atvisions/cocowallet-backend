@@ -246,7 +246,7 @@ class EVMUtils:
                 
         gas_estimate = web3.eth.estimate_gas({
             'to': to_address,
-            'value': value,
+            'value': value, # type: ignore
             'data': data
         })
         # 添加 10% 的缓冲
@@ -260,7 +260,7 @@ class EVMUtils:
         try:
             # 尝试获取 EIP-1559 费用
             fee_data = web3.eth.fee_history(1, 'latest', [10, 50, 90])
-            base_fee = web3.eth.get_block('latest')['baseFeePerGas']
+            base_fee = web3.eth.get_block('latest')['baseFeePerGas'] # type: ignore
             
             rewards = fee_data['reward'][-1]
             max_priority_fee = rewards[1]  # 使用中位数优先费用

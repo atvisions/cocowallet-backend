@@ -646,11 +646,11 @@ class EVMNFTService:
                 'nonce': nonce,
                 'maxFeePerGas': gas_price.get('max_fee', gas_price.get('gas_price')),
                 'maxPriorityFeePerGas': gas_price.get('max_priority_fee', 0)
-            })
+            }) # type: ignore
             
             # 估算 gas
             gas_limit = self.web3.eth.estimate_gas(tx_data)
-            tx_data['gas'] = int(gas_limit * 1.1)  # 添加 10% 缓冲
+            tx_data['gas'] = int(gas_limit * 1.1)  # type: ignore # 添加 10% 缓冲
             
             # 签名交易
             signed_tx = self.web3.eth.account.sign_transaction(tx_data, private_key)
@@ -734,7 +734,7 @@ class EVMNFTService:
                 chain=self.chain,
                 address=from_address.lower(),
                 is_active=True
-            ).first()
+            ).first() # type: ignore
 
             if not sender_wallet:
                 logger.error(f"找不到发送方钱包: {from_address}")

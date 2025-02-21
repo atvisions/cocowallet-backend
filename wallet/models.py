@@ -9,19 +9,35 @@ import base58
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
 from solana.keypair import Keypair
+from eth_account import Account
 
 logger = logging.getLogger(__name__)
 
 def decrypt_string(encrypted_text: str, key: str) -> str:
-    """简单的字符串解密函数"""
+    """使用Fernet进行字符串解密"""
     try:
-        key_hash = hashlib.sha256(key.encode()).digest()
-        encrypted_bytes = base64.b64decode(encrypted_text)
-        decrypted = bytes(a ^ b for a, b in zip(encrypted_bytes, key_hash * (len(encrypted_bytes) // len(key_hash) + 1)))
+        # 使用key生成Fernet密钥
+        key_bytes = hashlib.sha256(key.encode()).digest()
+        f = Fernet(base64.urlsafe_b64encode(key_bytes))
+        # 解密
+        decrypted = f.decrypt(encrypted_text.encode())
         return decrypted.decode()
     except Exception as e:
         logger.error(f"解密字符串失败: {str(e)}")
         raise ValueError("解密失败")
+
+def encrypt_string(text: str, key: str) -> str:
+    """使用Fernet进行字符串加密"""
+    try:
+        # 使用key生成Fernet密钥
+        key_bytes = hashlib.sha256(key.encode()).digest()
+        f = Fernet(base64.urlsafe_b64encode(key_bytes))
+        # 加密
+        encrypted = f.encrypt(text.encode())
+        return encrypted.decode()
+    except Exception as e:
+        logger.error(f"加密字符串失败: {str(e)}")
+        raise ValueError("加密失败")
 
 class Chain(models.TextChoices):
     """支持的链类型"""
@@ -117,23 +133,24 @@ class Wallet(models.Model):
             if not self.payment_password:
                 raise ValueError("未提供支付密码")
             
-            # 解密私钥
-            logger.debug(f"开始解密私钥，加密数据长度: {len(self.encrypted_private_key)}")
-            key_hash = hashlib.sha256(self.payment_password.encode()).digest()
-            logger.debug(f"密钥哈希长度: {len(key_hash)}")
+            # 使用 Fernet 解密私钥
+            from wallet.views.wallet import WalletViewSet
+            wallet_viewset = WalletViewSet()
+            decrypted = wallet_viewset.decrypt_data(self.encrypted_private_key, self.payment_password)
             
-            try:
-                encrypted_data = base64.b64decode(self.encrypted_private_key)
-                logger.debug(f"Base64解码后数据长度: {len(encrypted_data)}")
-            except Exception as e:
-                logger.error(f"Base64解码失败: {str(e)}")
-                raise ValueError("私钥格式错误：Base64解码失败")
+            # 确保解密后的数据是字符串类型
+            if isinstance(decrypted, bytes):
+                try:
+                    decrypted = decrypted.decode('utf-8')
+                except UnicodeDecodeError as e:
+                    logger.error(f"UTF-8解码失败: {str(e)}")
+                    raise ValueError("私钥解码失败")
+            elif not isinstance(decrypted, str):
+                logger.error(f"解密后的私钥类型无效: {type(decrypted)}")
+                raise ValueError("私钥类型无效")
             
-            decrypted = bytes(a ^ b for a, b in zip(encrypted_data, key_hash * (len(encrypted_data) // len(key_hash) + 1)))
-            logger.debug(f"解密后数据长度: {len(decrypted)}")
-            
+            # 根据链类型处理私钥格式
             if self.chain == 'SOL':
-                # Solana 链的处理逻辑保持不变
                 try:
                     # 将Base58格式的数据解码回字节
                     decrypted_bytes = base58.b58decode(decrypted)
@@ -156,59 +173,55 @@ class Wallet(models.Model):
                     generated_address = str(keypair.public_key)
                     logger.debug(f"生成的地址: {generated_address}")
                     
-                    if not self._verify_address_match(generated_address):
+                    if generated_address != self.address:
                         raise ValueError(f"私钥不匹配: 期望={self.address}, 实际={generated_address}")
                     
                     # 返回64字节密钥对的Base58编码
                     return base58.b58encode(keypair_bytes).decode()
                     
                 except Exception as e:
-                    logger.error(f"验证私钥失败: {str(e)}")
-                    raise ValueError(f"私钥验证失败: {str(e)}")
+                    logger.error(f"验证SOL私钥失败: {str(e)}")
+                    raise ValueError(f"SOL私钥验证失败: {str(e)}")
                     
             elif self.chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
-                # EVM 链私钥处理
                 try:
-                    from eth_account import Account
-                    
-                    # 如果解密后的数据是十六进制格式的私钥
-                    if isinstance(decrypted, str) and decrypted.startswith('0x'): # type: ignore
-                        private_key = decrypted
+                    # 如果解密后的数据是字节类型
+                    if isinstance(decrypted, bytes):
+                        private_key_bytes = decrypted
+                    # 如果是字符串类型，尝试转换为字节
+                    elif isinstance(decrypted, str):
+                        try:
+                            # 如果是十六进制格式的字符串
+                            if decrypted.startswith('0x'):
+                                private_key_bytes = bytes.fromhex(decrypted[2:])
+                            else:
+                                private_key_bytes = bytes.fromhex(decrypted)
+                        except ValueError:
+                            # 如果不是十六进制格式，可能是字节字符串的字面值表示
+                            private_key_bytes = eval(decrypted)
                     else:
-                        # 如果解密后的数据长度大于32字节，尝试提取最后32字节
-                        if len(decrypted) > 32:
-                            decrypted = decrypted[-32:]
-                        elif len(decrypted) < 32:
-                            # 如果长度小于32字节，在前面补0
-                            decrypted = b'\x00' * (32 - len(decrypted)) + decrypted
+                        raise ValueError(f"不支持的私钥格式: {type(decrypted)}")
                         
-                        # 确保私钥是32字节
-                        if len(decrypted) != 32:
-                            raise ValueError(f"无效的私钥长度: {len(decrypted)}字节，期望长度: 32字节")
+                    # 验证私钥长度
+                    if len(private_key_bytes) != 32:
+                        raise ValueError(f"无效的私钥长度: {len(private_key_bytes)}")
                         
-                        # 转换为十六进制格式
-                        private_key = '0x' + decrypted.hex()
+                    # 验证私钥是否匹配地址
+                    account = Account.from_key(private_key_bytes)
+                    if account.address.lower() != self.address.lower():  # 使用小写比较
+                        raise ValueError(f"私钥地址不匹配: 期望 {self.address}, 实际 {account.address}")
                     
-                    # 验证私钥是否有效
-                    account = Account.from_key(private_key)
-                    generated_address = account.address
-                    
-                    # 使用小写进行比较
-                    if generated_address.lower() != self.address.lower():
-                        logger.error(f"私钥地址不匹配: 期望={self.address}, 实际={generated_address}")
-                        raise ValueError(f"私钥地址不匹配: 期望 {self.address}, 实际 {generated_address}")
-                    
-                    return private_key
+                    # 返回十六进制格式的私钥
+                    return '0x' + private_key_bytes.hex()
                     
                 except Exception as e:
-                    logger.error(f"验证私钥失败: {str(e)}")
-                    raise ValueError(f"私钥验证失败: {str(e)}")
-            
-            raise ValueError(f"不支持的链类型: {self.chain}")
-            
+                    logger.error(f"验证EVM私钥失败: {str(e)}")
+                    raise ValueError(f"EVM私钥验证失败: {str(e)}")
+            else:
+                raise ValueError(f"不支持的链类型: {self.chain}")
+                
         except Exception as e:
             logger.error(f"解密私钥失败: {str(e)}")
-            logger.error(f"钱包ID: {self.pk}, 地址: {self.address}")
             raise ValueError(f"解密私钥失败: {str(e)}")
 
     def _verify_address_match(self, generated_address: str) -> bool:
@@ -409,13 +422,85 @@ class PaymentPassword(models.Model):
     def __str__(self):
         return f"Payment password for device {self.device_id}"
 
+    @staticmethod
+    async def verify_device_password(device_id: str, password: str) -> bool:
+        """验证设备的支付密码
+        
+        Args:
+            device_id: 设备ID
+            password: 支付密码
+            
+        Returns:
+            bool: 密码是否正确
+        """
+        try:
+            from asgiref.sync import sync_to_async
+            
+            # 获取支付密码记录
+            payment_pwd = await sync_to_async(PaymentPassword.objects.filter(
+                device_id=device_id
+            ).first)()
+            
+            if not payment_pwd:
+                logger.error(f"找不到设备的支付密码记录: {device_id}")
+                return False
+                
+            # 验证密码
+            return payment_pwd.verify_password(password)
+            
+        except Exception as e:
+            logger.error(f"验证支付密码失败: {str(e)}")
+            return False
+
     def verify_password(self, password: str) -> bool:
         """验证支付密码"""
         try:
             # 解密存储的密码
-            decrypted_password = decrypt_string(self.encrypted_password, self.device_id)
-            # 比较密码
-            return password == decrypted_password
+            from wallet.views.wallet import WalletViewSet
+            wallet_viewset = WalletViewSet()
+            
+            # 记录输入密码信息
+            logger.debug(f"验证支付密码: device_id={self.device_id}, 输入密码类型={type(password)}")
+            
+            # 确保密码是字符串类型
+            if not isinstance(password, str):
+                logger.error(f"无效的密码类型: {type(password)}")
+                return False
+                
+            try:
+                # 解密存储的密码
+                decrypted_password = wallet_viewset.decrypt_data(self.encrypted_password, self.device_id)
+                logger.debug(f"解密后的密码类型: {type(decrypted_password)}")
+                
+                # 确保解密后的密码是字符串类型
+                if isinstance(decrypted_password, bytes):
+                    try:
+                        decrypted_password = decrypted_password.decode('utf-8')
+                    except UnicodeDecodeError as e:
+                        logger.error(f"UTF-8解码失败: {str(e)}")
+                        return False
+                elif not isinstance(decrypted_password, str):
+                    logger.error(f"解密后的密码类型无效: {type(decrypted_password)}")
+                    return False
+                    
+                # 确保两个密码都是字符串类型并且去除可能的空白字符
+                password = str(password).strip()
+                decrypted_password = str(decrypted_password).strip()
+                
+                # 记录密码比较前的状态
+                logger.debug(f"输入密码长度: {len(password)}, 解密密码长度: {len(decrypted_password)}")
+                logger.debug(f"输入密码: {password}, 解密密码: {decrypted_password}")
+                
+                # 密码比较
+                is_match = password == decrypted_password
+                logger.debug(f"密码验证结果: {is_match}")
+                
+                return is_match
+                
+            except Exception as decrypt_error:
+                logger.error(f"密码解密失败: {str(decrypt_error)}")
+                return False
+                
         except Exception as e:
             logger.error(f"验证支付密码失败: {str(e)}")
             return False

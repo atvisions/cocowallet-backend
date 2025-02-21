@@ -249,7 +249,7 @@ class SolanaTransferService:
         """
         try:
             # 使用父类的健康检查方法
-            health_status = await super().check_health()
+            health_status = await super().check_health() # type: ignore
             
             # 检查 Solana RPC 节点状态
             try:

@@ -83,7 +83,7 @@ class EVMPriceService:
     ) -> List[Dict]:
         """获取代币历史价格"""
         try:
-            url = MoralisConfig.EVM_TOKEN_PRICE_HISTORY_URL.format(token_address)
+            url = MoralisConfig.EVM_TOKEN_PRICE_HISTORY_URL.format(token_address) # type: ignore
             params = {
                 'chain': self.chain.lower(),
                 'vs_currency': vs_currency,
@@ -143,7 +143,7 @@ class EVMPriceService:
                 
             except Exception as e:
                 logger.error(f"批量获取代币价格失败: {str(e)}")
-                return {addr: None for addr in token_addresses}
+                return {addr: None for addr in token_addresses} # type: ignore
 
     async def _get_single_token_price(self, session: aiohttp.ClientSession, token_address: str) -> Optional[Dict]:
         """获取单个代币价格"""
@@ -171,7 +171,7 @@ class EVMPriceService:
     async def get_native_token_price(self) -> Optional[Dict]:
         """获取原生代币价格"""
         try:
-            url = MoralisConfig.EVM_TOKEN_PRICE_BATCH_URL.format(self.chain.lower())
+            url = MoralisConfig.EVM_TOKEN_PRICE_BATCH_URL.format(self.chain.lower()) # type: ignore
             
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 async with session.get(url, headers=self.headers) as response:

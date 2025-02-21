@@ -107,33 +107,33 @@ class EVMTokenInfoService:
                 
                 try:
                     # 分别获取每个字段，并记录日志
-                    name = await self.web3.eth.call_async({
+                    name = await self.web3.eth.call_async({ # type: ignore
                         'to': token_address,
                         'data': contract.encodeABI('name')
                     })
-                    name = self.web3.decode_function_result(contract.get_function_by_name('name'), name)[0]
+                    name = self.web3.decode_function_result(contract.get_function_by_name('name'), name)[0] # type: ignore
                     logger.info(f"获取到代币名称: {name}")
                 except Exception as e:
                     logger.error(f"获取代币名称失败: {str(e)}")
                     name = 'Unknown Token'
 
                 try:
-                    symbol = await self.web3.eth.call_async({
+                    symbol = await self.web3.eth.call_async({ # type: ignore
                         'to': token_address,
                         'data': contract.encodeABI('symbol')
                     })
-                    symbol = self.web3.decode_function_result(contract.get_function_by_name('symbol'), symbol)[0]
+                    symbol = self.web3.decode_function_result(contract.get_function_by_name('symbol'), symbol)[0] # type: ignore
                     logger.info(f"获取到代币符号: {symbol}")
                 except Exception as e:
                     logger.error(f"获取代币符号失败: {str(e)}")
                     symbol = '???'
 
                 try:
-                    decimals = await self.web3.eth.call_async({
+                    decimals = await self.web3.eth.call_async({ # type: ignore
                         'to': token_address,
                         'data': contract.encodeABI('decimals')
                     })
-                    decimals = self.web3.decode_function_result(contract.get_function_by_name('decimals'), decimals)[0]
+                    decimals = self.web3.decode_function_result(contract.get_function_by_name('decimals'), decimals)[0] # type: ignore
                     logger.info(f"获取到代币精度: {decimals}")
                 except Exception as e:
                     logger.error(f"获取代币精度失败: {str(e)}")
@@ -218,78 +218,66 @@ class EVMTokenInfoService:
             
             logger.debug(f"请求 Moralis API - URL: {url}, 参数: {params}")
             
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(
-                    url, 
-                    headers=MoralisConfig.get_headers(), 
-                    params=params
-                ) as response:
-                    response_text = await response.text()
-                    logger.debug(f"Moralis API 响应: {response_text}")
-                    
-                    if response.status != 200:
-                        logger.error(f"获取代币元数据失败: {response_text}")
-                        # 尝试从合约获取信息
-                        return await self._get_token_info_from_contract(token_address)
-                    
-                    try:
-                        results = json.loads(response_text)
-                    except json.JSONDecodeError:
-                        logger.error(f"解析代币元数据失败: {response_text}")
-                        return await self._get_token_info_from_contract(token_address)
-                    
-                    if not results or not isinstance(results, list) or len(results) == 0:
-                        return await self._get_token_info_from_contract(token_address)
-                    
-                    result = results[0]  # 获取第一个结果
-                    
-                    # 获取代币价格
-                    price_data = await self.get_token_price(token_address)
-                    
-                    # 如果缺少某些元数据，尝试从合约补充
-                    if not result.get('name') or not result.get('symbol'):
-                        contract_data = await self._get_token_info_from_contract(token_address)
-                        result['name'] = result.get('name') or contract_data.get('name')
-                        result['symbol'] = result.get('symbol') or contract_data.get('symbol')
-                        result['decimals'] = result.get('decimals') or contract_data.get('decimals')
-                    
-                    # 构建完整的元数据
-                    token_data = {
-                        'name': result.get('name', ''),
-                        'symbol': result.get('symbol', ''),
-                        'decimals': int(result.get('decimals', 18)),
-                        'logo': result.get('logo', ''),
-                        'thumbnail': result.get('thumbnail', ''),
-                        'type': 'token',
-                        'contract_type': 'ERC20',
-                        'description': result.get('description', ''),
-                        'website': result.get('links', {}).get('website', ''),
-                        'twitter': result.get('links', {}).get('twitter', ''),
-                        'telegram': result.get('links', {}).get('telegram', ''),
-                        'discord': result.get('links', {}).get('discord', ''),
-                        'github': result.get('links', {}).get('github', ''),
-                        'medium': result.get('links', {}).get('medium', ''),
-                        'reddit': result.get('links', {}).get('reddit', ''),
-                        'instagram': result.get('links', {}).get('instagram', ''),
-                        'email': result.get('links', {}).get('email', ''),
-                        'moralis': result.get('links', {}).get('moralis', ''),
-                        'total_supply': result.get('total_supply', '0'),
-                        'total_supply_formatted': result.get('total_supply_formatted', '0'),
-                        'circulating_supply': result.get('circulating_supply', '0'),
-                        'market_cap': result.get('market_cap', '0'),
-                        'fully_diluted_valuation': result.get('fully_diluted_valuation', '0'),
-                        'categories': result.get('categories', []),
-                        'security_score': result.get('security_score', 0),
-                        'verified': result.get('verified_contract', False),
-                        'possible_spam': result.get('possible_spam', False),
-                        'block_number': result.get('block_number', ''),
-                        'validated': result.get('validated', 0),
-                        'created_at': result.get('created_at', ''),
-                        'price_usd': price_data.get('price_usd', '0'),
-                        'price_change_24h': price_data.get('price_change_24h', '+0.00%')
-                    }
-                    
-                    return token_data
+            try:
+                # 使用新的make_request方法发送请求
+                results = await MoralisConfig.make_request(url, params)
+                
+                if not results or not isinstance(results, list) or len(results) == 0:
+                    return await self._get_token_info_from_contract(token_address)
+                
+                result = results[0]  # 获取第一个结果
+                
+                # 获取代币价格
+                price_data = await self.get_token_price(token_address)
+                
+                # 如果缺少某些元数据，尝试从合约补充
+                if not result.get('name') or not result.get('symbol'):
+                    contract_data = await self._get_token_info_from_contract(token_address)
+                    result['name'] = result.get('name') or contract_data.get('name')
+                    result['symbol'] = result.get('symbol') or contract_data.get('symbol')
+                    result['decimals'] = result.get('decimals') or contract_data.get('decimals')
+                
+                # 构建完整的元数据
+                token_data = {
+                    'name': result.get('name', ''),
+                    'symbol': result.get('symbol', ''),
+                    'decimals': int(result.get('decimals', 18)),
+                    'logo': result.get('logo', ''),
+                    'thumbnail': result.get('thumbnail', ''),
+                    'type': 'token',
+                    'contract_type': 'ERC20',
+                    'description': result.get('description', ''),
+                    'website': result.get('links', {}).get('website', ''),
+                    'twitter': result.get('links', {}).get('twitter', ''),
+                    'telegram': result.get('links', {}).get('telegram', ''),
+                    'discord': result.get('links', {}).get('discord', ''),
+                    'github': result.get('links', {}).get('github', ''),
+                    'medium': result.get('links', {}).get('medium', ''),
+                    'reddit': result.get('links', {}).get('reddit', ''),
+                    'instagram': result.get('links', {}).get('instagram', ''),
+                    'email': result.get('links', {}).get('email', ''),
+                    'moralis': result.get('links', {}).get('moralis', ''),
+                    'total_supply': result.get('total_supply', '0'),
+                    'total_supply_formatted': result.get('total_supply_formatted', '0'),
+                    'circulating_supply': result.get('circulating_supply', '0'),
+                    'market_cap': result.get('market_cap', '0'),
+                    'fully_diluted_valuation': result.get('fully_diluted_valuation', '0'),
+                    'categories': result.get('categories', []),
+                    'security_score': result.get('security_score', 0),
+                    'verified': result.get('verified_contract', False),
+                    'possible_spam': result.get('possible_spam', False),
+                    'block_number': result.get('block_number', ''),
+                    'validated': result.get('validated', 0),
+                    'created_at': result.get('created_at', ''),
+                    'price_usd': price_data.get('price_usd', '0'),
+                    'price_change_24h': price_data.get('price_change_24h', '+0.00%')
+                }
+                
+                return token_data
+                
+            except Exception as request_error:
+                logger.error(f"Moralis API请求失败: {str(request_error)}")
+                return await self._get_token_info_from_contract(token_address)
             
         except Exception as e:
             logger.error(f"获取代币元数据失败: {str(e)}")
@@ -803,4 +791,4 @@ class EVMTokenInfoService:
             return {
                 'price_usd': '0',
                 'price_change_24h': '+0.00%'
-            } 
+            }

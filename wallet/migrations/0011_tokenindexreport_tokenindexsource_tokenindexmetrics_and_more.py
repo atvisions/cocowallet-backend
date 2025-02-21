@@ -86,10 +86,10 @@ class Migration(migrations.Migration):
                     "daily_volume",
                     models.DecimalField(
                         decimal_places=18,
-                        default=0,
+                        default=0,# type: ignore
                         max_digits=30,
                         verbose_name="24h交易量(USD)",
-                    ),
+                    ),# type: ignore
                 ),
                 (
                     "holder_count",
@@ -99,28 +99,28 @@ class Migration(migrations.Migration):
                     "liquidity",
                     models.DecimalField(
                         decimal_places=18,
-                        default=0,
+                        default=0,# type: ignore
                         max_digits=30,
                         verbose_name="流动性(USD)",
-                    ),
+                    ),# type: ignore
                 ),
                 (
                     "market_cap",
                     models.DecimalField(
                         decimal_places=18,
-                        default=0,
+                        default=0,# type: ignore
                         max_digits=30,
                         verbose_name="市值(USD)",
-                    ),
+                    ),# type: ignore
                 ),
                 (
                     "price",
                     models.DecimalField(
                         decimal_places=18,
-                        default=0,
+                        default=0,# type: ignore
                         max_digits=30,
                         verbose_name="价格(USD)",
-                    ),
+                    ),# type: ignore
                 ),
                 (
                     "updated_at",

@@ -1262,7 +1262,7 @@ class EVMSwapService:
                 gas_limit = self.web3.eth.estimate_gas({
                     'from': Web3.to_checksum_address(from_address),
                     'to': router_address,
-                    'value': chain_amount if is_from_native else 0,
+                    'value': chain_amount if is_from_native else 0, # type: ignore
                     'data': tx_data.get('data')
                 })
                 tx_data['gas'] = int(gas_limit * 1.2)  # 添加20%缓冲
@@ -1515,8 +1515,8 @@ class EVMSwapService:
                 # 估算 gas limit
                 try:
                     gas_limit = self.web3.eth.estimate_gas({
-                        'from': Web3.to_checksum_address(tx.get('from')),
-                        'to': Web3.to_checksum_address(tx.get('to')),
+                        'from': Web3.to_checksum_address(tx.get('from')), # type: ignore
+                        'to': Web3.to_checksum_address(tx.get('to')), # type: ignore
                         'value': tx.get('value', 0),
                         'data': tx.get('data', '0x')
                     })

@@ -17,6 +17,7 @@ from web3 import Web3
 from solana.keypair import Keypair
 from base58 import b58encode, b58decode
 from eth_account import Account
+from cryptography.fernet import Fernet
 
 from ..models import Wallet, PaymentPassword
 from ..serializers import (
@@ -25,6 +26,7 @@ from ..serializers import (
     WalletSetupSerializer,
     ChainSelectionSerializer # type: ignore
 )
+from ..decorators import verify_payment_password
 
 logger = logging.getLogger(__name__)
 
@@ -48,61 +50,66 @@ class WalletViewSet(viewsets.ModelViewSet):
         return self.serializer_class
 
     def encrypt_data(self, data, key):
-        """使用简单的XOR加密方法加密数据"""
+        """使用 Fernet 加密数据"""
         try:
-            logger.debug(f"加密数据类型: {type(data)}")
-            logger.debug(f"加密数据长度: {len(data) if hasattr(data, '__len__') else 'unknown'}")
+            logger.debug(f"开始加密数据，输入数据类型: {type(data)}")
             
-            # 如果是十六进制格式的私钥，先移除0x前缀
-            if isinstance(data, str) and data.startswith('0x'):
-                data = data[2:]
-                
-            # 如果是十六进制字符串，转换为字节
-            if isinstance(data, str) and all(c in '0123456789abcdefABCDEF' for c in data):
-                data_bytes = bytes.fromhex(data)
-            elif isinstance(data, str):
-                data_bytes = data.encode()
-            elif isinstance(data, bytes):
-                data_bytes = data
-            else:
-                raise ValueError(f"不支持的数据类型: {type(data)}")
-                
-            # 确保密钥是字节类型
-            if isinstance(key, str):
-                key_bytes = key.encode()
-            elif isinstance(key, bytes):
-                key_bytes = key
-            else:
-                raise ValueError(f"不支持的密钥类型: {type(key)}")
+            # 确保输入数据是字符串类型
+            if not isinstance(data, str):
+                data = str(data)
             
-            # 生成密钥的哈希值
-            key_hash = hashlib.sha256(key_bytes).digest()
+            # 确保密钥是字符串类型
+            if not isinstance(key, str):
+                key = str(key)
             
-            # 使用XOR加密
-            encrypted = bytes(a ^ b for a, b in zip(data_bytes, key_hash * (len(data_bytes) // len(key_hash) + 1)))
+            logger.debug(f"处理后的数据长度: {len(data)}, 密钥长度: {len(key)}")
             
-            # Base64编码
-            result = base64.b64encode(encrypted).decode()
+            # 使用 SHA256 生成固定长度的密钥
+            key_bytes = hashlib.sha256(key.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
+            
+            # 加密数据
+            encrypted = f.encrypt(data.encode())
+            result = base64.b64encode(encrypted).decode('utf-8')
+            
+            logger.debug(f"加密完成，结果长度: {len(result)}")
             return result
                 
         except Exception as e:
             logger.error(f"加密数据失败: {str(e)}, 数据类型: {type(data)}")
-            raise ValueError("加密失败")
+            raise ValueError(f"加密失败: {str(e)}")
 
     def decrypt_data(self, encrypted_text, key):
-        """使用简单的异或解密方法"""
+        """使用 Fernet 解密数据"""
         try:
-            key_hash = hashlib.sha256(key.encode()).digest()
-            encrypted_bytes = base64.b64decode(encrypted_text)
-            decrypted = bytes(a ^ b for a, b in zip(encrypted_bytes, key_hash * (len(encrypted_bytes) // len(key_hash) + 1)))
+            logger.debug(f"开始解密数据，加密文本长度: {len(encrypted_text)}")
             
-            # 如果解密后的数据是32字节，说明是私钥，返回十六进制格式
-            if len(decrypted) == 32:
-                return '0x' + decrypted.hex()
-            return decrypted
+            # 确保密钥是字符串类型
+            if not isinstance(key, str):
+                key = str(key)
+            
+            # 使用 SHA256 生成固定长度的密钥
+            key_bytes = hashlib.sha256(key.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
+            
+            try:
+                # Base64 解码
+                encrypted_bytes = base64.b64decode(encrypted_text)
+                
+                # 解密数据
+                decrypted = f.decrypt(encrypted_bytes)
+                result = decrypted.decode('utf-8')
+                
+                logger.debug(f"解密完成，结果长度: {len(result)}")
+                return result
+                
+            except Exception as e:
+                logger.error(f"解密失败: {str(e)}")
+                raise ValueError(f"解密失败: {str(e)}")
+                
         except Exception as e:
             logger.error(f"解密数据失败: {str(e)}")
-            raise ValueError("解密失败")
+            raise ValueError(f"解密失败: {str(e)}")
 
     @action(detail=False, methods=['post'])
     def set_password(self, request):
@@ -357,6 +364,9 @@ class WalletViewSet(viewsets.ModelViewSet):
                     # 如果钱包存在但已被删除，重新激活它
                     existing_wallet.is_active = True
                     decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
+                    # 确保 decrypted_password 是字符串类型
+                    if isinstance(decrypted_password, bytes):
+                        decrypted_password = decrypted_password.decode('utf-8')
                     existing_wallet.encrypted_private_key = self.encrypt_data(private_key_to_store, decrypted_password)
                     existing_wallet.save()
                     return Response({
@@ -372,7 +382,10 @@ class WalletViewSet(viewsets.ModelViewSet):
             avatar_file = ContentFile(avatar_io.getvalue())
             
             # 使用支付密码加密私钥
-            decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id).decode()
+            decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
+            # 确保 decrypted_password 是字符串类型
+            if isinstance(decrypted_password, bytes):
+                decrypted_password = decrypted_password.decode('utf-8')
             
             # 创建钱包
             wallet = Wallet.objects.create(
@@ -456,8 +469,9 @@ class WalletViewSet(viewsets.ModelViewSet):
         instance.save()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], url_path='verify_password')
     def verify_password(self, request):
+        """验证支付密码"""
         device_id = request.data.get('device_id')
         payment_password = request.data.get('payment_password')
         
@@ -468,16 +482,94 @@ class WalletViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            PaymentPassword.objects.get(device_id=device_id, password=payment_password)
-            return Response({
-                'status': 'success',
-                'message': '支付密码验证成功'
-            })
-        except PaymentPassword.DoesNotExist:
+            # 获取支付密码记录
+            payment_pwd = PaymentPassword.objects.filter(device_id=device_id).first()
+            if not payment_pwd:
+                return Response({
+                    'status': 'error',
+                    'message': '设备未设置支付密码'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 验证密码
+            if payment_pwd.verify_password(payment_password):
+                return Response({
+                    'status': 'success',
+                    'message': '支付密码验证成功'
+                })
+            else:
+                return Response({
+                    'status': 'error',
+                    'message': '支付密码错误'
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
             return Response({
                 'status': 'error',
-                'message': '支付密码错误'
+                'message': f'验证支付密码失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path=r'payment_password/status/(?P<device_id>[^/.]+)')  # 修改URL路径格式
+    def payment_password_status(self, request, device_id=None):  # 添加device_id参数
+        """查询支付密码状态"""
+        try:
+            if not device_id:  # 使用URL路径中的device_id
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+            payment_password = PaymentPassword.objects.filter(device_id=device_id).first()
+            return Response({
+                'status': 'success',
+                'data': {
+                    'has_payment_password': payment_password is not None,
+                    'device_id': device_id
+                }
+            })
+        except Exception as e:
+            logger.error(f"查询支付密码状态失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'查询支付密码状态失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['post'])
+    def verify_old_password(self, request):
+        """验证旧密码"""
+        device_id = request.data.get('device_id')
+        payment_password = request.data.get('payment_password')
+        
+        if not device_id or not payment_password:
+            return Response({
+                'status': 'error',
+                'message': '缺少必要参数'
             }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            # 获取支付密码记录
+            payment_pwd = PaymentPassword.objects.filter(device_id=device_id).first()
+            if not payment_pwd:
+                return Response({
+                    'status': 'error',
+                    'message': '设备未设置支付密码'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 验证密码
+            is_valid = payment_pwd.verify_password(payment_password)
+            
+            return Response({
+                'status': 'success',
+                'data': {
+                    'is_valid': is_valid
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"验证旧密码失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'验证旧密码失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['post'])
     def change_password(self, request):
@@ -642,20 +734,27 @@ class WalletViewSet(viewsets.ModelViewSet):
         chain = request.data.get('chain')
         private_key = request.data.get('private_key')
         name = request.data.get('name')
-        payment_pwd = request.data.get('payment_password')
+        payment_password = request.data.get('payment_password')
         
-        if not all([device_id, chain, private_key, payment_pwd]):
+        if not all([device_id, chain, private_key, payment_password]):
             return Response({
                 'status': 'error',
                 'message': '缺少必要参数'
             }, status=status.HTTP_400_BAD_REQUEST)
             
         # 获取支付密码
-        payment_password = PaymentPassword.objects.filter(device_id=device_id).first()
-        if not payment_password:
+        payment_pwd = PaymentPassword.objects.filter(device_id=device_id).first()
+        if not payment_pwd:
             return Response({
                 'status': 'error',
                 'message': '未设置支付密码'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        # 验证密码
+        if not payment_pwd.verify_password(payment_password):
+            return Response({
+                'status': 'error',
+                'message': '支付密码错误'
             }, status=status.HTTP_400_BAD_REQUEST)
             
         try:
@@ -683,38 +782,39 @@ class WalletViewSet(viewsets.ModelViewSet):
                 private_key_to_store = bytes.fromhex(private_key_str)
                 
             elif chain == "SOL":
-                # 使用助记词生成种子
-                seed = hashlib.pbkdf2_hmac(
-                    'sha512',
-                    mnemonic.encode('utf-8'),
-                    'mnemonic'.encode('utf-8'),
-                    2048
-                )
-                
-                # 使用种子的前32字节作为私钥
-                private_key_bytes = seed[:32]
-                
-                # 从私钥创建Solana密钥对
-                keypair = Keypair.from_seed(private_key_bytes)
-                address = str(keypair.public_key)
-                
-                # 创建88字节格式的私钥（32字节私钥 + 32字节公钥 + 24字节额外数据）
-                public_key_bytes = bytes(keypair.public_key)
-                extra_bytes = bytes([0] * 24)  # 24字节的额外数据
-                extended_key = private_key_bytes + public_key_bytes + extra_bytes
-                
-                # 将完整的88字节数据转换为Base58格式存储
-                private_key_to_store = b58encode(extended_key).decode()
-                
-                # 验证地址
                 try:
-                    keypair = Keypair.from_secret_key(b58decode(private_key_to_store))
+                    # 尝试解码 Base58 格式的私钥
+                    private_key_bytes = b58decode(private_key)
+                    
+                    # 如果是88字节的扩展格式，提取前64字节
+                    if len(private_key_bytes) == 88:
+                        keypair_bytes = private_key_bytes[:64]
+                    # 如果已经是64字节的格式，直接使用
+                    elif len(private_key_bytes) == 64:
+                        keypair_bytes = private_key_bytes
+                    # 如果是32字节的私钥，创建完整的密钥对
+                    elif len(private_key_bytes) == 32:
+                        keypair = Keypair.from_seed(private_key_bytes)
+                        keypair_bytes = keypair.seed + bytes(keypair.public_key)
+                    else:
+                        raise ValueError(f"无效的私钥长度: {len(private_key_bytes)}")
+                    
+                    # 验证生成的地址
+                    keypair = Keypair.from_seed(keypair_bytes[:32])
                     address = str(keypair.public_key)
                     logger.debug(f"生成的地址: {address}")
-                except Exception as e:
-                    logger.error(f"验证密钥对失败: {str(e)}")
-                    raise ValueError("无效的密钥对格式")
                     
+                    # 创建88字节格式的私钥（32字节私钥 + 32字节公钥 + 24字节额外数据）
+                    public_key_bytes = bytes(keypair.public_key)
+                    extra_bytes = bytes([0] * 24)  # 24字节的额外数据
+                    private_key_to_store = keypair_bytes[:32] + public_key_bytes + extra_bytes
+                    
+                    # 将完整的88字节数据转换为Base58格式存储
+                    private_key_to_store = b58encode(private_key_to_store).decode()
+                    
+                except Exception as e:
+                    logger.error(f"处理Solana私钥失败: {str(e)}")
+                    raise ValueError(f"无效的Solana私钥: {str(e)}")
             elif chain == "BTC":
                 # TODO: 添加比特币私钥导入支持
                 return Response({
@@ -743,7 +843,7 @@ class WalletViewSet(viewsets.ModelViewSet):
                 else:
                     # 如果钱包存在但已被删除，重新激活它
                     existing_wallet.is_active = True
-                    decrypted_password = self.decrypt_data(payment_password.encrypted_password, device_id)
+                    decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
                     existing_wallet.encrypted_private_key = self.encrypt_data(private_key_to_store, decrypted_password)
                     existing_wallet.save()
                     return Response({
@@ -769,16 +869,13 @@ class WalletViewSet(viewsets.ModelViewSet):
                 name = f"Imported {chain} Wallet {existing_wallets + 1}"
             
             # 创建钱包
-            decrypted_password = self.decrypt_data(payment_password.encrypted_password, device_id)
-            if isinstance(decrypted_password, bytes):
-                decrypted_password = decrypted_password.decode()
-            
+            decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
             wallet = Wallet.objects.create(
                 device_id=device_id,
                 name=name,
                 chain=chain,
                 address=address,
-                encrypted_private_key=self.encrypt_data(private_key_to_store, decrypted_password),
+                encrypted_private_key=self.encrypt_data(str(private_key_to_store), decrypted_password),
                 is_imported=True
             )
             
@@ -1059,31 +1156,28 @@ class WalletViewSet(viewsets.ModelViewSet):
                     'symbol': 'ETH',
                     'network': 'Mainnet',
                     'status': 'active',
-                    'logo': 'https://assets.coingecko.com/coins/images/33526/large/base-token.png'
+                    'logo': 'https://cdn.bitkeep.vip/operation/u_b_52a61660-82d7-11ee-beed-414173dd7838.png'
                 },
                 'ARBITRUM': {
                     'chain_id': 'ARBITRUM',
                     'name': 'Arbitrum',
                     'symbol': 'ETH',
                     'network': 'Mainnet',
-                    'status': 'active',
-                    'logo': 'https://assets.coingecko.com/coins/images/16547/large/photo_2023-03-29_21.47.00.jpeg'
+                    'status': 'active'
                 },
                 'OPTIMISM': {
                     'chain_id': 'OPTIMISM',
                     'name': 'Optimism',
                     'symbol': 'ETH',
                     'network': 'Mainnet',
-                    'status': 'active',
-                    'logo': 'https://assets.coingecko.com/coins/images/25244/large/Optimism.png'
+                    'status': 'active'
                 },
                 'SOL': {
                     'chain_id': 'SOL',
                     'name': 'Solana',
                     'symbol': 'SOL',
                     'network': 'Mainnet',
-                    'status': 'active',
-                    'logo': 'https://assets.coingecko.com/coins/images/4128/large/solana.png'
+                    'status': 'active'
                 },
                 'BTC': {
                     'chain_id': 'BTC',
@@ -1109,4 +1203,4 @@ class WalletViewSet(viewsets.ModelViewSet):
                 'status': 'error',
                 'message': '获取支持的链列表失败',
                 'error': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

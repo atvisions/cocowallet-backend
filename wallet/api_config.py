@@ -227,6 +227,72 @@ class MoralisConfig:
         if not chain_id:
             raise ValueError(f"不支持的链: {chain}")
         return chain_id
+
+    @classmethod
+    async def make_request(cls, url: str, params: Dict = None, method: str = 'GET', retry_count: int = 0) -> Dict:
+        """发送API请求，包含重试机制
+        
+        Args:
+            url: 请求URL
+            params: 请求参数
+            method: 请求方法
+            retry_count: 当前重试次数
+            
+        Returns:
+            Dict: 响应数据
+        """
+        import aiohttp
+        import asyncio
+        from aiohttp import ClientTimeout
+        
+        if retry_count >= cls.MAX_RETRIES:
+            raise Exception(f"达到最大重试次数: {cls.MAX_RETRIES}")
+            
+        try:
+            timeout = ClientTimeout(total=cls.TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                if method == 'GET':
+                    async with session.get(url, headers=cls.get_headers(), params=params) as response:
+                        if response.status == 429:  # Rate limit
+                            wait_time = int(response.headers.get('Retry-After', cls.RETRY_INTERVAL))
+                            await asyncio.sleep(wait_time)
+                            return await cls.make_request(url, params, method, retry_count + 1)
+                            
+                        response_text = await response.text()
+                        if response.status != 200:
+                            if retry_count < cls.MAX_RETRIES:
+                                await asyncio.sleep(cls.RETRY_INTERVAL)
+                                return await cls.make_request(url, params, method, retry_count + 1)
+                            raise Exception(f"请求失败: {response_text}")
+                            
+                        return await response.json()
+                else:
+                    async with session.post(url, headers=cls.get_headers(), json=params) as response:
+                        if response.status == 429:  # Rate limit
+                            wait_time = int(response.headers.get('Retry-After', cls.RETRY_INTERVAL))
+                            await asyncio.sleep(wait_time)
+                            return await cls.make_request(url, params, method, retry_count + 1)
+                            
+                        response_text = await response.text()
+                        if response.status != 200:
+                            if retry_count < cls.MAX_RETRIES:
+                                await asyncio.sleep(cls.RETRY_INTERVAL)
+                                return await cls.make_request(url, params, method, retry_count + 1)
+                            raise Exception(f"请求失败: {response_text}")
+                            
+                        return await response.json()
+                        
+        except asyncio.TimeoutError:
+            if retry_count < cls.MAX_RETRIES:
+                await asyncio.sleep(cls.RETRY_INTERVAL)
+                return await cls.make_request(url, params, method, retry_count + 1)
+            raise Exception("请求超时")
+            
+        except Exception as e:
+            if retry_count < cls.MAX_RETRIES:
+                await asyncio.sleep(cls.RETRY_INTERVAL)
+                return await cls.make_request(url, params, method, retry_count + 1)
+            raise e
     
     # EVM 代币相关接口
     EVM_TOKEN_PRICE_URL: str = f"{BASE_URL}/erc20/{{0}}/price"  # 获取代币价格

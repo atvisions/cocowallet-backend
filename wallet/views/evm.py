@@ -9,12 +9,13 @@ from django.utils import timezone
 from decimal import Decimal, InvalidOperation as DecimalInvalidOperation
 import logging
 from functools import wraps
-from typing import Union, Optional, Dict, List
+from typing import Union, Optional, Dict, List, Any, cast
 from django.http import Http404
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
 from eth_account import Account
 from base58 import b58encode
+from django.core.exceptions import ObjectDoesNotExist
 
 from ..models import Wallet, PaymentPassword, Token, Transaction
 from ..serializers import WalletSerializer
@@ -40,13 +41,14 @@ from django.db.models.functions import ExtractSecond
 from django.db.models.functions import ExtractWeek
 from django.db.models.functions import ExtractQuarter
 from ..services.evm.nft import EVMNFTService
+from ..decorators import verify_payment_password
 
 logger = logging.getLogger(__name__)
 
 def async_to_sync_api(func):
     """异步转同步装饰器"""
     @wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         import asyncio
         return asyncio.run(func(*args, **kwargs))
     return wrapper
@@ -59,10 +61,10 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
     queryset = Wallet.objects.filter(is_active=True)
     serializer_class = WalletSerializer
 
-    async def get_wallet_async(self, wallet_id: int, device_id: str = None) -> Wallet:
+    async def get_wallet_async(self, wallet_id: Union[int, str], device_id: Optional[str] = None) -> Wallet:
         """获取钱包"""
         try:
-            filters = {'id': wallet_id, 'is_active': True}
+            filters = {'id': int(wallet_id) if isinstance(wallet_id, str) else wallet_id, 'is_active': True}
             if device_id:
                 filters['device_id'] = device_id
             
@@ -75,10 +77,10 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     @async_to_sync_api
-    async def native_balance(self, request, pk=None):
+    async def native_balance(self, request: Any, pk: Union[int, str]) -> Response:
         """获取原生代币余额"""
         try:
-            device_id = request.query_params.get('device_id')
+            device_id: Optional[str] = request.query_params.get('device_id')
             if not device_id:
                 return Response({
                     'status': 'error',
@@ -121,11 +123,11 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     @async_to_sync_api
-    async def token_balance(self, request, pk=None):
+    async def token_balance(self, request: Any, pk: Union[int, str]) -> Response:
         """获取代币余额"""
         try:
-            device_id = request.query_params.get('device_id')
-            token_address = request.query_params.get('token_address')
+            device_id: Optional[str] = request.query_params.get('device_id')
+            token_address: Optional[str] = request.query_params.get('token_address')
             
             if not device_id:
                 return Response({
@@ -151,7 +153,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
             # 获取余额服务
             balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
-            balance = await balance_service.get_token_balance(wallet.address, token_address)
+            balance = await balance_service.get_token_balance(wallet.address, token_address) # type: ignore
 
             return Response({
                 'status': 'success',
@@ -169,10 +171,10 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'])
     @async_to_sync_api
-    async def tokens(self, request, pk=None):
+    async def tokens(self, request: Any, pk: Union[int, str]) -> Response:
         """获取所有代币余额"""
         try:
-            device_id = request.query_params.get('device_id')
+            device_id: Optional[str] = request.query_params.get('device_id')
             if not device_id:
                 return Response({
                     'status': 'error',
@@ -207,7 +209,8 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     @async_to_sync_api
-    async def transfer(self, request, pk=None):
+    @verify_payment_password()
+    async def transfer(self, request: Any, pk: Union[int, str]) -> Response:
         """转账接口(支持原生代币和 ERC20 代币)
         
         如果不传 token_address 参数,则转账原生代币
@@ -215,11 +218,11 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
         """
         try:
             # 获取请求参数
-            device_id = request.data.get('device_id')
-            to_address = request.data.get('to_address')
-            amount = request.data.get('amount')
-            payment_password = request.data.get('payment_password')
-            token_address = request.data.get('token_address')  # 可选参数
+            device_id: Optional[str] = request.data.get('device_id')
+            to_address: Optional[str] = request.data.get('to_address')
+            amount: Optional[str] = request.data.get('amount')
+            payment_password: Optional[str] = request.data.get('payment_password')
+            token_address: Optional[str] = request.data.get('token_address')  # 可选参数
             
             # 处理可选的gas参数
             try:
@@ -233,7 +236,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                     'message': 'gas参数必须为数字'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            if not all([device_id, to_address, amount, payment_password]):
+            if not all([device_id, to_address, amount]):
                 return Response({
                     'status': 'error',
                     'message': '缺少必要参数'
@@ -249,20 +252,6 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                     'message': '不支持的链类型'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            # 验证支付密码
-            payment_pwd = await sync_to_async(PaymentPassword.objects.filter(
-                device_id=device_id
-            ).first)()
-            
-            if not payment_pwd or not payment_pwd.verify_password(payment_password):
-                return Response({
-                    'status': 'error',
-                    'message': '支付密码错误'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 获取转账服务
-            transfer_service = ChainServiceFactory.get_transfer_service(wallet.chain)
-            
             # 设置支付密码用于解密私钥
             wallet.payment_password = payment_password
             
@@ -307,21 +296,21 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                 # ERC20 代币转账
                 result = await transfer_service.transfer_token(
                     from_address=wallet.address,
-                    to_address=to_address,
+                    to_address=to_address, # type: ignore
                     token_address=token_address,
-                    amount=amount,
+                    amount=amount, # type: ignore
                     private_key=private_key,
-                    gas_limit=gas_limit,
-                    gas_price=gas_price,
-                    max_priority_fee=max_priority_fee,
-                    max_fee=max_fee
+                    gas_limit=gas_limit, # type: ignore
+                    gas_price=gas_price, # type: ignore
+                    max_priority_fee=max_priority_fee, # type: ignore
+                    max_fee=max_fee # type: ignore
                 )
             else:
                 # 原生代币转账
-                result = await transfer_service.transfer(
+                result = await transfer_service.transfer_native(
                     from_address=wallet.address,
-                    to_address=to_address,
-                    amount=amount,
+                    to_address=to_address, # type: ignore
+                    amount=amount, # type: ignore
                     private_key=private_key,
                     gas_limit=gas_limit,
                     gas_price=gas_price,
@@ -329,7 +318,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                     max_fee=max_fee
                 )
             
-            if result['status'] == 'error':
+            if result.get('status') == 'error':
                 return Response(result, status=400)
                 
             return Response(result)
@@ -358,7 +347,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # 获取钱包
-            wallet = await self.get_wallet_async(pk, device_id)
+            wallet = await self.get_wallet_async(pk, device_id) # type: ignore
             
             # 验证是否是EVM链
             if wallet.chain not in EVMUtils.CHAIN_CONFIG:
@@ -372,20 +361,20 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             
             # 估算费用
             if token_address:
-                result = await transfer_service.estimate_token_transfer_fee(
+                result = await transfer_service.estimate_token_transfer_fee( # type: ignore
                     wallet.address,
                     to_address,
                     token_address,
                     amount
                 )
             else:
-                result = await transfer_service.estimate_native_transfer_fee(
+                result = await transfer_service.estimate_native_transfer_fee( # type: ignore
                     wallet.address,
                     to_address,
                     amount
                 )
                 
-            if result.get('status') == 'error':
+            if result.get('status') == 'error': # type: ignore
                 return Response(result, status=400)
 
             return Response({
@@ -402,10 +391,10 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path=r'tokens/(?P<token_address>[^/.]+)/detail')
     @async_to_sync_api
-    async def token_detail(self, request, pk=None, token_address=None):
+    async def token_detail(self, request: Any, pk: Union[int, str], token_address: Optional[str] = None) -> Response:
         """获取代币详情"""
         try:
-            device_id = request.query_params.get('device_id')
+            device_id: Optional[str] = request.query_params.get('device_id')
             if not device_id:
                 return Response({
                     'status': 'error',
@@ -428,10 +417,10 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             
             try:
                 # 获取代币元数据
-                token_data = await token_info_service.get_token_metadata(token_address)
+                token_data = await token_info_service.get_token_metadata(token_address) # type: ignore
                 if not token_data:
                     logger.warning(f"从 Moralis 获取代币元数据失败，尝试从合约直接获取: {token_address}")
-                    token_data = await token_info_service._get_token_info(token_address)
+                    token_data = await token_info_service._get_token_info(token_address) # type: ignore
                 
                 if not token_data or not token_data.get('name'):
                     return Response({
@@ -442,7 +431,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                 # 获取代币余额
                 try:
                     balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
-                    balance_info = await balance_service.get_token_balance(wallet.address, token_address)
+                    balance_info = await balance_service.get_token_balance(wallet.address, token_address) # type: ignore
                     logger.info(f"获取到代币余额: {balance_info}")
                 except Exception as balance_error:
                     logger.error(f"获取代币余额失败: {str(balance_error)}")
@@ -450,7 +439,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                 
                 # 获取代币价格
                 try:
-                    price_data = await token_info_service.get_token_price(token_address)
+                    price_data = await token_info_service.get_token_price(token_address) # type: ignore
                     logger.info(f"获取到代币价格: {price_data}")
                 except Exception as price_error:
                     logger.error(f"获取代币价格失败: {str(price_error)}")
@@ -458,7 +447,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                 
                 # 计算价值
                 try:
-                    balance = Decimal(balance_info.get('balance_formatted', '0'))
+                    balance = Decimal(balance_info.get('balance_formatted', '0')) # type: ignore
                     price = Decimal(price_data.get('price_usd', '0'))
                     value = balance * price
                 except (DecimalInvalidOperation, TypeError) as calc_error:
@@ -472,8 +461,8 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                     'message': '获取代币详情成功',
                     'data': {
                         **token_data,
-                        'balance': balance_info.get('balance', '0'),
-                        'balance_formatted': balance_info.get('balance_formatted', '0'),
+                        'balance': balance_info.get('balance', '0'), # type: ignore
+                        'balance_formatted': balance_info.get('balance_formatted', '0'), # type: ignore
                         'price_usd': str(price),
                         'value_usd': str(value),
                         'price_change_24h': price_data.get('price_change_24h', '+0.00%')
@@ -496,15 +485,15 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path=r'tokens/(?P<token_address>[^/.]+)/ohlcv')
     @async_to_sync_api
-    async def token_ohlcv(self, request, pk=None, token_address=None):
+    async def token_ohlcv(self, request: Any, pk: Union[int, str], token_address: Optional[str] = None) -> Response:
         """获取代币价格走势图数据"""
         try:
-            device_id = request.query_params.get('device_id')
-            timeframe = request.query_params.get('timeframe', '1h')
-            currency = request.query_params.get('currency', 'usd')
-            from_date = request.query_params.get('from_date')
-            to_date = request.query_params.get('to_date')
-            limit = int(request.query_params.get('limit', '24'))
+            device_id: Optional[str] = request.query_params.get('device_id')
+            timeframe: str = request.query_params.get('timeframe', '1h')
+            currency: str = request.query_params.get('currency', 'usd')
+            from_date: Optional[str] = request.query_params.get('from_date')
+            to_date: Optional[str] = request.query_params.get('to_date')
+            limit: int = int(request.query_params.get('limit', '24'))
             
             if not device_id:
                 return Response({
@@ -541,7 +530,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             
             # 获取价格走势数据
             ohlcv_data = await token_info_service.get_token_ohlcv(
-                token_address,
+                token_address, # type: ignore
                 timeframe=timeframe,
                 currency=currency,
                 from_date=from_date,
@@ -569,12 +558,12 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='token-transfers')
     @async_to_sync_api
-    async def token_transfers(self, request, pk=None):
+    async def token_transfers(self, request: Any, pk: Union[int, str]) -> Response:
         """获取代币转账记录"""
         try:
-            device_id = request.query_params.get('device_id')
-            page = int(request.query_params.get('page', 1))
-            page_size = int(request.query_params.get('page_size', 20))
+            device_id: Optional[str] = request.query_params.get('device_id')
+            page: int = int(request.query_params.get('page', 1))
+            page_size: int = int(request.query_params.get('page_size', 20))
             
             if not device_id:
                 return Response({
@@ -652,15 +641,15 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='swap/quote', url_name='swap-quote')
     @async_to_sync_api
-    async def swap_quote(self, request, pk=None):
+    async def swap_quote(self, request: Any, pk: Union[int, str]) -> Response:
         """获取兑换报价"""
         try:
             # 验证参数
-            device_id = request.data.get('device_id')
-            from_token = request.data.get('from_token')
-            to_token = request.data.get('to_token')
-            amount = request.data.get('amount')
-            slippage = float(request.data.get('slippage', 1.0))
+            device_id: Optional[str] = request.data.get('device_id')
+            from_token: Optional[str] = request.data.get('from_token')
+            to_token: Optional[str] = request.data.get('to_token')
+            amount: Optional[str] = request.data.get('amount')
+            slippage: float = float(request.data.get('slippage', 1.0))
             
             if not all([device_id, from_token, to_token, amount]):
                 return Response({
@@ -683,11 +672,11 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             
             # 获取报价
             quote = await swap_service.get_quote(
-                from_token=from_token,
-                to_token=to_token,
-                amount=amount,
+                from_token=from_token, # type: ignore
+                to_token=to_token, # type: ignore
+                amount=amount, # type: ignore
                 slippage=slippage
-            )
+            ) # type: ignore
             
             if not quote:
                 return Response({
@@ -706,17 +695,18 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='swap/execute')
     @async_to_sync_api
-    async def swap_execute(self, request, pk=None):
+    @verify_payment_password()
+    async def swap_execute(self, request: Any, pk: Union[int, str]) -> Response:
         """执行代币兑换"""
         try:
-            device_id = request.data.get('device_id')
-            from_token = request.data.get('from_token')
-            to_token = request.data.get('to_token')
-            amount = request.data.get('amount')
-            payment_password = request.data.get('payment_password')
-            slippage = float(request.data.get('slippage', 1.0))
+            device_id: Optional[str] = request.data.get('device_id')
+            from_token: Optional[str] = request.data.get('from_token')
+            to_token: Optional[str] = request.data.get('to_token')
+            amount: Optional[str] = request.data.get('amount')
+            payment_password: Optional[str] = request.data.get('payment_password')
+            slippage: float = float(request.data.get('slippage', 1.0))
             
-            if not all([device_id, from_token, to_token, amount, payment_password]):
+            if not all([device_id, from_token, to_token, amount]):
                 return Response({
                     'status': 'error',
                     'message': '缺少必要参数'
@@ -730,17 +720,6 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                 return Response({
                     'status': 'error',
                     'message': '不支持的链类型'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 验证支付密码
-            payment_pwd = await sync_to_async(PaymentPassword.objects.filter(
-                device_id=device_id
-            ).first)()
-            
-            if not payment_pwd or not payment_pwd.verify_password(payment_password):
-                return Response({
-                    'status': 'error',
-                    'message': '支付密码错误'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # 设置支付密码用于解密私钥
@@ -761,12 +740,12 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             
             # 执行兑换
             result = await swap_service.execute_swap(
-                from_token,
-                to_token,
-                amount,
-                wallet.address,
+                from_token, # type: ignore
+                to_token, # type: ignore
+                amount, # type: ignore
+                wallet.address, # type: ignore
                 private_key,
-                slippage
+                slippage # type: ignore
             )
             
             if result.get('status') == 'error':
@@ -783,10 +762,10 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='swap/tokens')
     @async_to_sync_api
-    async def swap_tokens(self, request, pk=None):
+    async def swap_tokens(self, request: Any, pk: Union[int, str]) -> Response:
         """获取支持的代币列表"""
         try:
-            device_id = request.query_params.get('device_id')
+            device_id: Optional[str] = request.query_params.get('device_id')
             if not device_id:
                 return Response({
                     'status': 'error',
@@ -807,7 +786,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             swap_service = ChainServiceFactory.get_swap_service(wallet.chain)
             
             # 获取支持的代币列表
-            tokens = await swap_service.get_supported_tokens()
+            tokens = await swap_service.get_supported_tokens()# type: ignore
 
             return Response({
                 'status': 'success',
@@ -823,14 +802,14 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get', 'post'], url_path='swap/allowance')
     @async_to_sync_api
-    async def swap_allowance(self, request, pk=None):
+    async def swap_allowance(self, request: Any, pk: Union[int, str]) -> Response:
         """获取代币授权额度"""
         try:
             # 根据请求方法获取参数
             if request.method == 'GET':
-                device_id = request.query_params.get('device_id')
-                token_address = request.query_params.get('token_address')
-                spender = request.query_params.get('spender')
+                device_id: Optional[str] = request.query_params.get('device_id')
+                token_address: Optional[str] = request.query_params.get('token_address')
+                spender: Optional[str] = request.query_params.get('spender')
             else:
                 device_id = request.data.get('device_id')
                 token_address = request.data.get('token_address')
@@ -855,10 +834,10 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             # 获取授权额度
             try:
                 swap_service = ChainServiceFactory.get_swap_service(wallet.chain)
-                allowance = await swap_service.get_token_allowance(
-                    token_address,
+                allowance = await swap_service.get_token_allowance( # type: ignore
+                    token_address, # type: ignore
                     wallet.address,
-                    spender
+                    spender # type: ignore
                 )
                 
                 return Response({
@@ -885,16 +864,17 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['POST'], url_path='swap/approve')
     @async_to_sync_api
-    async def swap_approve(self, request, pk=None):
+    @verify_payment_password()
+    async def swap_approve(self, request: Any, pk: Union[int, str]) -> Response:
         """授权代币"""
         try:
-            device_id = request.data.get('device_id')
-            token_address = request.data.get('token_address')
-            spender = request.data.get('spender')
-            amount = request.data.get('amount')
-            payment_password = request.data.get('payment_password')
+            device_id: Optional[str] = request.data.get('device_id')
+            token_address: Optional[str] = request.data.get('token_address')
+            spender: Optional[str] = request.data.get('spender')
+            amount: Optional[str] = request.data.get('amount')
+            payment_password: Optional[str] = request.data.get('payment_password')
             
-            if not all([device_id, token_address, spender, amount, payment_password]):
+            if not all([device_id, token_address, spender, amount]):
                 return Response({
                     'status': 'error',
                     'message': '参数不完整'
@@ -910,46 +890,12 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
                     'message': '不支持的链'
                 }, status=status.HTTP_400_BAD_REQUEST)
                 
-            # 验证支付密码
-            payment_pwd = await sync_to_async(PaymentPassword.objects.filter(
-                device_id=device_id
-            ).first)()
-            
-            if not payment_pwd or not payment_pwd.verify_password(payment_password):
-                return Response({
-                    'status': 'error',
-                    'message': '支付密码错误'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
             # 设置支付密码用于解密私钥
             wallet.payment_password = payment_password
             
             # 解密私钥
             try:
                 private_key = wallet.decrypt_private_key()
-                # 如果返回的是字节类型，则需要转换为十六进制格式
-                if isinstance(private_key, bytes):
-                    # 确保私钥是32字节长度
-                    if len(private_key) != 32:
-                        raise ValueError(f'无效的私钥长度: {len(private_key)}字节，期望长度: 32字节')
-                    # 转换为十六进制格式，添加0x前缀
-                    hex_str = private_key.hex()
-                    private_key = '0x' + hex_str
-                elif isinstance(private_key, str):
-                    # 如果是字符串，确保是有效的十六进制格式
-                    hex_str = private_key[2:] if private_key.startswith('0x') else private_key
-                    # 移除所有非十六进制字符
-                    hex_str = ''.join(c for c in hex_str if c in '0123456789abcdefABCDEF')
-                    if len(hex_str) < 64:
-                        hex_str = hex_str.zfill(64)
-                    private_key = '0x' + hex_str.lower()
-                
-                # 验证私钥对应的地址是否匹配
-                account = Account.from_key(private_key)
-                derived_address = account.address
-                if derived_address.lower() != wallet.address.lower():
-                    raise ValueError(f'私钥地址不匹配: 期望 {wallet.address}, 实际 {derived_address}')
-                    
             except Exception as e:
                 logger.error(f"解密私钥失败: {str(e)}")
                 return Response({
@@ -959,18 +905,18 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             
             # 构建授权交易
             swap_service = ChainServiceFactory.get_swap_service(wallet.chain)
-            tx = await swap_service.build_approve_transaction(
-                token_address,
-                spender,
-                amount,
+            tx = await swap_service.build_approve_transaction(# type: ignore
+                token_address,# type: ignore
+                spender,# type: ignore
+                amount,# type: ignore
                 wallet.address
-            )
+            ) 
             
             if tx.get('status') == 'error':
                 return Response(tx, status=400)
             
             # 发送交易
-            result = await swap_service._send_transaction(tx, private_key)
+            result = await swap_service._send_transaction(tx, private_key)# type: ignore
             
             if result.get('status') == 'error':
                 return Response(result, status=400)
@@ -986,11 +932,11 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='tokens/manage')
     @async_to_sync_api
-    async def manage_tokens(self, request, pk=None):
+    async def manage_tokens(self, request: Any, pk: Union[int, str]) -> Response:
         """获取所有代币列表（包括隐藏的）"""
         try:
             # 获取请求参数
-            device_id = request.query_params.get('device_id')
+            device_id: Optional[str] = request.query_params.get('device_id')
             if not device_id:
                 return Response({
                     'status': 'error',
@@ -1011,7 +957,7 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
             
             # 获取所有代币余额，包括隐藏的
-            balances = await balance_service.get_all_token_balances(wallet.address, include_hidden=True)
+            balances = await balance_service.get_all_token_balances(wallet.address, include_hidden=True)# type: ignore
             
             return Response({
                 'status': 'success',
@@ -1027,18 +973,18 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='tokens/toggle-visibility')
     @async_to_sync_api
-    async def toggle_token_visibility(self, request, pk=None):
+    async def toggle_token_visibility(self, request: Any, pk: Union[int, str]) -> Response:
         """切换代币的显示状态"""
         try:
             # 获取请求参数
-            device_id = request.query_params.get('device_id')
+            device_id: Optional[str] = request.query_params.get('device_id')
             if not device_id:
                 return Response({
                     'status': 'error',
                     'message': '缺少设备ID'
                 }, status=400)
                 
-            token_address = request.data.get('token_address')
+            token_address: Optional[str] = request.data.get('token_address')
             if not token_address:
                 return Response({
                     'status': 'error',
