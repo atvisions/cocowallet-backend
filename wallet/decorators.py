@@ -4,8 +4,16 @@ from rest_framework import status
 import logging
 from typing import Any, Callable
 from .models import PaymentPassword
+from asgiref.sync import async_to_sync
 
 logger = logging.getLogger(__name__)
+
+def async_to_sync_api(func):
+    """装饰器：将异步API转换为同步API"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return async_to_sync(func)(*args, **kwargs)
+    return wrapper
 
 def verify_payment_password():
     """验证支付密码的装饰器

@@ -844,14 +844,16 @@ class WalletViewSet(viewsets.ModelViewSet):
                     # 如果钱包存在但已被删除，重新激活它
                     existing_wallet.is_active = True
                     decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
+                    # 确保 decrypted_password 是字符串类型
+                    if isinstance(decrypted_password, bytes):
+                        decrypted_password = decrypted_password.decode('utf-8')
                     existing_wallet.encrypted_private_key = self.encrypt_data(private_key_to_store, decrypted_password)
                     existing_wallet.save()
                     return Response({
                         'status': 'success',
-                        'message': '钱包已重新激活',
                         'wallet': WalletSerializer(existing_wallet).data
                     })
-                
+            
             # 生成随机头像
             from ..serializers import generate_avatar
             avatar_image = generate_avatar()
@@ -859,17 +861,13 @@ class WalletViewSet(viewsets.ModelViewSet):
             avatar_image.save(avatar_io, format='PNG')
             avatar_file = ContentFile(avatar_io.getvalue())
             
-            # 如果未提供名称，生成默认名称
-            if not name:
-                existing_wallets = Wallet.objects.filter(
-                    device_id=device_id,
-                    chain=chain,
-                    is_active=True
-                ).count()
-                name = f"Imported {chain} Wallet {existing_wallets + 1}"
+            # 使用支付密码加密私钥
+            decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
+            # 确保 decrypted_password 是字符串类型
+            if isinstance(decrypted_password, bytes):
+                decrypted_password = decrypted_password.decode('utf-8')
             
             # 创建钱包
-            decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
             wallet = Wallet.objects.create(
                 device_id=device_id,
                 name=name,

@@ -2,6 +2,9 @@ from typing import Dict, List
 import os
 from enum import Enum
 from dataclasses import dataclass
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Chain(str, Enum):
     """支持的区块链枚举"""
@@ -212,6 +215,7 @@ class MoralisConfig:
     def get_headers(cls) -> Dict:
         """获取请求头"""
         if not cls.API_KEY:
+            logger.error("未配置 MORALIS_API_KEY")
             raise ValueError("未配置 MORALIS_API_KEY")
             
         return {
@@ -225,6 +229,7 @@ class MoralisConfig:
         """获取链 ID"""
         chain_id = cls.CHAIN_MAPPING.get(chain)
         if not chain_id:
+            logger.error(f"不支持的链: {chain}")
             raise ValueError(f"不支持的链: {chain}")
         return chain_id
 
@@ -246,50 +251,82 @@ class MoralisConfig:
         from aiohttp import ClientTimeout
         
         if retry_count >= cls.MAX_RETRIES:
+            logger.error(f"达到最大重试次数: {cls.MAX_RETRIES}")
             raise Exception(f"达到最大重试次数: {cls.MAX_RETRIES}")
             
         try:
+            logger.debug(f"发送请求到 Moralis API: {url}")
+            logger.debug(f"请求参数: {params}")
+            logger.debug(f"请求方法: {method}")
+            logger.debug(f"重试次数: {retry_count}")
+            
             timeout = ClientTimeout(total=cls.TIMEOUT)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 if method == 'GET':
                     async with session.get(url, headers=cls.get_headers(), params=params) as response:
+                        response_text = await response.text()
+                        logger.debug(f"Moralis API 响应状态码: {response.status}")
+                        logger.debug(f"Moralis API 响应头: {response.headers}")
+                        logger.debug(f"Moralis API 响应内容: {response_text}")
+                        
                         if response.status == 429:  # Rate limit
                             wait_time = int(response.headers.get('Retry-After', cls.RETRY_INTERVAL))
+                            logger.warning(f"触发 Moralis API 限流，等待 {wait_time} 秒后重试")
                             await asyncio.sleep(wait_time)
                             return await cls.make_request(url, params, method, retry_count + 1)
                             
-                        response_text = await response.text()
                         if response.status != 200:
                             if retry_count < cls.MAX_RETRIES:
+                                logger.warning(f"Moralis API 请求失败，状态码: {response.status}，{retry_count + 1} 秒后重试")
                                 await asyncio.sleep(cls.RETRY_INTERVAL)
                                 return await cls.make_request(url, params, method, retry_count + 1)
+                            logger.error(f"Moralis API 请求失败: {response_text}")
                             raise Exception(f"请求失败: {response_text}")
                             
-                        return await response.json()
+                        try:
+                            return await response.json()
+                        except Exception as e:
+                            logger.error(f"解析 Moralis API 响应 JSON 失败: {str(e)}")
+                            raise Exception(f"解析响应数据失败: {str(e)}")
                 else:
                     async with session.post(url, headers=cls.get_headers(), json=params) as response:
+                        response_text = await response.text()
+                        logger.debug(f"Moralis API 响应状态码: {response.status}")
+                        logger.debug(f"Moralis API 响应头: {response.headers}")
+                        logger.debug(f"Moralis API 响应内容: {response_text}")
+                        
                         if response.status == 429:  # Rate limit
                             wait_time = int(response.headers.get('Retry-After', cls.RETRY_INTERVAL))
+                            logger.warning(f"触发 Moralis API 限流，等待 {wait_time} 秒后重试")
                             await asyncio.sleep(wait_time)
                             return await cls.make_request(url, params, method, retry_count + 1)
                             
-                        response_text = await response.text()
                         if response.status != 200:
                             if retry_count < cls.MAX_RETRIES:
+                                logger.warning(f"Moralis API 请求失败，状态码: {response.status}，{retry_count + 1} 秒后重试")
                                 await asyncio.sleep(cls.RETRY_INTERVAL)
                                 return await cls.make_request(url, params, method, retry_count + 1)
+                            logger.error(f"Moralis API 请求失败: {response_text}")
                             raise Exception(f"请求失败: {response_text}")
                             
-                        return await response.json()
+                        try:
+                            return await response.json()
+                        except Exception as e:
+                            logger.error(f"解析 Moralis API 响应 JSON 失败: {str(e)}")
+                            raise Exception(f"解析响应数据失败: {str(e)}")
                         
         except asyncio.TimeoutError:
+            logger.error(f"Moralis API 请求超时")
             if retry_count < cls.MAX_RETRIES:
+                logger.warning(f"请求超时，{retry_count + 1} 秒后重试")
                 await asyncio.sleep(cls.RETRY_INTERVAL)
                 return await cls.make_request(url, params, method, retry_count + 1)
             raise Exception("请求超时")
             
         except Exception as e:
+            logger.error(f"Moralis API 请求出错: {str(e)}")
             if retry_count < cls.MAX_RETRIES:
+                logger.warning(f"请求出错，{retry_count + 1} 秒后重试")
                 await asyncio.sleep(cls.RETRY_INTERVAL)
                 return await cls.make_request(url, params, method, retry_count + 1)
             raise e
@@ -340,8 +377,8 @@ class MoralisConfig:
 class HeliusConfig:
     """Helius API 配置"""
     API_KEY = os.getenv('HELIUS_API_KEY', '')
-    BASE_URL = f"https://rpc.helius.xyz/?api-key={API_KEY}"
-
+    BASE_URL = "https://api.helius.xyz/v0"
+    
     # RPC 方法
     GET_ASSETS_BY_OWNER = "getAssetsByOwner"  # 获取用户的所有资产
     GET_TOKEN_ACCOUNTS = "getTokenAccounts"  # 获取代币账户
@@ -349,10 +386,55 @@ class HeliusConfig:
     GET_TOKEN_METADATA = "getTokenMetadata"  # 获取代币元数据
     GET_TOKEN_PRICES = "getTokenPrices"  # 获取代币价格
     
+    # 转账记录接口
+    TRANSACTIONS_URL = f"{BASE_URL}/addresses/{{address}}/transactions"  # 使用 transactions 端点
+    
     @classmethod
     def get_rpc_url(cls) -> str:
         """获取 RPC URL"""
-        return cls.BASE_URL
+        return f"https://rpc.helius.xyz/?api-key={cls.API_KEY}"
+    
+    @classmethod
+    def get_headers(cls) -> Dict:
+        """获取请求头
+        
+        Returns:
+            Dict: 请求头
+        """
+        return {
+            'Content-Type': 'application/json'
+        }
+        
+    @classmethod
+    def get_transactions_url(cls, address: str, before: str = None) -> str:
+        """获取交易记录URL
+        
+        Args:
+            address: 钱包地址
+            before: 分页参数，上一页最后一条记录的签名
+            
+        Returns:
+            str: 完整的API URL
+        """
+        params = {
+            'api-key': cls.API_KEY,
+            'type': ['TRANSFER', 'TOKEN_TRANSFER', 'NFT_TRANSFER', 'NFT_MINT', 'NFT_BURN', 'NFT_SALE', 'SWAP'],  # 指定交易类型
+            'commitment': 'confirmed',  # 只获取已确认的交易
+            'limit': '100'  # 每页返回的记录数
+        }
+        
+        if before:
+            params['before'] = before
+            
+        base_url = cls.TRANSACTIONS_URL.format(address=address)
+        query_params = []
+        for k, v in params.items():
+            if v:
+                if isinstance(v, list):
+                    query_params.append(f"{k}={','.join(v)}")
+                else:
+                    query_params.append(f"{k}={v}")
+        return f"{base_url}?{'&'.join(query_params)}"
 
 class APIConfig:
     """API 配置类"""

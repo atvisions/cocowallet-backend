@@ -412,6 +412,8 @@ class PaymentPassword(models.Model):
     """支付密码模型"""
     device_id = models.CharField(max_length=100, unique=True, verbose_name='设备ID')
     encrypted_password = models.CharField(max_length=255, verbose_name='加密的支付密码')
+    is_biometric_enabled = models.BooleanField(default=False, verbose_name='是否启用生物密码')
+    biometric_verified_at = models.DateTimeField(null=True, blank=True, verbose_name='最后生物密码验证时间')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
 
@@ -503,6 +505,50 @@ class PaymentPassword(models.Model):
                 
         except Exception as e:
             logger.error(f"验证支付密码失败: {str(e)}")
+            return False
+
+    def enable_biometric(self) -> bool:
+        """启用生物密码
+        
+        Returns:
+            bool: 是否成功启用
+        """
+        try:
+            self.is_biometric_enabled = True
+            self.save()
+            return True
+        except Exception as e:
+            logger.error(f"启用生物密码失败: {str(e)}")
+            return False
+
+    def disable_biometric(self) -> bool:
+        """禁用生物密码
+        
+        Returns:
+            bool: 是否成功禁用
+        """
+        try:
+            self.is_biometric_enabled = False
+            self.biometric_verified_at = None
+            self.save()
+            return True
+        except Exception as e:
+            logger.error(f"禁用生物密码失败: {str(e)}")
+            return False
+
+    def update_biometric_verified_time(self) -> bool:
+        """更新生物密码验证时间
+        
+        Returns:
+            bool: 是否成功更新
+        """
+        try:
+            from django.utils import timezone
+            self.biometric_verified_at = timezone.now()
+            self.save()
+            return True
+        except Exception as e:
+            logger.error(f"更新生物密码验证时间失败: {str(e)}")
             return False
 
 class TokenIndex(models.Model):
