@@ -397,16 +397,83 @@ class Transaction(models.Model):
 class MnemonicBackup(models.Model):
     """助记词备份模型"""
     device_id = models.CharField(max_length=100, verbose_name='设备ID')
+    chain = models.CharField(max_length=20, verbose_name='区块链')
     encrypted_mnemonic = models.TextField(verbose_name='加密助记词')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    
+    _payment_password = None
+    
+    @property
+    def payment_password(self):
+        return self._payment_password
+        
+    @payment_password.setter
+    def payment_password(self, value):
+        self._payment_password = value
+    
+    def decrypt_mnemonic(self) -> str:
+        """解密助记词，根据不同链类型处理"""
+        if not self.encrypted_mnemonic:
+            logger.error("没有加密的助记词")
+            raise ValueError("没有加密的助记词")
+            
+        try:
+            # 获取支付密码
+            if not self.payment_password:
+                raise ValueError("未提供支付密码")
+            
+            # 使用 Fernet 解密助记词
+            from wallet.views.wallet import WalletViewSet
+            wallet_viewset = WalletViewSet()
+            decrypted = wallet_viewset.decrypt_data(self.encrypted_mnemonic, self.payment_password)
+            
+            # 确保解密后的数据是字符串类型
+            if isinstance(decrypted, bytes):
+                try:
+                    decrypted = decrypted.decode('utf-8')
+                except UnicodeDecodeError as e:
+                    logger.error(f"UTF-8解码失败: {str(e)}")
+                    raise ValueError("助记词解码失败")
+            elif not isinstance(decrypted, str):
+                logger.error(f"解密后的助记词类型无效: {type(decrypted)}")
+                raise ValueError("助记词类型无效")
+            
+            # 根据链类型处理助记词格式
+            if self.chain == 'SOL':
+                try:
+                    # 对于 Solana，助记词应该是空格分隔的单词
+                    words = decrypted.strip().split()
+                    if len(words) not in [12, 24]:
+                        raise ValueError(f"无效的助记词长度: {len(words)}个单词")
+                    return ' '.join(words)
+                except Exception as e:
+                    logger.error(f"验证SOL助记词失败: {str(e)}")
+                    raise ValueError(f"SOL助记词验证失败: {str(e)}")
+            elif self.chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
+                try:
+                    # 对于 EVM 链，助记词也是空格分隔的单词
+                    words = decrypted.strip().split()
+                    if len(words) not in [12, 15, 18, 21, 24]:
+                        raise ValueError(f"无效的助记词长度: {len(words)}个单词")
+                    return ' '.join(words)
+                except Exception as e:
+                    logger.error(f"验证EVM助记词失败: {str(e)}")
+                    raise ValueError(f"EVM助记词验证失败: {str(e)}")
+            else:
+                raise ValueError(f"不支持的链类型: {self.chain}")
+                
+        except Exception as e:
+            logger.error(f"解密助记词失败: {str(e)}")
+            raise ValueError(f"解密助记词失败: {str(e)}")
 
     class Meta:
         verbose_name = '助记词备份'
         verbose_name_plural = '助记词备份'
         ordering = ['-created_at']
+        unique_together = ['device_id', 'chain']
 
     def __str__(self):
-        return f"Backup for device {self.device_id}"
+        return f"Backup for device {self.device_id} on {self.chain}"
 
 class PaymentPassword(models.Model):
     """支付密码模型"""

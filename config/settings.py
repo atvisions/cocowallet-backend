@@ -23,6 +23,7 @@ ALLOWED_HOSTS = ["*"]
 INSTALLED_APPS = [
     'jet.dashboard',  # 必须在 jet 之前
     'jet',  # 必须在 django.contrib.admin 之前
+    'corsheaders',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -37,13 +38,17 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
-
+CORS_ALLOWED_ORIGINS = [
+    "http://192.168.3.16:8081",  # Expo Go
+    "http://192.168.3.3",
+]
 ROOT_URLCONF = 'config.urls'
 
 TEMPLATES = [
@@ -209,9 +214,7 @@ SUPPORTED_CHAINS = {
     }
 }
 
-# Moralis API配置
-MORALIS_API_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IjZiNGRlNzlkLTc3YzctNGM1Ny04MDE4LTNmYzk1OGUxOTBiYSIsIm9yZ0lkIjoiNDI4MzE0IiwidXNlcklkIjoiNDQwNTc1IiwidHlwZUlkIjoiNDE4MjdjY2UtYmNhMi00YjZiLTgzMmUtMDE1ZWNmZGMwODZkIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3MzgyNDY2NDYsImV4cCI6NDg5NDAwNjY0Nn0.fj9LXbkQcSLMLIjoeD6IXkLLVigPQx3wNaSiUzfQkl8'  # 请替换为您的实际API密钥
-MORALIS_API_URL = 'https://deep-index.moralis.io/api/v2'
+
 
 # 日志配置
 LOGGING = {

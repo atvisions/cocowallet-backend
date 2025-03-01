@@ -736,6 +736,16 @@ class WalletViewSet(viewsets.ModelViewSet):
         name = request.data.get('name')
         payment_password = request.data.get('payment_password')
         
+        # 如果未提供name参数，生成默认的钱包名称
+        if not name:
+            # 获取同类型钱包的数量
+            existing_count = Wallet.objects.filter(
+                device_id=device_id,
+                chain=chain,
+                is_active=True
+            ).count()
+            name = f"{chain} Wallet {existing_count + 1}"
+        
         if not all([device_id, chain, private_key, payment_password]):
             return Response({
                 'status': 'error',
