@@ -3,8 +3,12 @@ import os
 from enum import Enum
 from dataclasses import dataclass
 import logging
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+# 强制设置环境变量（仅用于测试）
+os.environ['MORALIS_API_KEY'] = 'your-api-key-here'
 
 class Chain(str, Enum):
     """支持的区块链枚举"""
@@ -195,7 +199,7 @@ class RPCConfig:
 
 class MoralisConfig:
     """Moralis API 配置"""
-    API_KEY: str = os.getenv('MORALIS_API_KEY', '')
+    API_KEY: str = settings.MORALIS_API_KEY  # 从 Django settings 获取
     BASE_URL: str = 'https://deep-index.moralis.io/api/v2.2'
     SOLANA_URL: str = 'https://solana-gateway.moralis.io'
     
@@ -218,11 +222,13 @@ class MoralisConfig:
             logger.error("未配置 MORALIS_API_KEY")
             raise ValueError("未配置 MORALIS_API_KEY")
             
-        return {
+        headers = {
             "accept": "application/json",
             "content-type": "application/json",
             "X-API-Key": cls.API_KEY
         }
+        logger.debug(f"Moralis headers: {headers}")
+        return headers
     
     @classmethod
     def get_chain_id(cls, chain: str) -> str:
@@ -376,8 +382,8 @@ class MoralisConfig:
 
 class HeliusConfig:
     """Helius API 配置"""
-    API_KEY = os.getenv('HELIUS_API_KEY', '')
-    BASE_URL = "https://api.helius.xyz/v0"
+    API_KEY = os.getenv('HELIUS_API_KEY')
+    BASE_URL = "https://api.helius.xyz/v0"  # Helius API 基础URL
     
     # RPC 方法
     GET_ASSETS_BY_OWNER = "getAssetsByOwner"  # 获取用户的所有资产
@@ -435,6 +441,17 @@ class HeliusConfig:
                 else:
                     query_params.append(f"{k}={v}")
         return f"{base_url}?{'&'.join(query_params)}"
+
+class CoinGeckoConfig:
+    """CoinGecko API 配置"""
+    BASE_URL = "https://api.coingecko.com/api/v3"
+    
+    # 代币ID映射
+    TOKEN_ID_MAP = {
+        'So11111111111111111111111111111111111111112': 'solana',  # SOL
+        'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'usd-coin',  # USDC
+        'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'bonk',  # BONK
+    }
 
 class APIConfig:
     """API 配置类"""

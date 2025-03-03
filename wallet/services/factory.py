@@ -50,14 +50,12 @@ class ChainServiceFactory:
         return cls._token_info_services[chain]
     
     @classmethod
-    def get_transfer_service(cls, chain: str) -> Union[EVMTransferService, SolanaTransferService]:
+    def get_transfer_service(cls, chain: str) -> Any:
         """获取转账服务"""
-        if chain not in cls._transfer_services:
-            if chain == 'SOL':
-                cls._transfer_services[chain] = SolanaTransferService()
-            else:
-                cls._transfer_services[chain] = EVMTransferService(chain)
-        return cls._transfer_services[chain]
+        if chain == 'SOL':
+            from .solana.transfer import SolanaTransferService
+            return SolanaTransferService()
+        # ... 其他链的处理 ...
     
     @classmethod
     def get_swap_service(cls, chain: str) -> Union[EVMSwapService, SolanaSwapService]:

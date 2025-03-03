@@ -4,6 +4,21 @@ Django settings for coco_wallet project.
 
 from pathlib import Path
 import os
+from dotenv import load_dotenv
+import logging
+
+# 加载 .env 文件
+env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+load_dotenv(env_path)
+
+# 获取 API keys
+MORALIS_API_KEY = os.getenv('MORALIS_API_KEY')
+ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
+HELIUS_API_KEY = os.getenv('HELIUS_API_KEY')
+
+# 确保必要的 API key 存在
+if not MORALIS_API_KEY:
+    raise Exception("MORALIS_API_KEY not found in environment variables")
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -214,8 +229,6 @@ SUPPORTED_CHAINS = {
     }
 }
 
-
-
 # 日志配置
 LOGGING = {
     'version': 1,
@@ -249,3 +262,9 @@ LOGGING = {
         },
     },
 }
+
+# 在 settings.py 中添加调试日志
+logger = logging.getLogger(__name__)
+
+logger.debug(f"Loading .env from: {env_path}")
+logger.debug(f"MORALIS_API_KEY loaded: {'*' * len(MORALIS_API_KEY) if MORALIS_API_KEY else 'Not found'}")

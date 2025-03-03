@@ -100,115 +100,67 @@ class SolanaTransferService:
             return self._session
         
     async def _fetch_with_retry(self, method: str, *args, **kwargs) -> Any:
-        """
-        带重试的 RPC 请求
+        """带重试的 RPC 请求"""
+        max_retries = kwargs.pop('max_retries', self.max_retries)
+        timeout = kwargs.pop('timeout', self.timeout.total)
         
-        Args:
-            method: RPC 方法名
-            *args: 位置参数
-            **kwargs: 关键字参数
-            
-        Returns:
-            Any: 响应数据
-        """
-        max_retries = kwargs.pop('max_retries', 3)
-        timeout = kwargs.pop('timeout', 30)
-        
-        # 构建 JSON-RPC 2.0 请求体
+        # 构建请求体
         params = kwargs.get('params', [])
-        
-        # 确保参数格式正确
-        if isinstance(params, (dict, list)):
-            if isinstance(params, dict):
-                params = [params]
-        elif isinstance(params, str):
-            try:
-                parsed_params = json.loads(params)
-                if isinstance(parsed_params, dict):
-                    params = [parsed_params]
-                else:
-                    params = parsed_params if isinstance(parsed_params, list) else [parsed_params]
-            except json.JSONDecodeError:
-                params = [params] if params else []
-        else:
-            params = [params] if params is not None else []
-        
         payload = {
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": int(time.time() * 1000),  # 使用时间戳作为唯一ID
             "method": method,
             "params": params
         }
 
-        session = await self._get_session()
+        # 添加备用RPC节点
+        rpc_urls = [self.primary_rpc_url] + self.backup_rpc_urls
+        
         for attempt in range(max_retries):
-            try:
-                async with session.post(
-                    self.current_rpc_url,
-                    json=payload,
-                    timeout=timeout
-                ) as response:
-                    response_text = await response.text()
-                    logger.info(f"响应状态码: {response.status}")
-                    logger.debug(f"响应内容: {response_text}")
-                    
-                    if response.status == 200:
-                        result = await response.json()
-                        
-                        if 'error' in result:
-                            error = result['error']
-                            error_msg = error.get('message', str(error))
-                            logger.error(f"RPC 请求错误: {error_msg}")
-                            
-                            if any(err in error_msg for err in ['BlockhashNotFound', 'Rate limit exceeded']):
-                                if attempt < max_retries - 1:
-                                    wait_time = 2 ** attempt
-                                    logger.warning(f"将在 {wait_time} 秒后重试请求")
-                                    await asyncio.sleep(wait_time)
-                                    continue
-                            
-                            raise TransferError(f"RPC 请求失败: {error_msg}")
-                        
-                        return result.get('result')
-                    
-                    elif response.status == 429:  # 速率限制
-                        if attempt < max_retries - 1:
+            for rpc_url in rpc_urls:
+                try:
+                    session = await self._get_session()
+                    async with session.post(
+                        rpc_url,
+                        json=payload,
+                        timeout=timeout
+                    ) as response:
+                        if response.status == 429:  # 速率限制
                             wait_time = int(response.headers.get('Retry-After', 2 ** attempt))
-                            logger.warning(f"触发速率限制，将在 {wait_time} 秒后重试")
+                            logger.warning(f"RPC节点 {rpc_url} 触发速率限制,等待 {wait_time} 秒")
                             await asyncio.sleep(wait_time)
                             continue
+                            
+                        if response.status == 200:
+                            result = await response.json()
+                            if 'error' in result:
+                                error = result['error']
+                                error_msg = error.get('message', str(error))
+                                
+                                if 'BlockhashNotFound' in error_msg:
+                                    logger.warning(f"区块哈希已过期,重试请求")
+                                    break  # 尝试下一个重试
+                                    
+                                raise TransferError(f"RPC请求失败: {error_msg}")
+                                
+                            return result.get('result')
+                            
+                        logger.error(f"HTTP {response.status}: {await response.text()}")
                         
-                        raise TransferError("触发速率限制，请稍后重试")
+                except asyncio.TimeoutError:
+                    logger.warning(f"RPC节点 {rpc_url} 超时")
+                    continue
                     
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"HTTP {response.status}: {error_text}")
-                        
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2 ** attempt)
-                            continue
-                        
-                        raise TransferError(f"HTTP 请求失败: {response.status}")
-                        
-            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-                logger.error(f"请求异常: {str(e)}")
-                
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                except Exception as e:
+                    logger.error(f"请求RPC节点 {rpc_url} 失败: {str(e)}")
                     continue
-                
-                raise TransferError(f"连接失败: {str(e)}")
-            
-            except Exception as e:
-                logger.error(f"未知错误: {str(e)}")
-                
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                
-                raise TransferError(f"请求失败: {str(e)}")
+                    
+            # 所有节点都失败,等待后重试
+            wait_time = min(2 ** attempt, self.max_delay)
+            logger.warning(f"所有RPC节点请求失败,等待 {wait_time} 秒后重试")
+            await asyncio.sleep(wait_time)
         
-        raise TransferError("请求重试次数已达上限")
+        raise TransferError("多次重试后仍无法完成RPC请求")
 
     async def _get_recent_blockhash(self) -> str:
         """获取最新区块哈希"""
@@ -476,6 +428,67 @@ class SolanaTransferService:
                 
         raise TransferError("多次尝试后仍无法创建代币账户")
 
+    async def _get_transaction_details(self, tx_hash: str) -> Dict[str, Any]:
+        """获取详细的交易信息"""
+        try:
+            response = await self._fetch_with_retry(
+                'getTransaction',
+                params=[
+                    tx_hash,
+                    {"commitment": "confirmed", "encoding": "json"}
+                ],
+                max_retries=3
+            )
+            
+            if response and isinstance(response, dict):
+                meta = response.get('meta', {})
+                transaction = response.get('transaction', {})
+                message = transaction.get('message', {})
+                
+                # 获取代币转账信息
+                token_transfers = []
+                if meta and 'postTokenBalances' in meta and 'preTokenBalances' in meta:
+                    pre_balances = {
+                        b['mint']: b['uiTokenAmount'] 
+                        for b in meta['preTokenBalances']
+                    }
+                    post_balances = {
+                        b['mint']: b['uiTokenAmount']
+                        for b in meta['postTokenBalances']
+                    }
+                    
+                    for mint in set(pre_balances.keys()) | set(post_balances.keys()):
+                        pre = pre_balances.get(mint, {'uiAmount': 0})
+                        post = post_balances.get(mint, {'uiAmount': 0})
+                        token_transfers.append({
+                            'mint': mint,
+                            'pre_amount': str(pre['uiAmount']),
+                            'post_amount': str(post['uiAmount']),
+                            'decimals': pre.get('decimals', post.get('decimals')),
+                        })
+                
+                return {
+                    'status': 'success' if not meta.get('err') else 'failed',
+                    'error': str(meta.get('err')) if meta.get('err') else None,
+                    'fee': meta.get('fee', 0),
+                    'block_time': response.get('blockTime'),
+                    'block_slot': response.get('slot'),
+                    'recent_blockhash': message.get('recentBlockhash'),
+                    'compute_units_consumed': meta.get('computeUnitsConsumed'),
+                    'logs': meta.get('logMessages', []),
+                    'token_transfers': token_transfers,
+                    'pre_balances': meta.get('preBalances', []),
+                    'post_balances': meta.get('postBalances', []),
+                    'confirmations': response.get('confirmations', 0),
+                    'signature': tx_hash,
+                }
+                
+            return {}
+            
+        except Exception as e:
+            logger.error(f"获取交易详情失败: {str(e)}")
+            return {}
+
     async def transfer_native(self, from_address: str, to_address: str, amount: Decimal, private_key: str) -> Dict[str, Any]:
         """转账原生SOL代币"""
         try:
@@ -551,7 +564,7 @@ class SolanaTransferService:
                         tx_hash = response
                     
                     # 等待交易确认
-                    confirmation_status = await self._confirm_transaction(tx_hash)
+                    confirmation_status = await self._confirm_transaction(str(tx_hash))
                     if not confirmation_status:
                         if attempt < max_retries - 1:
                             logger.warning("交易未确认，重试交易")
@@ -560,7 +573,7 @@ class SolanaTransferService:
                         raise TransferError("交易未被确认")
                     
                     # 获取交易详情
-                    tx_info = await self._get_transaction(str(tx_hash))
+                    tx_details = await self._get_transaction_details(str(tx_hash))
                     
                     # 保存交易记录
                     await self._save_transaction(
@@ -569,14 +582,22 @@ class SolanaTransferService:
                         amount=amount,
                         token_address=None,
                         tx_hash=str(tx_hash),
-                        tx_info=tx_info
+                        tx_info=tx_details
                     )
                     
                     return {
-                        'success': True,
+                        'success': tx_details.get('status') == 'success',
                         'transaction_hash': str(tx_hash),
-                        'block_hash': tx_info.get('blockhash', ''),
-                        'fee': str(tx_info.get('fee', 0))
+                        'status': tx_details.get('status', 'unknown'),
+                        'error': tx_details.get('error'),
+                        'fee': str(Decimal(tx_details.get('fee', 0)) / Decimal(1e9)),  # Convert lamports to SOL
+                        'block_time': tx_details.get('block_time'),
+                        'block_slot': tx_details.get('block_slot'),
+                        'confirmations': tx_details.get('confirmations'),
+                        'compute_units': tx_details.get('compute_units_consumed'),
+                        'logs': tx_details.get('logs', []),
+                        'pre_balance': str(Decimal(tx_details.get('pre_balances', [0])[0]) / Decimal(1e9)),
+                        'post_balance': str(Decimal(tx_details.get('post_balances', [0])[0]) / Decimal(1e9)),
                     }
                     
                 except Exception as e:
@@ -590,7 +611,12 @@ class SolanaTransferService:
             
         except Exception as e:
             logger.error(f"SOL转账失败: {str(e)}")
-            raise TransferError(f"转账失败: {str(e)}")
+            return {
+                'success': False,
+                'status': 'failed',
+                'error': str(e),
+                'transaction_hash': None
+            }
 
     async def transfer_token(self, from_address: str, to_address: str, token_address: str, amount: Decimal, private_key: str) -> Dict[str, Any]:
         """SPL代币转账"""
@@ -679,12 +705,12 @@ class SolanaTransferService:
                 raise TransferError("无法获取交易哈希")
             
             # 等待交易确认
-            confirmation_status = await self._confirm_transaction(tx_hash)
+            confirmation_status = await self._confirm_transaction(str(tx_hash))
             if not confirmation_status:
                 raise TransferError("交易未被确认")
             
             # 获取交易详情
-            tx_info = await self._get_transaction(str(tx_hash))
+            tx_details = await self._get_transaction_details(str(tx_hash))
             
             # 保存交易记录
             await self._save_transaction(
@@ -693,19 +719,43 @@ class SolanaTransferService:
                 amount=amount,
                 token_address=token_address,
                 tx_hash=str(tx_hash),
-                tx_info=tx_info
+                tx_info=tx_details
+            )
+            
+            # 获取代币转账信息
+            token_transfer = next(
+                (t for t in tx_details.get('token_transfers', []) 
+                 if t['mint'] == token_address),
+                {}
             )
             
             return {
-                'success': True,
+                'success': tx_details.get('status') == 'success',
                 'transaction_hash': str(tx_hash),
-                'block_hash': tx_info.get('blockhash', ''),
-                'fee': str(tx_info.get('fee', 0))
+                'status': tx_details.get('status', 'unknown'),
+                'error': tx_details.get('error'),
+                'fee': str(Decimal(tx_details.get('fee', 0)) / Decimal(1e9)),
+                'block_time': tx_details.get('block_time'),
+                'block_slot': tx_details.get('block_slot'),
+                'confirmations': tx_details.get('confirmations'),
+                'compute_units': tx_details.get('compute_units_consumed'),
+                'logs': tx_details.get('logs', []),
+                'token_details': {
+                    'mint': token_address,
+                    'pre_amount': token_transfer.get('pre_amount'),
+                    'post_amount': token_transfer.get('post_amount'),
+                    'decimals': token_transfer.get('decimals'),
+                }
             }
             
         except Exception as e:
             logger.error(f"SPL代币转账失败: {str(e)}")
-            raise TransferError(f"转账失败: {str(e)}")
+            return {
+                'success': False,
+                'status': 'failed',
+                'error': str(e),
+                'transaction_hash': None
+            }
 
     async def estimate_native_transfer_fee(self, from_address: str, to_address: str, amount: Decimal) -> Decimal:
         """估算SOL转账费用"""
@@ -734,121 +784,46 @@ class SolanaTransferService:
             logger.error(f"地址验证失败: {str(e)}")
             return False
 
-    async def _confirm_transaction(self, tx_hash: Union[str, Dict[str, Any]], max_retries: int = 30) -> bool:
+    async def _confirm_transaction(self, tx_hash: str, max_retries: int = 30) -> bool:
         """确认交易是否成功"""
-        try:
-            # 处理 tx_hash 参数
-            if isinstance(tx_hash, dict):
-                if 'result' in tx_hash:
-                    tx_hash = str(tx_hash['result'])
-                elif 'transaction_hash' in tx_hash:
-                    tx_hash = str(tx_hash['transaction_hash'])
-                else:
-                    for key, value in tx_hash.items():
-                        if isinstance(value, str) and len(value) >= 86:
-                            tx_hash = value
-                            break
-                    else:
-                        logger.error(f"无法从响应中获取交易哈希: {tx_hash}")
-                        return False
-            
-            # 确保 tx_hash 是字符串类型
-            tx_hash = str(tx_hash).strip()
-            if not tx_hash:
-                logger.error("交易哈希为空")
-                return False
+        logger.info(f"开始确认交易: {tx_hash}")
+        
+        # 初始等待时间
+        await asyncio.sleep(5)
+        
+        for attempt in range(max_retries):
+            try:
+                response = await self._fetch_with_retry(
+                    'getTransaction',
+                    params=[
+                        tx_hash,
+                        {"commitment": "confirmed"}
+                    ],
+                    max_retries=3
+                )
                 
-            logger.info(f"开始确认交易: {tx_hash}")
-            
-            # 增加初始等待时间
-            await asyncio.sleep(5)
-            
-            for i in range(max_retries):
-                try:
-                    # 使用不同的确认方法
-                    confirmation_methods = [
-                        self._confirm_with_signature_status,
-                        self._confirm_with_transaction_status
-                    ]
-                    
-                    for method in confirmation_methods:
-                        try:
-                            status = await method(tx_hash)
-                            if status:
-                                logger.info(f"交易已确认: {tx_hash}")
-                                return True
-                        except Exception as method_error:
-                            logger.warning(f"确认方法 {method.__name__} 失败: {str(method_error)}")
-                            continue
-                    
-                    # 动态调整等待时间
-                    wait_time = min(2 * (i + 1), 10)
-                    logger.warning(f"第 {i + 1} 次确认: 交易尚未上链，等待 {wait_time} 秒")
-                    await asyncio.sleep(wait_time)
-                    
-                except Exception as e:
-                    logger.warning(f"第 {i + 1} 次确认交易状态失败: {str(e)}")
-                    await asyncio.sleep(2)
-            
-            logger.error(f"交易确认超时: {tx_hash}")
-            return False
-            
-        except Exception as e:
-            logger.error(f"确认交易状态时出错: {str(e)}")
-            return False
-            
-    async def _confirm_with_signature_status(self, tx_hash: str) -> bool:
-        """使用签名状态确认交易"""
-        try:
-            response = await self._fetch_with_retry(
-                'getTransaction',
-                params=[
-                    tx_hash,
-                    {
-                        "commitment": "confirmed",
-                        "maxSupportedTransactionVersion": 0
-                    }
-                ]
-            )
-            
-            if response and isinstance(response, dict):
-                result = response.get('result')
-                if result:
-                    meta = result.get('meta')
-                    if meta is not None:
-                        if meta.get('err'):
-                            logger.error(f"交易失败: {meta['err']}")
-                            return False
-                        return True
-            
-            return False
-            
-        except Exception as e:
-            logger.warning(f"获取交易状态失败: {str(e)}")
-            return False
-
-    async def _confirm_with_transaction_status(self, tx_hash: str) -> bool:
-        """使用交易状态确认交易"""
-        try:
-            response = await self.client.get_transaction(
-                tx_hash,
-                commitment=Commitment("finalized")
-            )
-            
-            if response and isinstance(response, dict):
-                result = response.get('result')
-                if result:
-                    meta = result.get('meta')
+                if response and isinstance(response, dict):
+                    meta = response.get('meta')
                     if meta is not None:
                         if meta.get('err'):
                             logger.error(f"交易执行失败: {meta['err']}")
                             return False
                         return True
-            return False
-            
-        except Exception as e:
-            logger.warning(f"获取交易状态失败: {str(e)}")
-            return False
+                        
+                # 动态调整等待时间
+                wait_time = min(2 * (attempt + 1), 10) 
+                logger.warning(f"第 {attempt + 1} 次确认: 交易尚未上链,等待 {wait_time} 秒")
+                await asyncio.sleep(wait_time)
+                
+            except Exception as e:
+                logger.error(f"确认交易状态失败: {str(e)}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                return False
+                
+        logger.error(f"交易确认超时: {tx_hash}")
+        return False
 
     async def _get_transaction(self, tx_hash: str) -> Dict[str, Any]:
         """获取交易详情"""
