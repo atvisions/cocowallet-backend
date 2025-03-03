@@ -11,11 +11,12 @@ import logging
 from functools import wraps
 from typing import Union, Optional, Dict, List, Any, cast
 from django.http import Http404
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
 from django.core.cache import cache
 from eth_account import Account
 from base58 import b58encode
 from django.core.exceptions import ObjectDoesNotExist
+import asyncio
 
 from ..models import Wallet, PaymentPassword, Token, Transaction
 from ..serializers import WalletSerializer
@@ -46,11 +47,10 @@ from ..decorators import verify_payment_password
 logger = logging.getLogger(__name__)
 
 def async_to_sync_api(func):
-    """异步转同步装饰器"""
+    """装饰器：将异步API转换为同步API"""
     @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        import asyncio
-        return asyncio.run(func(*args, **kwargs))
+    def wrapper(*args, **kwargs):
+        return async_to_sync(func)(*args, **kwargs)
     return wrapper
 
 class EVMWalletViewSet(viewsets.ModelViewSet):
@@ -64,16 +64,29 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
     async def get_wallet_async(self, wallet_id: Union[int, str], device_id: Optional[str] = None) -> Wallet:
         """获取钱包"""
         try:
-            filters = {'id': int(wallet_id) if isinstance(wallet_id, str) else wallet_id, 'is_active': True}
-            if device_id:
-                filters['device_id'] = device_id
+            # 使用sync_to_async包装数据库查询
+            get_wallet = sync_to_async(Wallet.objects.filter(
+                id=int(wallet_id) if isinstance(wallet_id, str) else wallet_id,
+                is_active=True
+            ).first)
             
-            wallet = await Wallet.objects.aget(**filters)
+            wallet = await get_wallet()
+            
             if not wallet:
-                raise Wallet.DoesNotExist()
+                logger.error(f"找不到钱包，ID: {wallet_id}")
+                raise ObjectDoesNotExist(f"找不到ID为{wallet_id}的钱包")
+            
+            # 验证device_id
+            if device_id and wallet.device_id != device_id:
+                logger.error(f"设备ID不匹配，钱包device_id: {wallet.device_id}, 请求device_id: {device_id}")
+                raise ObjectDoesNotExist("无权访问该钱包")
+            
+            logger.debug(f"成功获取钱包: {wallet.address}")
             return wallet
-        except Wallet.DoesNotExist:
-            raise ValueError('钱包不存在')
+            
+        except Exception as e:
+            logger.error(f"获取钱包时出错: {str(e)}")
+            raise
 
     @action(detail=True, methods=['get'])
     @async_to_sync_api
@@ -170,42 +183,67 @@ class EVMWalletViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['get'])
-    @async_to_sync_api
-    async def tokens(self, request: Any, pk: Union[int, str]) -> Response:
-        """获取所有代币余额"""
-        try:
-            device_id: Optional[str] = request.query_params.get('device_id')
-            if not device_id:
+    def tokens(self, request, pk=None):
+        """获取 EVM 钱包的所有代币余额"""
+        async def async_tokens():
+            try:
+                logger.debug("开始处理 EVM tokens 请求")
+                device_id = request.query_params.get('device_id')
+                if not device_id:
+                    logger.error("缺少 device_id 参数")
+                    return Response({
+                        'status': 'error',
+                        'message': '缺少device_id参数'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                logger.debug(f"获取钱包信息: pk={pk}, device_id={device_id}")
+                # 获取并验证钱包
+                try:
+                    wallet = await self.get_wallet_async(int(pk), device_id)
+                    logger.debug(f"成功获取钱包: {wallet.address}")
+                except Exception as wallet_error:
+                    logger.error(f"获取钱包失败: {str(wallet_error)}")
+                    raise
+                
+                if wallet.chain not in EVMUtils.CHAIN_CONFIG:
+                    logger.error(f"不支持的链类型: {wallet.chain}")
+                    return Response({
+                        'status': 'error',
+                        'message': '该接口仅支持EVM链钱包'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # 获取余额服务
+                logger.debug("获取余额服务")
+                balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
+                if not balance_service:
+                    logger.error("EVM余额服务不可用")
+                    return Response({
+                        'status': 'error',
+                        'message': 'EVM余额服务不可用'
+                    }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                
+                # 获取代币余额
+                logger.debug(f"开始获取代币余额: {wallet.address}")
+                try:
+                    result = await balance_service.get_all_token_balances(wallet.address, include_hidden=False)
+                    logger.debug(f"成功获取代币余额: {result}")
+                except Exception as balance_error:
+                    logger.error(f"获取代币余额失败: {str(balance_error)}")
+                    raise
+                
+                return Response({
+                    'status': 'success',
+                    'data': result
+                })
+                
+            except Exception as e:
+                logger.error(f"获取代币余额失败: {str(e)}")
                 return Response({
                     'status': 'error',
-                    'message': '缺少device_id参数'
-                }, status=status.HTTP_400_BAD_REQUEST)
+                    'message': f'获取代币余额失败: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # 获取钱包
-            wallet = await self.get_wallet_async(pk, device_id)
-            
-            # 验证是否是EVM链
-            if wallet.chain not in EVMUtils.CHAIN_CONFIG:
-                return Response({
-                    'status': 'error',
-                    'message': '不支持的链类型'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 获取余额服务
-            balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
-            tokens = await balance_service.get_all_token_balances(wallet.address)
-
-            return Response({
-                'status': 'success',
-                'data': tokens
-            })
-
-        except Exception as e:
-            logger.error(f"获取所有代币余额失败: {str(e)}")
-            return Response({
-                'status': 'error',
-                'message': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
+        return async_to_sync(async_tokens)()
 
     @action(detail=True, methods=['post'])
     @async_to_sync_api

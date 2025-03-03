@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_yasg',
     'wallet',
+    'channels',
 ]
 
 MIDDLEWARE = [
@@ -233,34 +234,22 @@ SUPPORTED_CHAINS = {
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
-        },
-        'simple': {
-            'format': '{levelname} {message}',
-            'style': '{',
-        },
-    },
     'handlers': {
         'console': {
             'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
         },
     },
+    'root': {
+        'handlers': ['console'],
+        'level': 'DEBUG',
+    },
     'loggers': {
-        'django': {
-            'handlers': ['console'],
-            'level': 'INFO',
-            'propagate': True,
-        },
         'wallet': {
             'handlers': ['console'],
             'level': 'DEBUG',
             'propagate': True,
         },
-    },
+    }
 }
 
 # 在 settings.py 中添加调试日志
@@ -268,3 +257,17 @@ logger = logging.getLogger(__name__)
 
 logger.debug(f"Loading .env from: {env_path}")
 logger.debug(f"MORALIS_API_KEY loaded: {'*' * len(MORALIS_API_KEY) if MORALIS_API_KEY else 'Not found'}")
+
+# ASGI 配置
+ASGI_APPLICATION = 'config.asgi.application'
+
+# 异步设置
+ASYNC_TIMEOUT = 30  # 30秒全局超时
+CONCURRENT_REQUESTS_PER_WORKER = 3
+
+# Channels 配置
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer'
+    }
+}

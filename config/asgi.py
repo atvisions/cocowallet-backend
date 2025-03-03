@@ -8,12 +8,11 @@ https://docs.djangoproject.com/en/4.2/howto/deployment/asgi/
 """
 
 import os
+import django
 from django.core.asgi import get_asgi_application
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+django.setup()
 
-# 初始化 Django ASGI 应用
-django_asgi_app = get_asgi_application()
-
-# 配置 ASGI 应用
-application = django_asgi_app
+# 直接使用 Django 的 ASGI application
+application = get_asgi_application()
