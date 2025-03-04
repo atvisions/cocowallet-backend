@@ -30,6 +30,32 @@ class ChainServiceFactory:
     _price_services: Dict[str, Union[EVMPriceService, SolanaPriceService]] = {}
     
     @classmethod
+    def get_service(cls, chain: str, service_type: str) -> Any:
+        """获取指定类型的链服务实例
+        
+        Args:
+            chain: 链类型（如'SOL'、'ETH'等）
+            service_type: 服务类型（如'balance'、'token_info'等）
+            
+        Returns:
+            对应的服务实例
+        """
+        service_map = {
+            'balance': cls.get_balance_service,
+            'token_info': cls.get_token_info_service,
+            'transfer': cls.get_transfer_service,
+            'swap': cls.get_swap_service,
+            'nft': cls.get_nft_service,
+            'history': cls.get_history_service,
+            'price': cls.get_price_service
+        }
+        
+        if service_type not in service_map:
+            raise ValueError(f'不支持的服务类型: {service_type}')
+            
+        return service_map[service_type](chain)
+    
+    @classmethod
     def get_balance_service(cls, chain: str) -> Union[EVMBalanceService, SolanaBalanceService]:
         """获取余额服务"""
         if chain not in cls._balance_services:

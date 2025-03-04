@@ -473,6 +473,7 @@ class SolanaTransferService:
                     'fee': meta.get('fee', 0),
                     'block_time': response.get('blockTime'),
                     'block_slot': response.get('slot'),
+                    'block_hash': message.get('recentBlockhash'),
                     'recent_blockhash': message.get('recentBlockhash'),
                     'compute_units_consumed': meta.get('computeUnitsConsumed'),
                     'logs': meta.get('logMessages', []),
@@ -488,6 +489,49 @@ class SolanaTransferService:
         except Exception as e:
             logger.error(f"获取交易详情失败: {str(e)}")
             return {}
+
+    async def get_transaction_status(self, tx_hash: str) -> Dict[str, Any]:
+        """获取交易状态
+        
+        Args:
+            tx_hash: 交易哈希
+            
+        Returns:
+            Dict: {
+                'status': 'success' | 'failed' | 'pending',
+                'confirmations': int,
+                'error': str | None,
+                'block_time': int | None,
+                'fee': int | None
+            }
+        """
+        try:
+            # 获取交易详情
+            tx_details = await self._get_transaction_details(tx_hash)
+            if not tx_details:
+                return {
+                    'status': 'pending',
+                    'confirmations': 0,
+                    'error': None,
+                    'block_time': None,
+                    'fee': None
+                }
+            
+            # 返回状态信息
+            return {
+                'status': tx_details.get('status', 'pending'),
+                'confirmations': tx_details.get('confirmations', 0),
+                'error': tx_details.get('error'),
+                'block_time': tx_details.get('block_time'),
+                'fee': tx_details.get('fee')
+            }
+            
+        except Exception as e:
+            logger.error(f"获取交易状态失败: {str(e)}")
+            return {
+                'status': 'error',
+                'message': f'获取交易状态失败: {str(e)}'
+            }
 
     async def transfer_native(self, from_address: str, to_address: str, amount: Decimal, private_key: str) -> Dict[str, Any]:
         """转账原生SOL代币"""
@@ -593,11 +637,12 @@ class SolanaTransferService:
                         'fee': str(Decimal(tx_details.get('fee', 0)) / Decimal(1e9)),  # Convert lamports to SOL
                         'block_time': tx_details.get('block_time'),
                         'block_slot': tx_details.get('block_slot'),
+                        'block_hash': tx_details.get('block_hash') or tx_details.get('recent_blockhash'),
                         'confirmations': tx_details.get('confirmations'),
                         'compute_units': tx_details.get('compute_units_consumed'),
                         'logs': tx_details.get('logs', []),
                         'pre_balance': str(Decimal(tx_details.get('pre_balances', [0])[0]) / Decimal(1e9)),
-                        'post_balance': str(Decimal(tx_details.get('post_balances', [0])[0]) / Decimal(1e9)),
+                        'post_balance': str(Decimal(tx_details.get('post_balances', [0])[0]) / Decimal(1e9))
                     }
                     
                 except Exception as e:

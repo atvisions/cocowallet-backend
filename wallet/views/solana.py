@@ -1159,4 +1159,44 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 'message': '获取代币管理列表失败'
             }, status=500)
 
+    @action(detail=True, methods=['get'], url_path='transaction-status')
+    @async_to_sync_api
+    async def transaction_status(self, request, pk=None):
+        """获取交易状态"""
+        try:
+            device_id = request.query_params.get('device_id')
+            tx_hash = request.query_params.get('tx_hash')
+            
+            if not device_id or not tx_hash:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=400)
+                
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            if not wallet:
+                return Response({
+                    'status': 'error',
+                    'message': '钱包不存在'
+                }, status=404)
+                
+            # 获取交易服务
+            chain_service = ChainServiceFactory.get_service(wallet.chain, 'transfer')
+            
+            # 获取交易状态
+            tx_status = await chain_service.get_transaction_status(tx_hash)
+            
+            return Response({
+                'status': 'success',
+                'data': tx_status
+            })
+            
+        except Exception as e:
+            logger.error(f"获取交易状态失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=400)
+
    
