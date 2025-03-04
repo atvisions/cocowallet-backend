@@ -535,6 +535,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             amount = request.data.get('amount')
             token_address = request.data.get('token_address')
             payment_password = request.data.get('payment_password')
+            token_info = request.data.get('token_info')  # 从请求中获取代币信息
             
             if not all([device_id, to_address, amount]):
                 return Response({
@@ -543,7 +544,7 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 获取并验证钱包
-            wallet = await self.get_wallet_async(int(pk), device_id) # type: ignore
+            wallet = await self.get_wallet_async(int(pk), device_id)
             logger.debug(f"请求转账，钱包地址: {wallet.address}, 接收地址: {to_address}, 金额: {amount}")
             
             if wallet.chain != 'SOL':
@@ -575,19 +576,19 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 执行转账
             try:
-                async with transfer_service:  # type: ignore # 使用异步上下文管理器
+                async with transfer_service:  # 使用异步上下文管理器
                     if token_address:
                         # SPL代币转账
                         result = await transfer_service.transfer_token(
                             from_address=wallet.address,
                             to_address=to_address,
                             token_address=token_address,
-                            amount=Decimal(amount), # type: ignore
+                            amount=Decimal(amount),
                             private_key=private_key
                         )
                     else:
                         # SOL原生代币转账
-                        result = await transfer_service.transfer_native( # type: ignore
+                        result = await transfer_service.transfer_native(
                             from_address=wallet.address,
                             to_address=to_address,
                             amount=Decimal(amount),
@@ -595,6 +596,37 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                         )
                 
                 if result.get('success'):
+                    # 创建交易记录
+                    tx_data = {
+                        'wallet': wallet,
+                        'chain': 'SOL',
+                        'tx_hash': result['transaction_hash'],
+                        'tx_type': 'TRANSFER',
+                        'status': 'SUCCESS',
+                        'from_address': wallet.address,
+                        'to_address': to_address,
+                        'amount': Decimal(amount),
+                        'gas_price': Decimal(result.get('fee', '0')),
+                        'gas_used': Decimal('1'),
+                        'block_number': result.get('block_slot', 0),
+                        'block_timestamp': timezone.now()
+                    }
+
+                    # 如果是代币转账,添加代币信息
+                    if token_address:
+                        try:
+                            token = await Token.objects.aget(chain='SOL', address=token_address)
+                            tx_data['token'] = token
+                        except Token.DoesNotExist:
+                            # 如果代币不存在,只保存代币地址
+                            tx_data['token_address'] = token_address
+                        
+                        if token_info:
+                            tx_data['token_info'] = token_info
+
+                    # 创建交易记录
+                    await Transaction.objects.acreate(**tx_data)
+                    
                     return Response({
                         'status': 'success',
                         'data': {

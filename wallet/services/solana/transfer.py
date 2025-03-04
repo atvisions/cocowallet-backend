@@ -634,7 +634,7 @@ class SolanaTransferService:
                         'transaction_hash': str(tx_hash),
                         'status': tx_details.get('status', 'unknown'),
                         'error': tx_details.get('error'),
-                        'fee': str(Decimal(tx_details.get('fee', 0)) / Decimal(1e9)),  # Convert lamports to SOL
+                        'fee': str(Decimal(tx_details.get('fee', 0)) / Decimal(1e9)),
                         'block_time': tx_details.get('block_time'),
                         'block_slot': tx_details.get('block_slot'),
                         'block_hash': tx_details.get('block_hash') or tx_details.get('recent_blockhash'),
@@ -663,27 +663,73 @@ class SolanaTransferService:
                 'transaction_hash': None
             }
 
+    async def _get_token_info(self, token_address: str) -> Dict[str, Any]:
+        """获取代币信息"""
+        try:
+            # 从数据库获取代币信息
+            try:
+                token = await Token.objects.aget(chain='SOL', address=token_address)
+                return {
+                    'name': token.name,
+                    'symbol': token.symbol,
+                    'decimals': token.decimals,
+                    'mint': token_address
+                }
+            except Token.DoesNotExist:
+                logger.warning(f"代币 {token_address} 在数据库中不存在")
+            
+            # 如果数据库中没有，从链上获取
+            response = await self._fetch_with_retry(
+                'getTokenMetadata',
+                params=[token_address]
+            )
+            
+            if response and isinstance(response, dict):
+                token_info = response.get('result', {})
+                if token_info:
+                    return {
+                        'name': token_info.get('name'),
+                        'symbol': token_info.get('symbol'),
+                        'decimals': token_info.get('decimals', 9),
+                        'mint': token_address
+                    }
+            
+            # 如果都获取不到，抛出异常
+            raise TransferError(f"无法获取代币 {token_address} 的信息")
+            
+        except Exception as e:
+            logger.error(f"获取代币信息失败: {str(e)}")
+            raise TransferError(f"获取代币信息失败: {str(e)}")
+
     async def transfer_token(self, from_address: str, to_address: str, token_address: str, amount: Decimal, private_key: str) -> Dict[str, Any]:
         """SPL代币转账"""
         try:
+            logger.info(f"开始处理转账请求: from={from_address}, to={to_address}, token={token_address}, amount={amount}")
+            
             # 验证地址
             if not self._is_valid_address(to_address):
+                logger.error(f"无效的接收地址: {to_address}")
                 raise InvalidAddressError("无效的接收地址")
             
             # 获取代币精度
             decimals = await self._get_token_decimals(token_address)
+            logger.info(f"代币精度: {decimals}")
             
             # 将金额转换为最小单位
             amount_in_smallest = int(amount * Decimal(str(10 ** decimals)))
+            logger.info(f"转换后的金额: {amount_in_smallest}")
             
             # 获取发送方代币账户地址
             from_token_account = await self._get_associated_token_address(from_address, token_address)
+            logger.info(f"发送方代币账户: {from_token_account}")
             
             # 获取接收方代币账户地址
             to_token_account = await self._get_associated_token_address(to_address, token_address)
+            logger.info(f"接收方代币账户: {to_token_account}")
             
             # 检查接收方代币账户是否存在
             to_account_exists = await self._check_token_account_exists(to_token_account)
+            logger.info(f"接收方账户是否存在: {to_account_exists}")
             
             # 构建交易指令列表
             instructions = []
@@ -729,69 +775,68 @@ class SolanaTransferService:
             transaction.sign(signer)
             
             # 发送交易
-            serialized_tx = base58.b58encode(transaction.serialize()).decode('utf-8')
+            logger.info("准备发送交易...")
             
-            # 使用 sendTransaction 方法发送交易
-            response = await self.client.send_raw_transaction(
-                transaction.serialize(),
-                opts=TxOpts(
-                    skip_preflight=True,
-                    max_retries=5
-                )
-            )
+            # 最大重试次数
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # 获取新的区块哈希
+                    if attempt > 0:
+                        recent_blockhash = await self._get_recent_blockhash()
+                        transaction.recent_blockhash = Blockhash(recent_blockhash)
+                    
+                    response = await self.client.send_transaction(
+                        transaction,
+                        signer,
+                        opts=TxOpts(
+                            skip_preflight=True,
+                            preflight_commitment=Commitment("confirmed")
+                        )
+                    )
+                    
+                    logger.info(f"第 {attempt + 1} 次发送交易响应: {response}")
+                    
+                    # 获取交易哈希
+                    tx_hash = response.get('result') if isinstance(response, dict) else response
+                    if not tx_hash:
+                        logger.error("无法获取交易哈希")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        raise TransferError("无法获取交易哈希")
+                    
+                    logger.info(f"交易已发送，hash: {tx_hash}")
+                    
+                    # 等待交易确认
+                    for confirm_attempt in range(5):  # 每次提交尝试5次确认
+                        confirmation_status = await self._confirm_transaction(str(tx_hash), max_retries=3)
+                        if confirmation_status:
+                            logger.info("交易确认成功")
+                            # 获取交易详情
+                            tx_details = await self._get_transaction_details(str(tx_hash))
+                            return {
+                                'success': True,
+                                'transaction_hash': str(tx_hash),
+                                'block_hash': tx_details.get('block_hash') or tx_details.get('recent_blockhash'),
+                                'fee': str(Decimal(tx_details.get('fee', 0)) / Decimal(1e9))
+                            }
+                        logger.warning(f"第 {confirm_attempt + 1} 次确认未成功，继续等待...")
+                        await asyncio.sleep(2)
+                    
+                    # 如果当前提交的确认都失败了，尝试下一次提交
+                    logger.warning(f"第 {attempt + 1} 次提交的交易未能确认，尝试重新提交...")
+                    await asyncio.sleep(2)
+                    continue
+                    
+                except Exception as e:
+                    logger.error(f"第 {attempt + 1} 次发送交易失败: {str(e)}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    raise TransferError(f"发送交易失败: {str(e)}")
             
-            if isinstance(response, dict) and 'error' in response:
-                error_msg = str(response.get('error', {}))
-                raise TransferError(f"发送交易失败: {error_msg}")
-            
-            # 获取交易哈希
-            tx_hash = response.get('result') if isinstance(response, dict) else response
-            if not tx_hash:
-                raise TransferError("无法获取交易哈希")
-            
-            # 等待交易确认
-            confirmation_status = await self._confirm_transaction(str(tx_hash))
-            if not confirmation_status:
-                raise TransferError("交易未被确认")
-            
-            # 获取交易详情
-            tx_details = await self._get_transaction_details(str(tx_hash))
-            
-            # 保存交易记录
-            await self._save_transaction(
-                wallet_address=from_address,
-                to_address=to_address,
-                amount=amount,
-                token_address=token_address,
-                tx_hash=str(tx_hash),
-                tx_info=tx_details
-            )
-            
-            # 获取代币转账信息
-            token_transfer = next(
-                (t for t in tx_details.get('token_transfers', []) 
-                 if t['mint'] == token_address),
-                {}
-            )
-            
-            return {
-                'success': tx_details.get('status') == 'success',
-                'transaction_hash': str(tx_hash),
-                'status': tx_details.get('status', 'unknown'),
-                'error': tx_details.get('error'),
-                'fee': str(Decimal(tx_details.get('fee', 0)) / Decimal(1e9)),
-                'block_time': tx_details.get('block_time'),
-                'block_slot': tx_details.get('block_slot'),
-                'confirmations': tx_details.get('confirmations'),
-                'compute_units': tx_details.get('compute_units_consumed'),
-                'logs': tx_details.get('logs', []),
-                'token_details': {
-                    'mint': token_address,
-                    'pre_amount': token_transfer.get('pre_amount'),
-                    'post_amount': token_transfer.get('post_amount'),
-                    'decimals': token_transfer.get('decimals'),
-                }
-            }
+            raise TransferError("多次尝试后交易仍未成功")
             
         except Exception as e:
             logger.error(f"SPL代币转账失败: {str(e)}")
@@ -829,46 +874,51 @@ class SolanaTransferService:
             logger.error(f"地址验证失败: {str(e)}")
             return False
 
-    async def _confirm_transaction(self, tx_hash: str, max_retries: int = 30) -> bool:
+    async def _confirm_transaction(self, tx_hash: str, max_retries: int = 15) -> bool:
         """确认交易是否成功"""
         logger.info(f"开始确认交易: {tx_hash}")
         
-        # 初始等待时间
-        await asyncio.sleep(5)
-        
-        for attempt in range(max_retries):
-            try:
-                response = await self._fetch_with_retry(
-                    'getTransaction',
-                    params=[
-                        tx_hash,
-                        {"commitment": "confirmed"}
-                    ],
-                    max_retries=3
-                )
-                
-                if response and isinstance(response, dict):
-                    meta = response.get('meta')
-                    if meta is not None:
-                        if meta.get('err'):
-                            logger.error(f"交易执行失败: {meta['err']}")
-                            return False
-                        return True
-                        
-                # 动态调整等待时间
-                wait_time = min(2 * (attempt + 1), 10) 
-                logger.warning(f"第 {attempt + 1} 次确认: 交易尚未上链,等待 {wait_time} 秒")
-                await asyncio.sleep(wait_time)
-                
-            except Exception as e:
-                logger.error(f"确认交易状态失败: {str(e)}")
-                if attempt < max_retries - 1:
+        try:
+            # 初始等待时间改回2秒
+            await asyncio.sleep(2)
+            
+            for attempt in range(max_retries):
+                try:
+                    logger.debug(f"获取交易状态: {tx_hash}, 尝试次数: {attempt + 1}")
+                    
+                    # 使用getSignatureStatuses替代getTransaction，更轻量级
+                    response = await self._fetch_with_retry(
+                        'getSignatureStatuses',
+                        params=[[tx_hash]],
+                        max_retries=1
+                    )
+                    
+                    if response and isinstance(response, dict):
+                        value = response.get('value', [{}])[0]
+                        if value:
+                            if value.get('err'):
+                                logger.error(f"交易执行失败: {value['err']}")
+                                return False
+                            if value.get('confirmationStatus') in ['confirmed', 'finalized']:
+                                logger.info(f"交易确认成功")
+                                return True
+                    
+                    # 固定等待2秒
                     await asyncio.sleep(2)
-                    continue
-                return False
-                
-        logger.error(f"交易确认超时: {tx_hash}")
-        return False
+                    
+                except Exception as e:
+                    logger.error(f"确认交易状态失败: {str(e)}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    return False
+            
+            logger.error(f"交易确认超时: {tx_hash}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"确认交易过程中发生错误: {str(e)}")
+            return False
 
     async def _get_transaction(self, tx_hash: str) -> Dict[str, Any]:
         """获取交易详情"""
@@ -891,28 +941,42 @@ class SolanaTransferService:
                               token_address: Optional[str], tx_hash: str, tx_info: Dict[str, Any]) -> None:
         """保存交易记录"""
         try:
-            wallet = await Wallet.objects.aget(address=wallet_address, chain='SOL', is_active=True)
-            token = None
-            if token_address:
-                token = await Token.objects.aget(chain='SOL', address=token_address)
+            logger.info("开始保存交易记录...")
+            logger.info(f"交易信息: wallet_address={wallet_address}, to_address={to_address}, amount={amount}")
+            logger.info(f"token_address={token_address}, tx_hash={tx_hash}")
+            logger.info(f"交易详情: {json.dumps(tx_info, indent=2)}")
             
-            await DBTransaction.objects.acreate(
-                wallet=wallet,
-                chain='SOL',
-                tx_hash=tx_hash,
-                tx_type='TRANSFER',
-                status='SUCCESS' if tx_info.get('status') == 'success' else 'FAILED',
-                from_address=wallet_address,
-                to_address=to_address,
-                amount=amount,
-                token=token,
-                gas_price=Decimal(str(tx_info.get('fee', 0) / 1e9)),  # 转换为 SOL
-                gas_used=Decimal('1'),
-                block_number=0,  # Solana 不使用区块号
-                block_timestamp=timezone.now()
-            )
+            # 获取钱包
+            wallet = await Wallet.objects.aget(address=wallet_address, chain='SOL', is_active=True)
+            logger.info(f"获取到钱包信息: {wallet.address}")
+            
+            # 准备交易记录数据
+            tx_data = {
+                'wallet': wallet,
+                'chain': 'SOL',
+                'tx_hash': tx_hash,
+                'tx_type': 'TRANSFER',
+                'status': 'SUCCESS' if tx_info.get('status') == 'success' else 'FAILED',
+                'from_address': wallet_address,
+                'to_address': to_address,
+                'amount': amount,
+                'token_address': token_address,
+                'gas_price': Decimal(str(tx_info.get('fee', 0) / 1e9)),
+                'gas_used': Decimal('1'),
+                'block_number': tx_info.get('block_slot', 0),
+                'block_timestamp': timezone.now()
+            }
+            logger.info(f"准备保存的交易数据: {json.dumps({k: str(v) for k, v in tx_data.items() if k != 'wallet'}, indent=2)}")
+            
+            # 创建交易记录
+            transaction = await DBTransaction.objects.acreate(**tx_data)
+            logger.info(f"交易记录创建成功: id={transaction.id}, tx_hash={tx_hash}")
+            
         except Exception as e:
             logger.error(f"保存交易记录失败: {str(e)}")
+            logger.error(f"错误类型: {type(e).__name__}")
+            # 不抛出异常，因为交易已经成功了
+            pass
 
     async def __aenter__(self):
         """异步上下文管理器入口"""
