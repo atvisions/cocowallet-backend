@@ -612,18 +612,34 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                         'block_timestamp': timezone.now()
                     }
 
-                    # 如果是代币转账,添加代币信息
+                    # 如果是代币转账，获取并添加代币信息
                     if token_address:
                         try:
-                            token = await Token.objects.aget(chain='SOL', address=token_address)
-                            tx_data['token'] = token
-                        except Token.DoesNotExist:
-                            # 如果代币不存在,只保存代币地址
+                            # 获取代币信息服务
+                            token_info_service = ChainServiceFactory.get_token_info_service('SOL')
+                            if token_info_service:
+                                # 获取代币元数据
+                                token_data = await token_info_service.get_token_metadata(token_address)
+                                if token_data and token_data.get('name'):
+                                    tx_data['token_info'] = {
+                                        'address': token_address,
+                                        'name': token_data.get('name'),
+                                        'symbol': token_data.get('symbol'),
+                                        'decimals': token_data.get('decimals'),
+                                        'logo': token_data.get('logo', f'https://d23exngyjlavgo.cloudfront.net/solana_{token_address}')
+                                    }
+                                    
+                            # 如果没有获取到代币信息，尝试从数据库获取
+                            if 'token_info' not in tx_data:
+                                token = await Token.objects.filter(chain='SOL', address=token_address).afirst()
+                                if token:
+                                    tx_data['token'] = token
+                                else:
+                                    tx_data['token_address'] = token_address
+                        except Exception as e:
+                            logger.error(f"获取代币信息失败: {str(e)}")
                             tx_data['token_address'] = token_address
-                        
-                        if token_info:
-                            tx_data['token_info'] = token_info
-
+                    
                     # 创建交易记录
                     await Transaction.objects.acreate(**tx_data)
                     
