@@ -9,7 +9,7 @@ from django.core.cache import cache
 from asgiref.sync import sync_to_async
 
 from ...models import Wallet, Token
-from ...api_config import MoralisConfig
+from ..evm_config import MoralisConfig, RPCConfig
 from ...exceptions import WalletNotFoundError, ChainNotSupportError, GetBalanceError
 from .utils import EVMUtils
 from .token_info import EVMTokenInfoService
@@ -324,4 +324,4 @@ class EVMBalanceService:
             return {
                 'total_value_usd': '0',
                 'tokens': []
-            } 
+            }

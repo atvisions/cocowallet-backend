@@ -3,7 +3,8 @@ from decimal import Decimal
 import logging
 from django.core.cache import cache
 from ..models import Token, TokenIndex
-from ..api_config import APIConfig, Chain, APIEndpoints, MoralisConfig
+from ..services.evm_config import RPCConfig
+from ..services.solana_config import MoralisConfig
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class BaseTokenService:
     def set_cache(key: str, data: any, timeout: Optional[int] = None) -> None: # type: ignore
         """设置缓存"""
         if timeout is None:
-            cache_config = APIConfig.get_cache_config()
+            cache_config = RPCConfig.get_cache_config()
             timeout = cache_config['TIMEOUT']
         cache.set(key, data, timeout)
 

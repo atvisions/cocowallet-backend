@@ -9,7 +9,7 @@ from moralis import evm_api, sol_api
 import json
 
 from ...models import Token, Wallet, Transaction
-from ...api_config import MoralisConfig, APIConfig, HeliusConfig
+from ...services.solana_config import MoralisConfig, RPCConfig, HeliusConfig
 from datetime import timedelta, datetime
 import async_timeout
 
@@ -617,4 +617,4 @@ class SolanaTokenInfoService:
                 
             except Exception as e:
                 logger.error(f"获取代币OHLCV数据时出错: {str(e)}")
-                return {} 
+                return {}

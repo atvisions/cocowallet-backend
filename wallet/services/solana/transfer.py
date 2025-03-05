@@ -22,7 +22,7 @@ from spl.token.client import Token
 
 from ...models import Wallet, Transaction as DBTransaction, Token
 from ...exceptions import InsufficientBalanceError, InvalidAddressError, TransferError
-from ...api_config import RPCConfig, MoralisConfig
+from ...services.solana_config import RPCConfig, MoralisConfig
 import json
 
 logger = logging.getLogger(__name__)

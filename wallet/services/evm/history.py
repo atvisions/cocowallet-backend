@@ -11,7 +11,7 @@ from datetime import datetime
 from hexbytes import HexBytes
 
 from ...models import Transaction, Token, Wallet
-from ...api_config import RPCConfig, MoralisConfig
+from ..evm_config import RPCConfig, MoralisConfig
 from .utils import EVMUtils
 from .token_info import EVMTokenInfoService
 

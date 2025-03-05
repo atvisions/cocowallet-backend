@@ -11,7 +11,7 @@ import json
 import asyncio
 
 from ...models import Token, Wallet, Transaction
-from ...api_config import RPCConfig, MoralisConfig
+from ..evm_config import RPCConfig, MoralisConfig
 from ...exceptions import (
     WalletNotFoundError, 
     ChainNotSupportError, 

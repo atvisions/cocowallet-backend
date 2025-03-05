@@ -23,7 +23,7 @@ import json
 from ..models import Wallet, Token, Transaction, PaymentPassword
 from ..serializers import WalletSerializer
 from ..services.factory import ChainServiceFactory
-from ..api_config import RPCConfig, MoralisConfig, HeliusConfig
+from ..services.solana_config import RPCConfig, MoralisConfig, HeliusConfig
 from ..decorators import verify_payment_password
 
 # Helius API 配置

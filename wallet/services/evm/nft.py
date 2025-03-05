@@ -9,7 +9,7 @@ from asgiref.sync import sync_to_async
 import json
 
 from ...models import Wallet, Transaction, NFTCollection
-from ...api_config import RPCConfig, MoralisConfig
+from ..evm_config import RPCConfig, MoralisConfig
 from ...exceptions import (
     WalletNotFoundError, 
     ChainNotSupportError, 
@@ -766,4 +766,4 @@ class EVMNFTService:
             
         except Exception as e:
             logger.error(f"保存交易记录失败: {str(e)}")
-            # 不抛出异常，因为转账已经成功了 
+            # 不抛出异常，因为转账已经成功了

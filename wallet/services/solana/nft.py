@@ -22,7 +22,7 @@ from django.core.cache import cache
 
 from ...models import Wallet, Transaction as DBTransaction, Token, NFTCollection
 from ...exceptions import InsufficientBalanceError, InvalidAddressError, TransferError
-from ...api_config import HeliusConfig, RPCConfig, MoralisConfig
+from ...services.solana_config import HeliusConfig, RPCConfig, MoralisConfig
 
 logger = logging.getLogger(__name__)
 
@@ -628,4 +628,4 @@ class SolanaNFTService:
             
         except Exception as e:
             logger.error(f"获取 NFT 合集列表失败: {str(e)}")
-            return [] 
+            return []

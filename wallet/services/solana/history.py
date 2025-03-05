@@ -10,7 +10,7 @@ import json
 from django.utils import timezone
 
 from ...models import Transaction, Token, Wallet
-from ...api_config import MoralisConfig
+from ...services.solana_config import MoralisConfig
 
 logger = logging.getLogger(__name__)
 
@@ -193,4 +193,4 @@ class SolanaHistoryService:
                     continue
                 logger.error(f"请求失败: {url}, 错误: {str(e)}")
                 return None
-        return None 
+        return None

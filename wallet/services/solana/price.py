@@ -8,7 +8,7 @@ import json
 from django.utils import timezone
 
 from ...models import Token
-from ...api_config import MoralisConfig
+from ...services.solana_config import MoralisConfig
 
 logger = logging.getLogger(__name__)
 
@@ -192,4 +192,4 @@ class SolanaPriceService:
                 return result
             except Exception as e:
                 logger.error(f"批量获取代币价格时出错: {str(e)}")
-                return {addr: Decimal('0') for addr in token_addresses} 
+                return {addr: Decimal('0') for addr in token_addresses}

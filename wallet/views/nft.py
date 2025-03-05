@@ -16,7 +16,7 @@ from drf_yasg import openapi
 
 from ..models import Wallet, NFTCollection
 from ..serializers import WalletSerializer
-from ..api_config import HeliusConfig
+from ..services.solana_config import HeliusConfig
 from ..services.factory import ChainServiceFactory
 from ..exceptions import InvalidAddressError, TransferError, WalletNotFoundError
 from ..services.evm.nft import EVMNFTService
@@ -1418,4 +1418,4 @@ class EVMNFTViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': f'NFT 转账失败: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

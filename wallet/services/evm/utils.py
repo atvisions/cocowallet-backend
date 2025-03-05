@@ -9,7 +9,7 @@ from hexbytes import HexBytes
 from web3.providers.rpc import HTTPProvider
 import asyncio
 
-from ...api_config import RPCConfig
+from ..evm_config import RPCConfig
 
 logger = logging.getLogger(__name__)
 

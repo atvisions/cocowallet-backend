@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.core.cache import cache
 
 from ...models import Token
-from ...api_config import RPCConfig, MoralisConfig
+from ..evm_config import RPCConfig, MoralisConfig
 from .utils import EVMUtils
 
 logger = logging.getLogger(__name__)

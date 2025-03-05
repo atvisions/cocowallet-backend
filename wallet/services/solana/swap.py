@@ -18,7 +18,7 @@ import json
 import base64
 import ssl
 
-from ...api_config import MoralisConfig, RPCConfig
+from ...services.solana_config import MoralisConfig, RPCConfig
 from ...exceptions import SwapError, InsufficientBalanceError
 
 logger = logging.getLogger(__name__)

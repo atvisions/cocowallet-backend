@@ -11,7 +11,7 @@ import time
 import json
 
 from ...models import Token, Wallet
-from ...api_config import MoralisConfig, RPCConfig
+from ...services.solana_config import MoralisConfig, RPCConfig
 
 logger = logging.getLogger(__name__)
 

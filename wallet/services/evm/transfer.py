@@ -10,7 +10,7 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from ...models import Wallet, Transaction, Token
-from ...api_config import RPCConfig
+from ..evm_config import RPCConfig
 from ...exceptions import InsufficientBalanceError, InvalidAddressError, TransferError
 from .utils import EVMUtils
 
