@@ -533,9 +533,9 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             device_id = request.data.get('device_id')
             to_address = request.data.get('to_address')
             amount = request.data.get('amount')
+            is_native = request.data.get('is_native', False)
             token_address = request.data.get('token_address')
             payment_password = request.data.get('payment_password')
-            token_info = request.data.get('token_info')  # 从请求中获取代币信息
             
             if not all([device_id, to_address, amount]):
                 return Response({
@@ -545,13 +545,6 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             
             # 获取并验证钱包
             wallet = await self.get_wallet_async(int(pk), device_id)
-            logger.debug(f"请求转账，钱包地址: {wallet.address}, 接收地址: {to_address}, 金额: {amount}")
-            
-            if wallet.chain != 'SOL':
-                return Response({
-                    'status': 'error',
-                    'message': '该接口仅支持SOL链钱包'
-                }, status=status.HTTP_400_BAD_REQUEST)
             
             # 设置支付密码用于解密私钥
             wallet.payment_password = payment_password
@@ -574,94 +567,98 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                     'message': 'SOL转账服务不可用'
                 }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
-            # 执行转账
-            try:
-                async with transfer_service:  # 使用异步上下文管理器
-                    if token_address:
-                        # SPL代币转账
-                        result = await transfer_service.transfer_token(
-                            from_address=wallet.address,
-                            to_address=to_address,
-                            token_address=token_address,
-                            amount=Decimal(amount),
-                            private_key=private_key
-                        )
-                    else:
-                        # SOL原生代币转账
-                        result = await transfer_service.transfer_native(
-                            from_address=wallet.address,
-                            to_address=to_address,
-                            amount=Decimal(amount),
-                            private_key=private_key
-                        )
-                
-                if result.get('success'):
-                    # 创建交易记录
-                    tx_data = {
-                        'wallet': wallet,
-                        'chain': 'SOL',
-                        'tx_hash': result['transaction_hash'],
-                        'tx_type': 'TRANSFER',
-                        'status': 'SUCCESS',
-                        'from_address': wallet.address,
-                        'to_address': to_address,
-                        'amount': Decimal(amount),
-                        'gas_price': Decimal(result.get('fee', '0')),
-                        'gas_used': Decimal('1'),
-                        'block_number': result.get('block_slot', 0),
-                        'block_timestamp': timezone.now()
-                    }
+            # 构建转账参数
+            transfer_params = {
+                'from_address': wallet.address,
+                'to_address': to_address,
+                'amount': str(amount),
+                'private_key': private_key,
+                'is_native': is_native
+            }
 
-                    # 如果是代币转账，获取并添加代币信息
-                    if token_address:
-                        try:
-                            # 获取代币信息服务
-                            token_info_service = ChainServiceFactory.get_token_info_service('SOL')
-                            if token_info_service:
-                                # 获取代币元数据
-                                token_data = await token_info_service.get_token_metadata(token_address)
-                                if token_data and token_data.get('name'):
-                                    tx_data['token_info'] = {
-                                        'address': token_address,
-                                        'name': token_data.get('name'),
-                                        'symbol': token_data.get('symbol'),
-                                        'decimals': token_data.get('decimals'),
-                                        'logo': token_data.get('logo', f'https://d23exngyjlavgo.cloudfront.net/solana_{token_address}')
-                                    }
-                                    
-                            # 如果没有获取到代币信息，尝试从数据库获取
-                            if 'token_info' not in tx_data:
-                                token = await Token.objects.filter(chain='SOL', address=token_address).afirst()
-                                if token:
-                                    tx_data['token'] = token
-                                else:
-                                    tx_data['token_address'] = token_address
-                        except Exception as e:
-                            logger.error(f"获取代币信息失败: {str(e)}")
-                            tx_data['token_address'] = token_address
-                    
-                    # 创建交易记录
-                    await Transaction.objects.acreate(**tx_data)
-                    
-                    return Response({
-                        'status': 'success',
-                        'data': {
-                            'transaction_hash': result.get('transaction_hash'),
-                            'block_hash': result.get('block_hash'),
-                            'fee': result.get('fee')
-                        }
-                    })
-                else:
+            # 只在非原生代币转账时添加 token_address
+            if not is_native:
+                if not token_address:
                     return Response({
                         'status': 'error',
-                        'message': result.get('error') or '转账失败'
+                        'message': '代币地址不能为空'
                     }, status=status.HTTP_400_BAD_REQUEST)
+                transfer_params['token_address'] = token_address
+
+            # 执行转账
+            try:
+                async with transfer_service:
+                    result = await transfer_service.handle_transfer(transfer_params)
+                    
+                    # 确保结果中的数值类型都转换为字符串
+                    if isinstance(result, dict):
+                        for key, value in result.items():
+                            if isinstance(value, Decimal):
+                                result[key] = str(value)
+                    
+                    if result.get('success'):
+                        # 创建交易记录
+                        tx_data = {
+                            'wallet': wallet,
+                            'chain': 'SOL',
+                            'tx_hash': result['transaction_hash'],
+                            'tx_type': 'TRANSFER',
+                            'status': 'SUCCESS',
+                            'from_address': wallet.address,
+                            'to_address': to_address,
+                            'amount': Decimal(amount),
+                            'gas_price': Decimal(result.get('fee', '0')),
+                            'gas_used': Decimal('1'),
+                            'block_number': result.get('block_slot', 0),
+                            'block_timestamp': timezone.now()
+                        }
+
+                        # 如果是代币转账，添加代币信息
+                        if not is_native and token_address:
+                            try:
+                                # 获取代币信息服务
+                                token_info_service = ChainServiceFactory.get_token_info_service('SOL')
+                                if token_info_service:
+                                    # 获取代币元数据
+                                    token_data = await token_info_service.get_token_metadata(token_address)
+                                    if token_data and token_data.get('name'):
+                                        tx_data['token_info'] = {
+                                            'address': token_address,
+                                            'name': token_data.get('name'),
+                                            'symbol': token_data.get('symbol'),
+                                            'decimals': token_data.get('decimals'),
+                                            'logo': token_data.get('logo', f'https://d23exngyjlavgo.cloudfront.net/solana_{token_address}')
+                                        }
+                                
+                                # 如果没有获取到代币信息，尝试从数据库获取
+                                if 'token_info' not in tx_data:
+                                    token = await Token.objects.filter(chain='SOL', address=token_address).afirst()
+                                    if token:
+                                        tx_data['token'] = token
+                                    else:
+                                        tx_data['token_address'] = token_address
+                            except Exception as e:
+                                logger.error(f"获取代币信息失败: {str(e)}")
+                                tx_data['token_address'] = token_address
+                        
+                        # 创建交易记录
+                        await Transaction.objects.acreate(**tx_data)
+                        
+                        return Response({
+                            'status': 'success',
+                            'data': result
+                        })
+                    else:
+                        return Response({
+                            'status': 'error',
+                            'message': result.get('error', '转账失败')
+                        }, status=status.HTTP_400_BAD_REQUEST)
                     
             except Exception as e:
-                logger.error(f"执行转账时出错: {str(e)}")
+                logger.error(f"执行转账失败: {str(e)}")
                 return Response({
                     'status': 'error',
-                    'message': f'转账失败: {str(e)}'
+                    'message': str(e)
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
         except ObjectDoesNotExist as e:
