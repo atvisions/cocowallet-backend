@@ -19,7 +19,6 @@ import asyncio
 from django.core.cache import cache
 import os
 import json
-import decimal
 
 from ...models import Wallet, Token, Transaction, PaymentPassword
 from ...serializers import WalletSerializer
@@ -141,6 +140,60 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': '获取代币余额失败'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'], url_path='tokens/toggle-visibility')
+    @async_to_sync_api
+    async def toggle_token_visibility(self, request, pk=None):
+        """切换代币的显示/隐藏状态"""
+        try:
+            device_id = request.query_params.get('device_id')
+            token_address = request.data.get('token_address')
+            
+            if not device_id or not token_address:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取并验证钱包
+            wallet = await self.get_wallet_async(int(pk), device_id)
+            
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持SOL链钱包'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取SOL余额服务
+            balance_service = ChainServiceFactory.get_balance_service('SOL')
+            if not balance_service:
+                return Response({
+                    'status': 'error',
+                    'message': 'SOL余额服务不可用'
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            
+            # 切换代币显示状态
+            result = await balance_service.toggle_token_visibility(wallet.id, token_address)
+            
+            return Response({
+                'status': 'success',
+                'data': {
+                    'token_address': token_address,
+                    'is_hidden': result.get('is_hidden', False)
+                }
+            })
+            
+        except ObjectDoesNotExist as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"切换代币显示状态失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'切换代币显示状态失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'])
@@ -429,4 +482,443 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             return Response({
                 'status': 'error',
                 'message': f'获取K线数据失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+    @action(detail=True, methods=['get'], url_path='token-transfers')
+    @async_to_sync_api
+    async def token_transfers(self, request, pk=None):
+        """获取代币转账记录"""
+        try:
+            # 获取请求参数
+            device_id = request.query_params.get('device_id')
+            page = int(request.query_params.get('page', '1'))
+            page_size = int(request.query_params.get('page_size', '20'))
+            token_address = request.query_params.get('token_address')
+            tx_type = request.query_params.get('tx_type')
+            
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 计算分页
+            start = (page - 1) * page_size
+            end = start + page_size
+            
+            # 获取并验证钱包
+            wallet = await self.get_wallet_async(int(pk), device_id)
+            logger.debug(f"请求获取转账记录，钱包地址: {wallet.address}")
+            
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 构建查询条件
+            from django.db.models import Q
+            
+            base_query = Q(chain='SOL', status='SUCCESS')
+            wallet_query = Q(wallet=wallet) | Q(to_address=wallet.address)  # 包含作为发送方和接收方的交易
+            
+            query = base_query & wallet_query
+            
+            if token_address:
+                query &= Q(token__address=token_address)
+            if tx_type:
+                query &= Q(tx_type=tx_type)
+            
+            # 获取总记录数
+            total_count = await Transaction.objects.filter(query).acount()
+            
+            # 获取交易记录
+            transactions = []
+            async for tx in Transaction.objects.filter(query).order_by('-block_timestamp')[start:end].select_related('token', 'nft_collection'):
+                # 判断交易方向
+                is_received = tx.to_address == wallet.address
+                
+                # 基础交易数据
+                tx_data = {
+                    'tx_hash': tx.tx_hash,
+                    'tx_type': tx.tx_type,
+                    'status': tx.status,
+                    'from_address': tx.from_address,
+                    'to_address': tx.to_address,
+                    'amount': tx.amount,
+                    'direction': 'RECEIVED' if is_received else 'SENT',
+                    'gas_price': tx.gas_price,
+                    'gas_used': tx.gas_used,
+                    'gas_fee': str(tx.gas_price * tx.gas_used) if tx.gas_price and tx.gas_used else '0',
+                    'block_number': tx.block_number,
+                    'block_timestamp': tx.block_timestamp,
+                    'created_at': tx.created_at,
+                }
+
+                # 添加代币信息
+                if tx.tx_type == 'TRANSFER':
+                    if tx.token:
+                        tx_data['token'] = {
+                            'address': tx.token.address,
+                            'name': tx.token.name,
+                            'symbol': tx.token.symbol,
+                            'decimals': tx.token.decimals,
+                            'logo': tx.token.logo if tx.token.logo else f'https://d23exngyjlavgo.cloudfront.net/solana_{tx.token.address}'
+                        }
+                    elif tx.token_info:  # 使用 token_info 字段
+                        tx_data['token'] = tx.token_info
+                    else:  # 默认SOL代币信息
+                        tx_data['token'] = {
+                            'address': 'So11111111111111111111111111111111111111112',
+                            'name': 'Solana',
+                            'symbol': 'SOL',
+                            'decimals': 9,
+                            'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png'
+                        }
+                elif tx.tx_type == 'SWAP':
+                    # 添加源代币信息
+                    if tx.token:
+                        tx_data['from_token'] = {
+                            'address': tx.token.address,
+                            'name': tx.token.name,
+                            'symbol': tx.token.symbol,
+                            'decimals': tx.token.decimals,
+                            'logo': tx.token.logo if tx.token.logo else f'https://d23exngyjlavgo.cloudfront.net/solana_{tx.token.address}'
+                        }
+                    elif tx.token_info:  # 使用 token_info 字段
+                        tx_data['from_token'] = tx.token_info
+                    
+                    # 添加目标代币信息（从 token_info 中获取）
+                    if hasattr(tx, 'token_info') and tx.token_info and 'to_token' in tx.token_info:
+                        tx_data['to_token'] = tx.token_info['to_token']
+                    else:
+                        # 默认 SOL 代币信息
+                        tx_data['to_token'] = {
+                            'address': 'So11111111111111111111111111111111111111112',
+                            'name': 'Solana',
+                            'symbol': 'SOL',
+                            'decimals': 9,
+                            'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png'
+                        }
+                elif tx.tx_type == 'NFT_TRANSFER' and tx.nft_collection:
+                    tx_data['nft'] = {
+                        'token_id': tx.nft_token_id,
+                        'collection_name': tx.nft_collection.name,
+                        'collection_symbol': tx.nft_collection.symbol,
+                        'logo': tx.nft_collection.logo,
+                        'is_verified': tx.nft_collection.is_verified
+                    }
+
+                transactions.append(tx_data)
+            
+            return Response({
+                'status': 'success',
+                'data': {
+                    'total': total_count,
+                    'page': page,
+                    'page_size': page_size,
+                    'transactions': transactions
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"获取转账记录失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'获取转账记录失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='tokens/manage')
+    @async_to_sync_api
+    async def manage_tokens(self, request, pk=None):
+        """获取代币管理列表（包括隐藏的代币）"""
+        try:
+            device_id = request.query_params.get('device_id')
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=400)
+                
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            
+            # 验证是否是 Solana 链
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持 Solana 链钱包'
+                }, status=400)
+            
+            # 获取余额服务
+            balance_service = ChainServiceFactory.get_balance_service(wallet.chain)
+            
+            # 获取所有代币余额，包括隐藏的
+            balances = await balance_service.get_all_token_balances(wallet.address, include_hidden=True)
+            
+            return Response({
+                'status': 'success',
+                'message': '获取成功',
+                'data': balances
+            })
+            
+        except Exception as e:
+            logger.error(f"获取代币管理列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取代币管理列表失败'
+            }, status=500)
+
+    @action(detail=True, methods=['get'], url_path='transaction-status')
+    @async_to_sync_api
+    async def transaction_status(self, request, pk=None):
+        """获取交易状态"""
+        try:
+            device_id = request.query_params.get('device_id')
+            tx_hash = request.query_params.get('tx_hash')
+            
+            if not device_id or not tx_hash:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=400)
+                
+            # 获取钱包
+            wallet = await self.get_wallet_async(pk, device_id)
+            if not wallet:
+                return Response({
+                    'status': 'error',
+                    'message': '钱包不存在'
+                }, status=404)
+                
+            # 获取交易服务
+            chain_service = ChainServiceFactory.get_service(wallet.chain, 'transfer')
+            
+            # 获取交易状态
+            tx_status = await chain_service.get_transaction_status(tx_hash)
+            
+            return Response({
+                'status': 'success',
+                'data': tx_status
+            })
+            
+        except Exception as e:
+            logger.error(f"获取交易状态失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=400)
+
+    @action(detail=True, methods=['post'])
+    @async_to_sync_api
+    @verify_payment_password()
+    async def transfer(self, request, pk=None):
+        """转账接口"""
+        try:
+            device_id = request.data.get('device_id')
+            to_address = request.data.get('to_address')
+            amount = request.data.get('amount')
+            token_address = request.data.get('token_address')
+            payment_password = request.data.get('payment_password')
+            token_info = request.data.get('token_info')  # 从请求中获取代币信息
+            
+            if not all([device_id, to_address, amount]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取并验证钱包
+            wallet = await self.get_wallet_async(int(pk), device_id)
+            logger.debug(f"请求转账，钱包地址: {wallet.address}, 接收地址: {to_address}, 金额: {amount}")
+            
+            if wallet.chain != 'SOL':
+                return Response({
+                    'status': 'error',
+                    'message': '该接口仅支持SOL链钱包'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 设置支付密码用于解密私钥
+            wallet.payment_password = payment_password
+            
+            try:
+                # 获取私钥
+                private_key = wallet.decrypt_private_key()
+            except Exception as e:
+                logger.error(f"解密私钥失败: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': f'解密私钥失败: {str(e)}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 获取转账服务
+            transfer_service = ChainServiceFactory.get_transfer_service('SOL')
+            if not transfer_service:
+                return Response({
+                    'status': 'error',
+                    'message': 'SOL转账服务不可用'
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            
+            # 执行转账
+            try:
+                async with transfer_service:  # 使用异步上下文管理器
+                    if token_address:
+                        # SPL代币转账
+                        result = await transfer_service.transfer_token(
+                            from_address=wallet.address,
+                            to_address=to_address,
+                            token_address=token_address,
+                            amount=Decimal(amount),
+                            private_key=private_key
+                        )
+                    else:
+                        # SOL原生代币转账
+                        result = await transfer_service.transfer_native(
+                            from_address=wallet.address,
+                            to_address=to_address,
+                            amount=Decimal(amount),
+                            private_key=private_key
+                        )
+                
+                if result.get('success'):
+                    # 创建交易记录
+                    tx_data = {
+                        'wallet': wallet,
+                        'chain': 'SOL',
+                        'tx_hash': result['transaction_hash'],
+                        'tx_type': 'TRANSFER',
+                        'status': 'SUCCESS',
+                        'from_address': wallet.address,
+                        'to_address': to_address,
+                        'amount': Decimal(amount),
+                        'gas_price': Decimal(result.get('fee', '0')),
+                        'gas_used': Decimal('1'),
+                        'block_number': result.get('block_slot', 0),
+                        'block_timestamp': timezone.now()
+                    }
+
+                    # 如果是代币转账,添加代币信息
+                    if token_address:
+                        try:
+                            token = await Token.objects.aget(chain='SOL', address=token_address)
+                            tx_data['token'] = token
+                        except Token.DoesNotExist:
+                            # 如果代币不存在,只保存代币地址
+                            tx_data['token_address'] = token_address
+                        
+                        if token_info:
+                            tx_data['token_info'] = token_info
+
+                    # 创建交易记录
+                    await Transaction.objects.acreate(**tx_data)
+                    
+                    return Response({
+                        'status': 'success',
+                        'data': {
+                            'transaction_hash': result.get('transaction_hash'),
+                            'block_hash': result.get('block_hash'),
+                            'fee': result.get('fee')
+                        }
+                    })
+                else:
+                    return Response({
+                        'status': 'error',
+                        'message': result.get('error') or '转账失败'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                    
+            except Exception as e:
+                logger.error(f"执行转账时出错: {str(e)}")
+                return Response({
+                    'status': 'error',
+                    'message': f'转账失败: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        except ObjectDoesNotExist as e:
+            logger.error(f"找不到钱包: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"转账失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'转账失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path='recommended-tokens')
+    @async_to_sync_api
+    async def recommended_tokens(self, request):
+        """获取推荐代币列表"""
+        try:
+            # 从请求参数获取链类型
+            chain = request.query_params.get('chain', 'SOL')
+            
+            # 验证链类型
+            if chain not in ['SOL', 'ETH', 'BASE']:
+                return Response({
+                    'status': 'error',
+                    'message': '不支持的链类型'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # 从数据库获取推荐代币
+            recommended_tokens = await sync_to_async(list)(Token.objects.filter(
+                chain=chain,
+                is_recommended=True,
+                is_visible=True
+            ).order_by('-created_at'))
+
+            # 转换为列表
+            tokens = []
+            for token in recommended_tokens:
+                # 格式化价格
+                price_usd = token.last_price or '0'
+                try:
+                    price = float(price_usd)
+                    if price < 0.00001:
+                        formatted_price = '{:.8f}'.format(price)
+                    elif price < 0.01:
+                        formatted_price = '{:.6f}'.format(price)
+                    else:
+                        formatted_price = '{:.4f}'.format(price)
+                    formatted_price = formatted_price.rstrip('0').rstrip('.')
+                except (ValueError, TypeError):
+                    formatted_price = '0'
+
+                # 格式化价格变化
+                price_change = token.last_price_change or '0'
+                try:
+                    change = float(price_change)
+                    formatted_change = '{:+.2f}%'.format(change)
+                except (ValueError, TypeError):
+                    formatted_change = '+0.00%'
+
+                tokens.append({
+                    'token_address': token.address,
+                    'symbol': token.symbol,
+                    'name': token.name,
+                    'decimals': token.decimals,
+                    'logo': token.logo,
+                    'price_usd': formatted_price,
+                    'price_change_24h': formatted_change,
+                    'is_native': token.is_native,
+                    'verified': token.verified,
+                    'description': token.description,
+                    'website': token.website,
+                    'twitter': token.twitter,
+                    'telegram': token.telegram,
+                    'discord': token.discord
+                })
+
+            return Response({
+                'status': 'success',
+                'data': tokens
+            })
+
+        except Exception as e:
+            logger.error(f"获取推荐代币失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': '获取推荐代币失败'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 

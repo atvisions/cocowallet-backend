@@ -22,7 +22,7 @@ from spl.token.client import Token
 
 from ...models import Wallet, Transaction as DBTransaction, Token
 from ...exceptions import InsufficientBalanceError, InvalidAddressError, TransferError
-from ...services.solana_config import RPCConfig, MoralisConfig
+from ..solana_config import RPCConfig , MoralisConfig
 import json
 
 logger = logging.getLogger(__name__)
@@ -536,53 +536,28 @@ class SolanaTransferService:
     async def transfer_native(self, from_address: str, to_address: str, amount: Decimal, private_key: str) -> Dict[str, Any]:
         """转账原生SOL代币"""
         try:
-            # 添加更详细的日志
-            logger.info("=== 开始原生SOL转账 ===")
-            logger.info(f"发送方地址: {from_address}")
-            logger.info(f"接收方地址: {to_address}")
-            logger.info(f"转账金额: {amount} SOL")
-            
             # 验证地址
             try:
                 to_pubkey = PublicKey(to_address)
-                logger.info("接收方地址验证通过")
-            except Exception as e:
-                logger.error(f"接收方地址验证失败: {str(e)}")
+            except Exception:
                 raise InvalidAddressError("无效的接收地址")
             
             # 获取密钥对
-            try:
-                keypair = Keypair.from_seed(base58.b58decode(private_key)[:32])
-                logger.info("密钥对创建成功")
-            except Exception as e:
-                logger.error(f"创建密钥对失败: {str(e)}")
-                raise TransferError("无效的私钥")
-
-            # 转换金额
-            try:
-                amount_decimal = Decimal(str(amount))
-                lamports = int(amount_decimal * Decimal('1000000000'))
-                logger.info(f"转换金额: {amount} SOL = {lamports} lamports")
-            except Exception as e:
-                logger.error(f"金额转换失败: {str(e)}")
-                raise TransferError(f"金额格式错误: {str(e)}")
-
+            keypair = Keypair.from_seed(base58.b58decode(private_key)[:32])
+            
             # 创建转账交易
             transfer_instruction = transfer(
                 TransferParams(
                     from_pubkey=PublicKey(from_address),
                     to_pubkey=to_pubkey,
-                    lamports=lamports
+                    lamports=int(amount * Decimal('1000000000'))  # 转换为lamports
                 )
             )
-            logger.info("转账指令创建成功")
-
+            
             # 最大重试次数
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    logger.info(f"=== 开始第 {attempt + 1} 次交易尝试 ===")
-                    
                     # 创建交易
                     transaction = SolanaTransaction()
                     transaction.add(transfer_instruction)
@@ -595,41 +570,44 @@ class SolanaTransferService:
                     
                     # 签名交易
                     transaction.sign(keypair)
-                    logger.info("交易签名完成")
+                    
+                    # 预检查交易
+                    try:
+                        await self.client.simulate_transaction(transaction)
+                    except Exception as sim_error:
+                        logger.error(f"交易预检查失败: {str(sim_error)}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        raise TransferError(f"交易预检查失败: {str(sim_error)}")
                     
                     # 发送交易
                     response = await self.client.send_raw_transaction(
                         transaction.serialize(),
                         opts=TxOpts(
-                            skip_preflight=False,
+                            skip_preflight=False,  # 启用预检查
                             max_retries=5,
                             preflight_commitment=Commitment("confirmed")
                         )
                     )
-                    logger.info(f"交易发送响应: {response}")
                     
-                    # 获取交易哈希
+                    # 处理响应
                     if isinstance(response, dict):
                         if 'error' in response:
                             error_msg = str(response.get('error', {}))
-                            logger.error(f"交易发送失败: {error_msg}")
                             if 'BlockhashNotFound' in error_msg:
-                                if attempt < max_retries - 1:
-                                    logger.warning("区块哈希已过期，重试交易")
-                                    await asyncio.sleep(2)
-                                    continue
+                                logger.warning("区块哈希已过期，重试交易")
+                                await asyncio.sleep(2)
+                                continue
                             raise TransferError(f"发送交易失败: {error_msg}")
+                            
                         tx_hash = response.get('result')
+                        if not tx_hash:
+                            raise TransferError("无法获取交易哈希")
                     else:
                         tx_hash = response
                     
-                    if not tx_hash:
-                        raise TransferError("无法获取交易哈希")
-                    
-                    logger.info(f"获取到交易哈希: {tx_hash}")
-                    
                     # 等待交易确认
-                    logger.info("等待交易确认...")
                     confirmation_status = await self._confirm_transaction(str(tx_hash))
                     if not confirmation_status:
                         if attempt < max_retries - 1:
@@ -638,26 +616,18 @@ class SolanaTransferService:
                             continue
                         raise TransferError("交易未被确认")
                     
-                    logger.info("交易已确认")
-                    
                     # 获取交易详情
                     tx_details = await self._get_transaction_details(str(tx_hash))
-                    logger.info(f"交易详情: {json.dumps(tx_details, indent=2)}")
                     
                     # 保存交易记录
-                    try:
-                        await self._save_transaction(
-                            wallet_address=from_address,
-                            to_address=to_address,
-                            amount=amount,
-                            token_address=None,  # 原生SOL转账不需要token_address
-                            tx_hash=str(tx_hash),
-                            tx_info=tx_details
-                        )
-                        logger.info("交易记录已保存到数据库")
-                    except Exception as save_error:
-                        logger.error(f"保存交易记录失败: {str(save_error)}")
-                        # 不抛出异常，因为交易已经成功了
+                    await self._save_transaction(
+                        wallet_address=from_address,
+                        to_address=to_address,
+                        amount=amount,
+                        token_address=None,
+                        tx_hash=str(tx_hash),
+                        tx_info=tx_details
+                    )
                     
                     return {
                         'success': tx_details.get('status') == 'success',
@@ -667,7 +637,12 @@ class SolanaTransferService:
                         'fee': str(Decimal(tx_details.get('fee', 0)) / Decimal(1e9)),
                         'block_time': tx_details.get('block_time'),
                         'block_slot': tx_details.get('block_slot'),
-                        'confirmations': tx_details.get('confirmations')
+                        'block_hash': tx_details.get('block_hash') or tx_details.get('recent_blockhash'),
+                        'confirmations': tx_details.get('confirmations'),
+                        'compute_units': tx_details.get('compute_units_consumed'),
+                        'logs': tx_details.get('logs', []),
+                        'pre_balance': str(Decimal(tx_details.get('pre_balances', [0])[0]) / Decimal(1e9)),
+                        'post_balance': str(Decimal(tx_details.get('post_balances', [0])[0]) / Decimal(1e9))
                     }
                     
                 except Exception as e:
@@ -1011,59 +986,3 @@ class SolanaTransferService:
         """异步上下文管理器退出"""
         if self._session and not self._session.closed:
             await self._session.close()
-
-    async def handle_transfer(self, transfer_data: Dict[str, Any]) -> Dict[str, Any]:
-        """处理转账请求"""
-        try:
-            logger.info(f"收到转账请求数据: {json.dumps(transfer_data, indent=2)}")
-            
-            # 获取必要参数
-            from_address = transfer_data.get('from_address')
-            to_address = transfer_data.get('to_address')
-            amount = Decimal(str(transfer_data.get('amount', '0')))
-            is_native = transfer_data.get('is_native', False)
-            private_key = transfer_data.get('private_key')
-            
-            # 验证基本参数
-            if not all([from_address, to_address, amount, private_key]):
-                missing_fields = []
-                if not from_address: missing_fields.append('from_address')
-                if not to_address: missing_fields.append('to_address')
-                if not amount: missing_fields.append('amount')
-                if not private_key: missing_fields.append('private_key')
-                raise TransferError(f"缺少必要参数: {', '.join(missing_fields)}")
-            
-            logger.info(f"转账类型: {'原生SOL' if is_native else 'SPL代币'}")
-            
-            # 对于原生 SOL 转账
-            if is_native:
-                logger.info("执行原生SOL转账")
-                result = await self.transfer_native(
-                    from_address=from_address,
-                    to_address=to_address,
-                    amount=amount,
-                    private_key=private_key
-                )
-                # 确保返回值中的 Decimal 转换为字符串
-                return {k: str(v) if isinstance(v, Decimal) else v for k, v in result.items()}
-            
-            # SPL代币转账，才检查 token_address
-            token_address = transfer_data.get('token_address')
-            if not token_address:
-                logger.error("SPL代币转账缺少token_address")
-                raise TransferError("代币地址不能为空")
-            
-            logger.info("执行SPL代币转账")
-            result = await self.transfer_token(
-                from_address=from_address,
-                to_address=to_address,
-                token_address=token_address,
-                amount=amount,
-                private_key=private_key
-            )
-            # 确保返回值中的 Decimal 转换为字符串
-            return {k: str(v) if isinstance(v, Decimal) else v for k, v in result.items()}
-            
-        except Exception as e:
-            logger.error(f"处理转账请求失败: {str(e)}")
-            raise TransferError(str(e))

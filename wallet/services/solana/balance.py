@@ -448,3 +448,31 @@ class SolanaBalanceService:
                 logger.error(f"请求最终失败: {url}, 错误: {str(e)}")
                 return None
         return None
+
+    async def toggle_token_visibility(self, wallet_id: int, token_address: str) -> dict:
+        """切换代币的显示/隐藏状态"""
+        try:
+            # 使用sync_to_async包装数据库操作
+            @sync_to_async
+            def get_or_create_token():
+                token, created = Token.objects.get_or_create(
+                    chain='SOL',
+                    address=token_address,
+                    defaults={
+                        'is_visible': True,
+                        'type': 'token',
+                        'contract_type': 'SPL'
+                    }
+                )
+                # 切换显示状态
+                token.is_visible = not token.is_visible
+                token.save()
+                return {'is_hidden': not token.is_visible}
+
+            # 执行数据库操作
+            result = await get_or_create_token()
+            return result
+            
+        except Exception as e:
+            logger.error(f"切换代币显示状态失败: {str(e)}")
+            raise
