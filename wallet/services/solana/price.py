@@ -199,31 +199,52 @@ class SolanaPriceService:
                 logger.error(f"批量获取代币价格时出错: {str(e)}")
                 return {addr: Decimal('0') for addr in token_addresses}
 
-    async def get_token_ohlcv(self, token_address: str, timeframe: str = '1h', limit: int = 24) -> List[Dict[str, Any]]:
+    async def get_token_ohlcv(
+        self,
+        token_address: str,
+        timeframe: str = '1h',
+        limit: int = 24,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """获取代币K线数据"""
         try:
-            logger.info(f"开始获取代币 {token_address} 的K线数据, timeframe={timeframe}, limit={limit}")
+            logger.info(f"开始获取代币 {token_address} 的K线数据")
+            logger.info(f"参数: timeframe={timeframe}, limit={limit}, from_date={from_date}, to_date={to_date}")
             
             # 验证时间周期
-            timeframe_minutes = {
+            valid_timeframes = {
                 '1m': 1, '5m': 5, '15m': 15, '30m': 30,
                 '1h': 60, '4h': 240, '1d': 1440, '1w': 10080
             }
             
-            if timeframe not in timeframe_minutes:
+            if timeframe not in valid_timeframes:
                 logger.error(f'不支持的时间周期: {timeframe}')
                 raise ValueError(f'不支持的时间周期: {timeframe}')
 
             # 计算时间范围
             now = datetime.now()
-            to_date = now.strftime('%Y-%m-%d')
-            minutes = timeframe_minutes[timeframe] * limit
-            from_date = (now - timedelta(minutes=minutes)).strftime('%Y-%m-%d')
+            if not to_date:
+                to_date = now.strftime('%Y-%m-%d')
+            
+            if not from_date:
+                # 根据时间周期和数量计算开始时间
+                minutes = valid_timeframes[timeframe] * limit
+                from_date = (now - timedelta(minutes=minutes)).strftime('%Y-%m-%d')
             
             logger.info(f"计算时间范围: from={from_date}, to={to_date}")
             
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                # 首先获取交易对信息
+                # 获取代币价格数据
+                price_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/price"
+                logger.info(f"获取代币价格: {price_url}")
+                price_data = await self._fetch_with_retry(session, price_url)
+                
+                if not price_data:
+                    logger.error("无法获取价格数据")
+                    return []
+                
+                # 获取交易对信息
                 pairs_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/pairs"
                 logger.info(f"获取交易对信息: {pairs_url}")
                 pairs_data = await self._fetch_with_retry(session, pairs_url)
@@ -289,13 +310,29 @@ class SolanaPriceService:
                         if not timestamp:
                             continue
                             
+                        # 转换时间戳
+                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        ts = int(dt.timestamp() * 1000)
+                        
+                        # 处理价格数据
+                        open_price = float(item.get('open', 0))
+                        high_price = float(item.get('high', 0))
+                        low_price = float(item.get('low', 0))
+                        close_price = float(item.get('close', 0))
+                        volume = float(item.get('volume', 0))
+                        
+                        # 验证数据有效性
+                        if all(price == 0 for price in [open_price, high_price, low_price, close_price]):
+                            logger.warning(f"跳过无效的价格数据: {item}")
+                            continue
+                            
                         formatted_data.append({
-                            'timestamp': int(datetime.fromisoformat(timestamp.replace('Z', '+00:00')).timestamp() * 1000),
-                            'open': str(item.get('open', '0')),
-                            'high': str(item.get('high', '0')),
-                            'low': str(item.get('low', '0')),
-                            'close': str(item.get('close', '0')),
-                            'volume': str(item.get('volume', '0'))
+                            'timestamp': ts,
+                            'open': str(open_price),
+                            'high': str(high_price),
+                            'low': str(low_price),
+                            'close': str(close_price),
+                            'volume': str(volume)
                         })
                     except Exception as e:
                         logger.error(f"处理K线数据项时出错: {str(e)}, 数据项: {item}")
