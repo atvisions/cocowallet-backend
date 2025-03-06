@@ -1,11 +1,13 @@
 """Solana 价格服务"""
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from decimal import Decimal
 import aiohttp
 import asyncio
 import json
 from django.utils import timezone
+import os
+from datetime import datetime, timedelta
 
 from ...models import Token
 from ...services.solana_config import MoralisConfig
@@ -21,6 +23,9 @@ class SolanaPriceService:
             "X-API-Key": MoralisConfig.API_KEY
         }
         self.timeout = aiohttp.ClientTimeout(total=30, connect=5, sock_connect=5, sock_read=10)
+        self.coingecko_api_key = os.getenv('COINGECKO_API_KEY', '')
+        self.jupiter_api_url = 'https://price.jup.ag/v4'
+        self.coingecko_api_url = 'https://api.coingecko.com/api/v3'
 
     async def get_token_price(self, token_address: str) -> Optional[Dict]:
         """获取代币价格"""
@@ -193,3 +198,116 @@ class SolanaPriceService:
             except Exception as e:
                 logger.error(f"批量获取代币价格时出错: {str(e)}")
                 return {addr: Decimal('0') for addr in token_addresses}
+
+    async def get_token_ohlcv(self, token_address: str, timeframe: str = '1h', limit: int = 24) -> List[Dict[str, Any]]:
+        """获取代币K线数据"""
+        try:
+            logger.info(f"开始获取代币 {token_address} 的K线数据, timeframe={timeframe}, limit={limit}")
+            
+            # 验证时间周期
+            timeframe_minutes = {
+                '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+                '1h': 60, '4h': 240, '1d': 1440, '1w': 10080
+            }
+            
+            if timeframe not in timeframe_minutes:
+                logger.error(f'不支持的时间周期: {timeframe}')
+                raise ValueError(f'不支持的时间周期: {timeframe}')
+
+            # 计算时间范围
+            now = datetime.now()
+            to_date = now.strftime('%Y-%m-%d')
+            minutes = timeframe_minutes[timeframe] * limit
+            from_date = (now - timedelta(minutes=minutes)).strftime('%Y-%m-%d')
+            
+            logger.info(f"计算时间范围: from={from_date}, to={to_date}")
+            
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                # 首先获取交易对信息
+                pairs_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/pairs"
+                logger.info(f"获取交易对信息: {pairs_url}")
+                pairs_data = await self._fetch_with_retry(session, pairs_url)
+                
+                if not pairs_data:
+                    logger.error("无法获取交易对信息")
+                    return []
+                
+                # 处理交易对数据
+                pairs_list = []
+                if isinstance(pairs_data, dict):
+                    pairs_list = pairs_data.get('pairs', [])
+                elif isinstance(pairs_data, list):
+                    pairs_list = pairs_data
+                
+                if not pairs_list:
+                    logger.error("没有找到交易对数据")
+                    return []
+                
+                # 获取流动性最大的交易对
+                active_pairs = [p for p in pairs_list if not p.get('inactivePair', True)]
+                if not active_pairs:
+                    logger.error("没有找到活跃的交易对")
+                    return []
+                
+                try:
+                    pair = max(active_pairs, key=lambda x: float(x.get('liquidityUsd', 0)))
+                    pair_address = pair.get('pairAddress')
+                    if not pair_address:
+                        logger.error("无法获取交易对地址")
+                        return []
+                except Exception as e:
+                    logger.error(f"处理交易对数据时出错: {str(e)}")
+                    return []
+                
+                # 获取 OHLCV 数据
+                ohlcv_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/pairs/{pair_address}/ohlcv"
+                params = {
+                    'timeframe': timeframe,
+                    'currency': 'usd',
+                    'fromDate': from_date,
+                    'toDate': to_date,
+                    'limit': str(limit)
+                }
+                
+                logger.info(f"获取K线数据: {ohlcv_url}, params={params}")
+                ohlcv_data = await self._fetch_with_retry(session, ohlcv_url, params=params)
+                
+                if not ohlcv_data or not isinstance(ohlcv_data, dict):
+                    logger.error(f"K线数据格式错误: {ohlcv_data}")
+                    return []
+                
+                result = ohlcv_data.get('result', [])
+                if not isinstance(result, list):
+                    logger.error(f"K线数据结果格式错误: {result}")
+                    return []
+                
+                # 转换数据格式
+                formatted_data = []
+                for item in result:
+                    try:
+                        timestamp = item.get('timestamp')
+                        if not timestamp:
+                            continue
+                            
+                        formatted_data.append({
+                            'timestamp': int(datetime.fromisoformat(timestamp.replace('Z', '+00:00')).timestamp() * 1000),
+                            'open': str(item.get('open', '0')),
+                            'high': str(item.get('high', '0')),
+                            'low': str(item.get('low', '0')),
+                            'close': str(item.get('close', '0')),
+                            'volume': str(item.get('volume', '0'))
+                        })
+                    except Exception as e:
+                        logger.error(f"处理K线数据项时出错: {str(e)}, 数据项: {item}")
+                        continue
+                
+                if not formatted_data:
+                    logger.error("没有有效的K线数据")
+                    return []
+                    
+                logger.info(f"成功获取到 {len(formatted_data)} 条K线数据")
+                return formatted_data
+            
+        except Exception as e:
+            logger.error(f"获取代币K线数据失败: {str(e)}", exc_info=True)
+            return []
