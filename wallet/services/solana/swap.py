@@ -33,62 +33,125 @@ class SolanaSwapService:
         Returns:
             List[Dict[str, Any]]: 支持的代币列表
         """
-        try:
-            session = await self._get_session()
-            
-            # 从Jupiter API获取代币列表
-            token_url = self.jup_api_urls[2]  # 使用代币API端点
-            logger.debug(f"正在从 {token_url} 获取代币列表")
-            
-            async with session.get(token_url) as response:
-                if response.status == 200:
-                    tokens_data = await response.json()
+        last_error = None
+        session = None
+        
+        for retry in range(self.max_retries):
+            try:
+                if session is None or session.closed:
+                    session = await self._get_session()
+                
+                # 从Jupiter API获取代币列表
+                token_url = self.jup_api_urls[2]  # 使用代币API端点
+                logger.debug(f"正在从 {token_url} 获取代币列表 (第 {retry + 1} 次尝试)")
+                
+                # 添加请求参数和额外的头部信息
+                headers = {
+                    **self.headers,
+                    'Origin': 'https://jup.ag',
+                    'Referer': 'https://jup.ag/'
+                }
+                
+                async with session.get(token_url, headers=headers, timeout=self.timeout) as response:
+                    response_text = await response.text()
+                    logger.debug(f"API响应状态码: {response.status}")
+                    logger.debug(f"API响应头: {response.headers}")
+                    logger.debug(f"API响应内容: {response_text[:200]}...")  # 记录响应内容的前200个字符
                     
-                    # 处理代币数据
-                    supported_tokens = []
-                    for token in tokens_data:
-                        if isinstance(token, dict):  # 确保token是字典类型
-                            token_info = {
-                                'address': token.get('address'),
-                                'symbol': token.get('symbol'),
-                                'name': token.get('name'),
-                                'decimals': token.get('decimals'),
-                                'logo': token.get('logoURI'),
-                                'tags': token.get('tags', [])
-                            }
-                            # 只添加有效的代币信息
-                            if all([token_info['address'], token_info['symbol'], token_info['name']]):
-                                supported_tokens.append(token_info)
-                    
-                    # 确保SOL代币在列表中且在第一位
-                    if not any(token['address'] == self.sol_token_info['address'] for token in supported_tokens):
-                        supported_tokens.insert(0, self.sol_token_info)
-                    
-                    logger.debug(f"成功获取到 {len(supported_tokens)} 个代币")
-                    return supported_tokens
-                else:
-                    error_msg = f"获取代币列表失败: HTTP {response.status}"
-                    logger.error(error_msg)
-                    # 尝试读取错误响应
-                    try:
-                        error_data = await response.text()
-                        logger.error(f"错误响应: {error_data}")
-                    except:
-                        pass
-                    raise SwapError(error_msg)
-                    
-        except aiohttp.ClientError as e:
-            error_msg = f"请求代币列表失败: {str(e)}"
-            logger.error(error_msg)
-            raise SwapError(error_msg)
-        except Exception as e:
-            error_msg = f"获取代币列表时发生错误: {str(e)}"
-            logger.error(error_msg)
-            raise SwapError(error_msg)
-        finally:
-            if session and not session.closed:
-                await session.close()
-                self.session = None
+                    if response.status == 200:
+                        try:
+                            tokens_data = json.loads(response_text)
+                            logger.debug(f"解析到的代币数据类型: {type(tokens_data)}")
+                            
+                            # 处理代币数据
+                            supported_tokens = []
+                            
+                            # 根据响应格式处理数据
+                            if isinstance(tokens_data, dict):
+                                # 新版API格式
+                                for token_address, token_data in tokens_data.items():
+                                    try:
+                                        if isinstance(token_data, dict):
+                                            token_info = {
+                                                'address': token_address,
+                                                'symbol': token_data.get('symbol'),
+                                                'name': token_data.get('name'),
+                                                'decimals': token_data.get('decimals'),
+                                                'logo': token_data.get('logoURI'),
+                                                'tags': token_data.get('tags', [])
+                                            }
+                                            if all([token_info['address'], token_info['symbol'], token_info['name']]):
+                                                supported_tokens.append(token_info)
+                                    except Exception as e:
+                                        logger.warning(f"处理代币 {token_address} 时出错: {str(e)}")
+                                        continue
+                            elif isinstance(tokens_data, list):
+                                # 旧版API格式
+                                for token in tokens_data:
+                                    try:
+                                        if isinstance(token, dict):
+                                            token_info = {
+                                                'address': token.get('address'),
+                                                'symbol': token.get('symbol'),
+                                                'name': token.get('name'),
+                                                'decimals': token.get('decimals'),
+                                                'logo': token.get('logoURI'),
+                                                'tags': token.get('tags', [])
+                                            }
+                                            if all([token_info['address'], token_info['symbol'], token_info['name']]):
+                                                supported_tokens.append(token_info)
+                                    except Exception as e:
+                                        logger.warning(f"处理代币数据时出错: {str(e)}")
+                                        continue
+                            else:
+                                raise SwapError(f"未知的代币数据格式: {type(tokens_data)}")
+                            
+                            # 确保SOL代币在列表中且在第一位
+                            if not any(token['address'] == self.sol_token_info['address'] for token in supported_tokens):
+                                supported_tokens.insert(0, self.sol_token_info)
+                            
+                            logger.debug(f"成功获取到 {len(supported_tokens)} 个代币")
+                            if len(supported_tokens) == 0:
+                                logger.error("没有找到任何有效的代币数据")
+                                raise SwapError("没有找到任何有效的代币数据")
+                                
+                            return supported_tokens
+                            
+                        except json.JSONDecodeError as e:
+                            error_msg = f"解析代币数据失败: {str(e)}"
+                            logger.error(f"{error_msg}, 响应内容: {response_text[:200]}...")
+                            last_error = error_msg
+                    else:
+                        error_msg = f"获取代币列表失败: HTTP {response.status}"
+                        logger.error(f"{error_msg}, 响应内容: {response_text}")
+                        last_error = error_msg
+                
+                # 如果到达这里，说明需要重试
+                retry_wait = self.retry_delay * (retry + 1)  # 使用指数退避
+                logger.warning(f"获取代币列表失败，{retry_wait}秒后重试...")
+                await asyncio.sleep(retry_wait)
+                
+            except aiohttp.ClientError as e:
+                error_msg = f"请求代币列表失败: {str(e)}"
+                logger.error(error_msg)
+                last_error = error_msg
+                if retry < self.max_retries - 1:
+                    retry_wait = self.retry_delay * (retry + 1)
+                    await asyncio.sleep(retry_wait)
+            except Exception as e:
+                error_msg = f"获取代币列表时发生错误: {str(e)}"
+                logger.error(f"{error_msg}, 错误类型: {type(e)}")
+                last_error = error_msg
+                if retry < self.max_retries - 1:
+                    retry_wait = self.retry_delay * (retry + 1)
+                    await asyncio.sleep(retry_wait)
+            finally:
+                if session and not session.closed:
+                    await session.close()
+                    session = None
+        
+        # 如果所有重试都失败了
+        raise SwapError(f"获取代币列表失败，已重试{self.max_retries}次。最后的错误: {last_error}")
 
     def get_tokens(self) -> List[Dict[str, Any]]:
         """获取支持的代币列表（同步方法）
@@ -118,8 +181,8 @@ class SolanaSwapService:
         Args:
             wallet_id: 钱包ID
             device_id: 设备ID
-            from_token: 源代币地址
-            to_token: 目标代币地址
+            from_token: 支付代币地址
+            to_token: 接收代币地址
             amount: 兑换数量
             slippage: 滑点容忍度（可选）
 
@@ -163,7 +226,7 @@ class SolanaSwapService:
         self.jup_api_urls = [
             "https://quote-api.jup.ag/v6",  # 报价API
             "https://public-api.birdeye.so/public",  # Birdeye API
-            "https://token.jup.ag/strict"    # 代币API
+            "https://token.jup.ag/strict"    # 使用 strict 端点替代 all 端点
         ]
         self.current_api_url_index = 0
         
@@ -178,10 +241,10 @@ class SolanaSwapService:
         
         # 设置 aiohttp 会话配置
         self.timeout = aiohttp.ClientTimeout(
-            total=30,    # 总超时时间
-            connect=10,  # 连接超时时间
-            sock_connect=10,
-            sock_read=10
+            total=60,     # 总超时时间
+            connect=20,   # 连接超时时间
+            sock_connect=20,
+            sock_read=30  # 读取超时时间
         )
         
         # 请求头
@@ -192,8 +255,8 @@ class SolanaSwapService:
         }
         
         # 重试配置
-        self.max_retries = 3
-        self.retry_delay = 1  # 重试间隔（秒）
+        self.max_retries = 5
+        self.retry_delay = 2
         
         # 初始化价格服务
         self.price_service = SolanaPriceService()
@@ -201,16 +264,20 @@ class SolanaSwapService:
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取或创建 aiohttp 会话"""
         if self.session is None or self.session.closed:
+            # 配置代理
             connector = aiohttp.TCPConnector(
                 ssl=False,  # 禁用SSL验证
                 force_close=True,
-                enable_cleanup_closed=True
+                enable_cleanup_closed=True,
+                use_dns_cache=False  # 禁用DNS缓存
             )
             
+            # 创建会话时添加代理支持
             self.session = aiohttp.ClientSession(
                 timeout=self.timeout,
                 headers=self.headers,
-                connector=connector
+                connector=connector,
+                trust_env=True  # 允许从环境变量读取代理设置
             )
         return self.session
     
@@ -228,29 +295,67 @@ class SolanaSwapService:
         """获取兑换报价
         
         Args:
-            from_token: 源代币地址
-            to_token: 目标代币地址
+            from_token: 支付代币地址
+            to_token: 接收代币地址
             amount: 兑换数量
             slippage: 滑点容忍度
             
         Returns:
             Dict[str, Any]: 兑换报价信息
         """
+        # 首先获取代币精度信息
+        from_decimals = 9  # 默认使用 SOL 的精度
+        
+        try:
+            # 常见代币精度映射
+            token_decimals_map = {
+                'So11111111111111111111111111111111111111112': 9,  # SOL
+                'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 6,  # USDC
+                'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 5,  # Bonk
+            }
+            
+            # 首先检查是否是常见代币
+            if from_token in token_decimals_map:
+                from_decimals = token_decimals_map[from_token]
+                logger.debug(f"从常见代币映射中获取代币 {from_token} 的精度: {from_decimals}")
+            else:
+                # 尝试从代币列表获取精度
+                tokens_session = await self._get_session()
+                try:
+                    tokens = await self.get_supported_tokens()
+                    
+                    # 查找源代币的精度
+                    for token in tokens:
+                        if token.get('address') == from_token:
+                            from_decimals = token.get('decimals')
+                            logger.debug(f"找到源代币 {from_token} 的精度: {from_decimals}")
+                            break
+                finally:
+                    # 确保关闭tokens_session
+                    if tokens_session and not tokens_session.closed:
+                        await tokens_session.close()
+        except Exception as e:
+            logger.error(f"获取代币精度时出错: {str(e)}")
+            # 继续使用默认精度
+        
+        # 根据代币精度正确转换金额
+        amount_in_smallest_unit = int(amount * Decimal(f'1{"0" * from_decimals}'))
+        
+        logger.debug(f"代币 {from_token} 精度: {from_decimals}, 原始金额: {amount}, 转换后金额: {amount_in_smallest_unit}")
+        
         last_error = None
         # 遍历所有 API 端点
         for api_url in self.jup_api_urls:
             for retry in range(self.max_retries):
+                session = None
                 try:
                     session = await self._get_session()
                     
                     # 构建请求参数
-                    # 将amount转换为lamports (1 SOL = 10^9 lamports)
-                    amount_lamports = int(amount * Decimal('1000000000'))
-                    
                     params = {
                         'inputMint': from_token,
                         'outputMint': to_token,
-                        'amount': str(amount_lamports),
+                        'amount': str(amount_in_smallest_unit),
                         'slippageBps': str(int(slippage * 100)) if slippage else '50'
                     }
                     
@@ -320,278 +425,145 @@ class SolanaSwapService:
         private_key: str,
         slippage: Optional[Decimal] = None
     ) -> Dict[str, Any]:
-        """执行代币兑换交易"""
+        """执行代币兑换
+        
+        Args:
+            quote_id: 报价ID
+            from_token: 支付代币地址
+            to_token: 接收代币地址
+            amount: 兑换数量
+            from_address: 发送方地址
+            private_key: 私钥
+            slippage: 滑点容忍度
+            
+        Returns:
+            Dict[str, Any]: 交易结果
+        """
+        # 首先获取代币精度信息
+        from_decimals = 9  # 默认使用 SOL 的精度
+        
         try:
-            # 解析并验证 quote_id
+            # 常见代币精度映射
+            token_decimals_map = {
+                'So11111111111111111111111111111111111111112': 9,  # SOL
+                'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 6,  # USDC
+                'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 5,  # Bonk
+            }
+            
+            # 首先检查是否是常见代币
+            if from_token in token_decimals_map:
+                from_decimals = token_decimals_map[from_token]
+                logger.debug(f"从常见代币映射中获取代币 {from_token} 的精度: {from_decimals}")
+            else:
+                # 尝试从代币列表获取精度
+                tokens_session = await self._get_session()
+                try:
+                    tokens = await self.get_supported_tokens()
+                    
+                    # 查找源代币的精度
+                    for token in tokens:
+                        if token.get('address') == from_token:
+                            from_decimals = token.get('decimals')
+                            logger.debug(f"找到源代币 {from_token} 的精度: {from_decimals}")
+                            break
+                finally:
+                    # 确保关闭tokens_session
+                    if tokens_session and not tokens_session.closed:
+                        await tokens_session.close()
+        except Exception as e:
+            logger.error(f"获取代币精度时出错: {str(e)}")
+            # 继续使用默认精度
+        
+        # 根据代币精度正确转换金额
+        amount_in_smallest_unit = int(amount * Decimal(f'1{"0" * from_decimals}'))
+        
+        logger.debug(f"执行兑换 - 代币 {from_token} 精度: {from_decimals}, 原始金额: {amount}, 转换后金额: {amount_in_smallest_unit}")
+        
+        try:
+            # 解析报价数据
             try:
                 quote_data = json.loads(quote_id)
-                # 验证代币地址是否匹配
-                if quote_data.get('inputMint') != from_token:
-                    raise SwapError(f"源代币地址不匹配: 期望 {from_token}, 实际 {quote_data.get('inputMint')}")
-                if quote_data.get('outputMint') != to_token:
-                    raise SwapError(f"目标代币地址不匹配: 期望 {to_token}, 实际 {quote_data.get('outputMint')}")
             except json.JSONDecodeError:
-                raise SwapError("无效的报价ID格式")
-            
-            # 创建 SSL 上下文
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = True
-            ssl_context.verify_mode = ssl.CERT_REQUIRED
-            
-            # 检查目标代币的关联账户是否存在
-            try:
-                # 获取关联账户地址
-                to_token_account = await self._get_associated_token_address(from_address, to_token)
-                logger.debug(f"目标代币账户地址: {to_token_account}")
+                raise SwapError("无效的报价ID")
                 
-                # 检查账户是否存在
-                account_exists = await self._check_token_account_exists(to_token_account)
-                logger.debug(f"账户是否存在: {account_exists}")
-                
-                if not account_exists and to_token != 'So11111111111111111111111111111111111111112':
-                    logger.info(f"目标代币账户不存在，准备创建: {to_token_account}")
-                    # 创建关联账户
-                    keypair = Keypair.from_seed(base58.b58decode(private_key)[:32])
-                    transaction = Transaction()
-                    create_ata_ix = create_associated_token_account(
-                        payer=keypair.public_key,
-                        owner=keypair.public_key,
-                        mint=PublicKey(to_token)
-                    )
-                    transaction.add(create_ata_ix)
-                    
-                    # 获取最新区块哈希
-                    client = AsyncClient(RPCConfig.SOLANA_MAINNET_RPC_URL)
-                    recent_blockhash = await client.get_recent_blockhash()
-                    if isinstance(recent_blockhash, dict):
-                        blockhash = recent_blockhash.get('result', {}).get('value', {}).get('blockhash')
-                        if not blockhash:
-                            raise SwapError("无法获取区块哈希")
-                    else:
-                        blockhash = recent_blockhash
-                    transaction.recent_blockhash = blockhash
-                    
-                    # 签名并发送交易
-                    transaction.sign(keypair)
-                    result = await client.send_raw_transaction(
-                        transaction.serialize(),
-                        opts=TxOpts(skip_preflight=True, max_retries=3)
-                    )
-                    
-                    # 等待账户创建完成
-                    await asyncio.sleep(2)
-                    logger.info("目标代币账户创建完成")
-                    await client.close()
-            except Exception as e:
-                logger.error(f"检查或创建代币账户时出错: {str(e)}")
-                raise SwapError(f"检查或创建代币账户失败: {str(e)}")
+            # 获取 API URL
+            api_url = await self._get_next_api_url()
+            session = await self._get_session()
             
-            connector = aiohttp.TCPConnector(
-                ssl=ssl_context,
-                force_close=True,
-                enable_cleanup_closed=True,
-                verify_ssl=True
-            )
+            # 检查接收方代币账户是否存在，如果不存在则创建
+            to_token_account = await self._get_associated_token_address(from_address, to_token)
+            to_token_account_exists = await self._check_token_account_exists(to_token_account)
             
-            async with aiohttp.ClientSession(
-                timeout=self.timeout,
-                headers=self.headers,
-                connector=connector
-            ) as session:
-                # 构建请求参数
-                swap_params = {
-                    'quoteResponse': quote_data,
-                    'userPublicKey': from_address,
-                    'wrapAndUnwrapSol': True,
-                    'computeUnitPriceMicroLamports': 1000,  # 添加计算单元价格
-                    'asLegacyTransaction': True  # 使用传统交易格式
-                }
+            # 构建交易请求
+            swap_request = {
+                'quoteResponse': quote_data,
+                'userPublicKey': from_address,
+                'wrapUnwrapSOL': True,
+                'feeAccount': None,
+                'computeUnitPriceMicroLamports': 1000,  # 设置计算单元价格
+                'asLegacyTransaction': False,  # 使用新版交易格式
+            }
+            
+            if not to_token_account_exists:
+                swap_request['destinationTokenAccount'] = to_token_account
                 
-                logger.debug(f"Swap请求参数: {swap_params}")
+            # 发送交易请求
+            url = f"{api_url}/swap"
+            logger.debug(f"交易请求URL: {url}")
+            logger.debug(f"交易请求数据: {swap_request}")
+            
+            async with session.post(url, json=swap_request) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"交易请求失败: {error_text}")
+                    raise SwapError(f"交易请求失败: {error_text}")
+                    
+                swap_response = await response.json()
+                logger.debug(f"交易响应: {swap_response}")
                 
                 # 获取交易数据
-                url = f"{self.jup_api_urls[0]}/swap"  # 使用主API端点
-                logger.debug(f"请求交易数据URL: {url}")
-                
-                async with session.post(url, json=swap_params) as response:
-                    response_text = await response.text()
-                    logger.debug(f"Jupiter API响应: {response_text}")
+                swap_transaction = swap_response.get('swapTransaction')
+                if not swap_transaction:
+                    raise SwapError("交易响应中缺少交易数据")
                     
-                    if response.status == 200:
-                        swap_data = await response.json()
-                        logger.debug(f"交换数据: {swap_data}")
-                        
-                        if not swap_data.get('swapTransaction'):
-                            logger.error("缺少swapTransaction数据")
-                            raise SwapError("无效的交换数据: 缺少交易信息")
-                        
-                        # 创建并签名交易
-                        try:
-                            # 解码私钥
-                            keypair = Keypair.from_seed(base58.b58decode(private_key)[:32])
-                            
-                            # 获取并验证交易数据
-                            swap_transaction = swap_data.get('swapTransaction')
-                            if not swap_transaction:
-                                raise SwapError("交易数据为空")
-                            
-                            # 解码并验证交易数据
-                            try:
-                                # 记录原始交易数据
-                                logger.debug(f"原始交易数据: {swap_transaction}")
-                                
-                                # 验证base64格式
-                                try:
-                                    transaction_bytes = base64.b64decode(swap_transaction)
-                                    logger.debug(f"成功解码交易数据，长度: {len(transaction_bytes)}")
-                                except Exception as e:
-                                    logger.error(f"Base64解码失败: {str(e)}")
-                                    raise SwapError(f"交易数据格式无效: {str(e)}")
-                                
-                                if not transaction_bytes:
-                                    raise SwapError("交易数据解码后为空")
-                                
-                                # 添加详细的日志记录
-                                logger.debug(f"解码后的交易数据长度: {len(transaction_bytes)}")
-                                logger.debug(f"解码后的交易数据: {transaction_bytes.hex()}")
-                                
-                                # 创建交易并添加错误处理
-                                try:
-                                    transaction = Transaction.deserialize(transaction_bytes)
-                                    logger.debug(f"成功反序列化交易")
-                                except ValueError as ve:
-                                    logger.error(f"交易数据值错误: {str(ve)}")
-                                    raise SwapError(f"交易数据值错误: {str(ve)}")
-                                except Exception as e:
-                                    logger.error(f"交易数据反序列化失败: {str(e)}，数据长度: {len(transaction_bytes)}")
-                                    raise SwapError(f"交易数据无效: {str(e)}")
-                                
-                                # 签名交易
-                                transaction.sign(keypair)
-                                logger.debug("交易签名完成")
-                                
-                                # 发送交易
-                                client = AsyncClient(
-                                    endpoint=RPCConfig.SOLANA_MAINNET_RPC_URL,
-                                    commitment=Commitment("confirmed")
-                                )
-                                
-                                logger.debug(f"准备发送交易到RPC节点: {RPCConfig.SOLANA_MAINNET_RPC_URL}")
-                                
-                                # 序列化交易
-                                serialized_tx = transaction.serialize()
-                                logger.debug(f"交易序列化完成，数据长度: {len(serialized_tx)}")
-                                
-                                # 发送交易
-                                opts = TxOpts(skip_preflight=True, max_retries=3)
-                                result = await client.send_raw_transaction(
-                                    serialized_tx,
-                                    opts=opts
-                                )
-                                
-                                logger.debug(f"RPC响应结果: {result}")
-                                
-                                if isinstance(result, dict) and 'error' in result:
-                                    error_msg = result.get('error', {})
-                                    if isinstance(error_msg, dict):
-                                        error_msg = error_msg.get('message', str(error_msg))
-                                    raise SwapError(f"发送交易失败: {error_msg}")
-                                
-                                tx_hash = result.get('result') if isinstance(result, dict) else result
-                                if not tx_hash:
-                                    raise SwapError("无法获取交易哈希")
-                                    
-                                # 等待交易确认
-                                logger.info(f"等待交易确认: {tx_hash}")
-                                max_retries = 15  # 增加重试次数
-                                for i in range(max_retries):
-                                    try:
-                                        tx_info = await client.get_transaction(
-                                            tx_hash,
-                                            commitment=Commitment("confirmed")
-                                        )
-                                        if tx_info and isinstance(tx_info, dict):
-                                            tx_result = tx_info.get('result', {})
-                                            if tx_result:
-                                                meta = tx_result.get('meta', {})
-                                                if meta.get('err') is not None:
-                                                    error_msg = meta.get('err')
-                                                    logger.error(f"交易执行失败，错误信息: {error_msg}")
-                                                    
-                                                    # 处理常见错误
-                                                    if isinstance(error_msg, dict):
-                                                        if 'InstructionError' in error_msg:
-                                                            instruction_idx, error_detail = error_msg['InstructionError']
-                                                            if isinstance(error_detail, dict):
-                                                                if error_detail.get('Custom') == 1:
-                                                                    raise SwapError("交易执行失败: 滑点过大或流动性不足，请调整滑点或减少交易数量")
-                                                                elif error_detail.get('Custom') == 6000:
-                                                                    raise SwapError("交易执行失败: 余额不足")
-                                                                else:
-                                                                    raise SwapError(f"交易执行失败: 指令错误 (指令 {instruction_idx}, 错误码 {error_detail})")
-                                                    
-                                                    # 如果不是已知错误，返回原始错误信息
-                                                    raise SwapError(f"交易执行失败: {error_msg}")
-                                                logger.info("交易已确认")
-                                                break
-                                        await asyncio.sleep(2)  # 增加等待时间
-                                    except SwapError:
-                                        raise
-                                    except Exception as e:
-                                        logger.warning(f"检查交易状态失败: {str(e)}")
-                                        if i == max_retries - 1:
-                                            logger.error("交易确认超时，请检查交易状态")
-                                            raise SwapError("交易确认超时，请在区块浏览器中检查交易状态")
-                                        await asyncio.sleep(2)  # 增加等待时间
-                                        continue
-                                
-                                return {
-                                    'status': 'success',
-                                    'tx_hash': tx_hash,
-                                    'from_token': from_token,
-                                    'to_token': to_token,
-                                    'amount_in': str(amount),
-                                    'amount_out': quote_data.get('outAmount'),
-                                    'price_impact': quote_data.get('priceImpactPct'),
-                                    'exchange': 'Jupiter',
-                                    'block_number': tx_result.get('slot', 0) if tx_result else 0,
-                                    'block_timestamp': tx_result.get('blockTime', 0) if tx_result else 0,
-                                    'token_info': {
-                                        'address': from_token,
-                                        'name': 'Silly Dragon',
-                                        'symbol': 'SILLY',
-                                        'decimals': 9,
-                                        'logo': 'https://d23exngyjlavgo.cloudfront.net/solana_7EYnhQoR9YM3N7UoaKRoA44Uy8JeaZV3qyouov87awMs',
-                                        'to_token': {
-                                            'address': to_token,
-                                            'name': 'Solana',
-                                            'symbol': 'SOL',
-                                            'decimals': 9,
-                                            'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png'
-                                        }
-                                    }
-                                }
-                                
-                            except SwapError:
-                                raise
-                            except Exception as e:
-                                logger.error(f"处理交易数据时发生错误: {str(e)}")
-                                raise SwapError(f"处理交易数据时发生错误: {str(e)}")
-                            
-                        except Exception as e:
-                            logger.error(f"处理交易失败: {str(e)}")
-                            raise SwapError(f"处理交易失败: {str(e)}")
-                    else:
-                        error_msg = f"获取交易数据失败 - 状态码: {response.status}, 响应内容: {response_text}"
-                        logger.error(error_msg)
-                        raise SwapError(error_msg)
-                        
-        except aiohttp.ClientError as e:
-            logger.error(f"请求兑换接口失败: {str(e)}")
-            raise SwapError(f"请求兑换接口失败: {str(e)}")
+                # 解码交易
+                try:
+                    # 解码 base64 编码的交易
+                    transaction_bytes = base64.b64decode(swap_transaction)
+                    
+                    # 创建交易对象
+                    transaction = Transaction.deserialize(transaction_bytes)
+                    
+                    # 使用私钥签名交易
+                    private_key_bytes = base58.b58decode(private_key)
+                    keypair = Keypair.from_secret_key(private_key_bytes)
+                    transaction.sign([keypair])
+                    
+                    # 序列化签名后的交易
+                    signed_transaction = transaction.serialize()
+                    
+                    # 发送交易到 Solana 网络
+                    solana_client = AsyncClient("https://api.mainnet-beta.solana.com")
+                    signature = await solana_client.send_raw_transaction(signed_transaction)
+                    
+                    logger.info(f"交易已发送，签名: {signature}")
+                    
+                    # 返回交易结果
+                    return {
+                        'status': 'success',
+                        'signature': signature,
+                        'from_token': from_token,
+                        'to_token': to_token,
+                        'amount': str(amount)
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"处理交易时出错: {str(e)}")
+                    raise SwapError(f"处理交易时出错: {str(e)}")
+                    
         except Exception as e:
-            logger.error(f"执行代币兑换失败: {str(e)}")
-            raise SwapError(f"执行代币兑换失败: {str(e)}")
+            logger.error(f"执行兑换失败: {str(e)}")
+            raise SwapError(f"执行兑换失败: {str(e)}")
 
     async def _get_associated_token_address(self, wallet_address: str, token_address: str) -> str:
         """获取关联代币账户地址"""
@@ -799,8 +771,8 @@ class SolanaSwapService:
         """估算交易费用
         
         Args:
-            from_token: 源代币地址
-            to_token: 目标代币地址
+            from_token: 支付代币地址
+            to_token: 接收代币地址
             amount: 兑换数量
             wallet_address: 钱包地址
             
