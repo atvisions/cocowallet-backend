@@ -284,6 +284,45 @@ class SolanaSwapService:
         self.current_api_url_index = (self.current_api_url_index + 1) % len(self.jup_api_urls)
         return self.jup_api_urls[self.current_api_url_index]
     
+    async def _get_token_decimals(self, token_address: str) -> int:
+        """获取代币精度
+        
+        Args:
+            token_address: 代币地址
+            
+        Returns:
+            int: 代币精度
+        """
+        try:
+            # 如果是 SOL
+            if token_address == "So11111111111111111111111111111111111111112":
+                return 9
+                
+            # 从 Jupiter API 获取代币信息
+            session = await self._get_session()
+            url = f"{self.jup_api_urls[2]}/{token_address}"
+            
+            async with session.get(url) as response:
+                if response.status == 200:
+                    token_data = await response.json()
+                    if isinstance(token_data, dict) and 'decimals' in token_data:
+                        return int(token_data['decimals'])
+                        
+                logger.error(f"获取代币信息失败: HTTP {response.status}")
+                response_text = await response.text()
+                logger.error(f"响应内容: {response_text}")
+                
+            # 如果获取失败，尝试从 RPC 获取
+            token_account_info = await self.rpc_client.get_token_supply(token_address)
+            if token_account_info and 'result' in token_account_info:
+                return int(token_account_info['result']['value']['decimals'])
+                
+            raise SwapError(f"无法获取代币 {token_address} 的精度信息")
+            
+        except Exception as e:
+            logger.error(f"获取代币精度失败: {str(e)}")
+            raise SwapError(f"获取代币精度失败: {str(e)}")
+
     async def get_swap_quote(self, 
         from_token: str,
         to_token: str,
@@ -291,48 +330,189 @@ class SolanaSwapService:
         slippage: Optional[Decimal] = None
     ) -> Dict[str, Any]:
         """获取兑换报价"""
+        last_error = None
         session = None
-        try:
-            session = await self._get_session()
-            
-            # 构建请求参数
-            params = {
-                'inputMint': from_token,
-                'outputMint': to_token,
-                'amount': str(int(amount)),
-                'slippageBps': str(int(slippage * 100)) if slippage else '50'
-            }
-            
-            url = f"{self.jup_api_urls[0]}/quote"
-            logger.debug(f"请求报价 URL: {url}, 参数: {params}")
-            
-            async with session.get(url, params=params) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise SwapError(f"获取报价失败: {error_text}")
+        
+        logger.info("==================== 开始获取兑换报价 ====================")
+        logger.info(f"交易信息: {from_token} -> {to_token}, 金额: {amount}, 滑点: {slippage}")
+        
+        for retry in range(self.max_retries):
+            try:
+                logger.info(f"第 {retry + 1} 次尝试获取报价")
+                session = await self._get_session()
+                
+                # 获取代币精度并转换金额
+                try:
+                    # 将输入的字符串转换为 Decimal，确保精确计算
+                    amount_decimal = Decimal(str(amount))
                     
-                quote_data = await response.json()
-                return {
-                    'from_token': {
-                        'address': from_token,
-                        'amount': quote_data.get('inAmount')
-                    },
-                    'to_token': {
-                        'address': to_token,
-                        'amount': quote_data.get('outAmount')
-                    },
-                    'price_impact': quote_data.get('priceImpactPct'),
-                    'minimum_received': quote_data.get('otherAmountThreshold'),
-                    'route': quote_data.get('routePlan'),
-                    'quote_id': json.dumps(quote_data)
+                    if from_token == "So11111111111111111111111111111111111111112":
+                        # SOL 的精度是 9，将 SOL 转换为 lamports
+                        decimals = 9
+                        amount_in_lamports = int(amount_decimal * Decimal('1000000000'))
+                        amount_str = str(amount_in_lamports)
+                        logger.info(f"SOL 金额转换: {amount_decimal} SOL = {amount_str} lamports")
+                    else:
+                        # 获取其他代币的精度
+                        decimals = await self._get_token_decimals(from_token)
+                        amount_in_units = int(amount_decimal * Decimal(10) ** decimals)
+                        amount_str = str(amount_in_units)
+                        logger.info(f"代币金额转换: {amount_decimal} -> {amount_str} (精度: {decimals})")
+                    
+                    logger.info(f"金额转换详情: {{\n" +
+                              f"  原始金额: {amount_decimal},\n" +
+                              f"  代币类型: {'SOL' if from_token == 'So11111111111111111111111111111111111111112' else 'Other'},\n" +
+                              f"  精度: {decimals},\n" +
+                              f"  转换后金额: {amount_str}\n" +
+                              f"}}")
+                    
+                except Exception as e:
+                    logger.error(f"金额转换错误: {{\n" +
+                               f"  错误: {str(e)},\n" +
+                               f"  原始金额: {amount},\n" +
+                               f"  金额类型: {type(amount)}\n" +
+                               f"}}")
+                    raise SwapError(f"金额转换失败: {str(e)}")
+                
+                # 构建请求参数
+                params = {
+                    'inputMint': from_token,
+                    'outputMint': to_token,
+                    'amount': amount_str,
+                    'slippageBps': str(int(slippage * 100)) if slippage else '50',
+                    'onlyDirectRoutes': 'false',
+                    'asLegacyTransaction': 'true',
+                    'platformFeeBps': '0'
                 }
                 
+                url = f"{self.jup_api_urls[0]}/quote"
+                logger.info(f"Jupiter API请求详情: {{\n" +
+                          f"  URL: {url},\n" +
+                          f"  参数: {json.dumps(params, indent=2)},\n" +
+                          f"  Headers: {json.dumps(dict(self.headers), indent=2)}\n" +
+                          f"}}")
+                
+                async with session.get(url, params=params) as response:
+                    response_text = await response.text()
+                    logger.info(f"Jupiter API响应详情: {{\n" +
+                              f"  状态码: {response.status},\n" +
+                              f"  响应头: {dict(response.headers)},\n" +
+                              f"  响应体: {response_text}\n" +
+                              f"}}")
+                    
+                    if response.status != 200:
+                        error_msg = f"获取报价失败: HTTP {response.status}"
+                        try:
+                            error_data = json.loads(response_text)
+                            logger.error(f"错误响应解析: {{\n" +
+                                       f"  错误码: {error_data.get('errorCode')},\n" +
+                                       f"  错误信息: {error_data.get('error')},\n" +
+                                       f"  原始响应: {response_text}\n" +
+                                       f"}}")
+                        except:
+                            logger.error(f"无法解析错误响应: {response_text}")
+                        
+                        if retry < self.max_retries - 1:
+                            wait_time = self.retry_delay * (retry + 1)
+                            logger.info(f"等待 {wait_time} 秒后重试...")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        raise SwapError(error_msg)
+                    
+                    try:
+                        quote_data = json.loads(response_text)
+                        logger.info(f"报价数据解析结果: {{\n" +
+                                  f"  输入金额: {quote_data.get('inAmount')},\n" +
+                                  f"  输出金额: {quote_data.get('outAmount')},\n" +
+                                  f"  价格影响: {quote_data.get('priceImpactPct')},\n" +
+                                  f"  最小接收: {quote_data.get('otherAmountThreshold')},\n" +
+                                  f"  路由计划: {json.dumps(quote_data.get('routePlan'), indent=2)}\n" +
+                                  f"}}")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"解析报价响应失败: {str(e)}, 响应内容: {response_text}")
+                        raise SwapError(f"解析报价数据失败: {str(e)}")
+                    
+                    # 验证必要的字段
+                    required_fields = ['inAmount', 'outAmount', 'otherAmountThreshold']
+                    missing_fields = [field for field in required_fields if field not in quote_data]
+                    if missing_fields:
+                        error_msg = f"报价数据缺少必要字段: {', '.join(missing_fields)}"
+                        logger.error(f"{error_msg}, 完整数据: {quote_data}")
+                        raise SwapError(error_msg)
+                    
+                    # 记录解析后的报价数据
+                    logger.debug(f"解析后的报价数据: {{\n" +
+                                f"  inAmount: {quote_data.get('inAmount')},\n" +
+                                f"  outAmount: {quote_data.get('outAmount')},\n" +
+                                f"  priceImpact: {quote_data.get('priceImpactPct')},\n" +
+                                f"  otherAmountThreshold: {quote_data.get('otherAmountThreshold')}\n" +
+                                f"}}")
+                    
+                    return {
+                        'from_token': {
+                            'address': from_token,
+                            'amount': quote_data.get('inAmount')
+                        },
+                        'to_token': {
+                            'address': to_token,
+                            'amount': quote_data.get('outAmount')
+                        },
+                        'price_impact': quote_data.get('priceImpactPct'),
+                        'minimum_received': quote_data.get('otherAmountThreshold'),
+                        'route': quote_data.get('routePlan'),
+                        'quote_id': json.dumps(quote_data)
+                    }
+                    
+            except aiohttp.ClientError as e:
+                error_msg = f"API请求错误 (第 {retry + 1} 次尝试): {str(e)}"
+                logger.error(error_msg)
+                last_error = error_msg
+            except SwapError as e:
+                error_msg = f"兑换错误 (第 {retry + 1} 次尝试): {str(e)}"
+                logger.error(error_msg)
+                last_error = error_msg
+            except Exception as e:
+                error_msg = f"未预期的错误 (第 {retry + 1} 次尝试): {str(e)}, 类型: {type(e)}"
+                logger.error(error_msg)
+                last_error = error_msg
+            finally:
+                if session and not session.closed:
+                    await session.close()
+            
+            if retry < self.max_retries - 1:
+                wait_time = self.retry_delay * (retry + 1)
+                logger.info(f"等待 {wait_time} 秒后重试...")
+                await asyncio.sleep(wait_time)
+        
+        # 所有重试都失败后抛出最后的错误
+        raise SwapError(f"获取报价失败，已重试{self.max_retries}次。最后的错误: {last_error}")
+
+    def _check_route_exists(self, route_map: Dict, from_token: str, to_token: str) -> bool:
+        """检查是否存在从源代币到目标代币的路由
+        
+        Args:
+            route_map: 路由图数据
+            from_token: 源代币地址
+            to_token: 目标代币地址
+            
+        Returns:
+            bool: 是否存在路由
+        """
+        try:
+            # 检查直接路由
+            if from_token in route_map and to_token in route_map[from_token]:
+                return True
+                
+            # 检查间接路由（通过 USDC 中转）
+            usdc_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            if (from_token in route_map and usdc_address in route_map[from_token]) and \
+               (usdc_address in route_map and to_token in route_map[usdc_address]):
+                return True
+                
+            return False
         except Exception as e:
-            logger.error(f"获取报价失败: {str(e)}")
-            raise SwapError(f"获取报价失败: {str(e)}")
-        finally:
-            if session and not session.closed:
-                await session.close()
+            logger.warning(f"检查路由时出错: {str(e)}")
+            return True  # 如果检查出错，默认返回 True 继续尝试
 
     async def execute_swap(self,
         quote_id: str,
@@ -346,13 +526,27 @@ class SolanaSwapService:
         """执行代币兑换"""
         session = None
         try:
+            logger.info("==================== 开始执行兑换 ====================")
+            logger.info(f"交易信息: {{\n" +
+                      f"  钱包地址: {from_address},\n" +
+                      f"  from_token: {from_token},\n" +
+                      f"  to_token: {to_token},\n" +
+                      f"  amount: {amount}\n" +
+                      f"}}")
+            
             # 创建 keypair
             private_key_bytes = base58.b58decode(private_key)
             
             # 验证地址匹配
             try:
                 keypair = SoldersKeypair.from_bytes(private_key_bytes)
-                if str(keypair.pubkey()) != from_address:
+                pubkey = str(keypair.pubkey())
+                logger.info(f"密钥对验证: {{\n" +
+                          f"  预期地址: {from_address},\n" +
+                          f"  实际地址: {pubkey}\n" +
+                          f"}}")
+                
+                if pubkey != from_address:
                     raise SwapError("私钥与地址不匹配")
             except Exception as e:
                 logger.error(f"验证私钥失败: {str(e)}")
@@ -477,7 +671,7 @@ class SolanaSwapService:
             loop.close()
 
     def estimate_fees(self, from_token: str, to_token: str, amount: str, wallet_address: str) -> Dict[str, Any]:
-        """估算交易费用
+        """估算交易费用（同步方法）
         
         Args:
             from_token: 支付代币地址
@@ -504,85 +698,161 @@ class SolanaSwapService:
             )
         finally:
             loop.close()
-            
+
     async def _estimate_fees_async(self, from_token: str, to_token: str, amount: str, wallet_address: str) -> Dict[str, Any]:
         """估算交易费用（异步方法）"""
         try:
-            # 检查目标代币的关联账户是否存在
-            to_token_account = await self._get_associated_token_address(wallet_address, to_token)
-            account_exists = await self._check_token_account_exists(to_token_account)
+            logger.info("==================== 开始估算交易费用 ====================")
+            logger.info(f"交易信息: {{\n" +
+                      f"  钱包地址: {wallet_address},\n" +
+                      f"  from_token: {from_token},\n" +
+                      f"  to_token: {to_token},\n" +
+                      f"  amount: {amount}\n" +
+                      f"}}")
             
             # 基础交易费用（lamports）
             base_fee = 5000
             
-            # 如果需要创建关联账户，添加额外费用
-            create_ata_fee = 0
-            if not account_exists and to_token != 'So11111111111111111111111111111111111111112':
-                create_ata_fee = 2039280  # 创建关联账户的费用（约0.002039 SOL）
-            
-            # 计算总费用
-            total_fee = base_fee + create_ata_fee
-            
-            # 获取 SOL 当前价格
-            sol_price = 0
+            # 检查目标代币的关联账户
             try:
-                session = await self._get_session()
-                url = f"{self.jup_api_urls[1]}/token_price?address=So11111111111111111111111111111111111111112"
-                async with session.get(url, headers={"X-API-KEY": "f5a3c6b3-6c64-4452-a1a9-b8f707b3e98e"}) as response:
-                    if response.status == 200:
-                        price_data = await response.json()
-                        if price_data and isinstance(price_data, dict):
-                            sol_price = float(price_data.get('value', 0))
+                to_token_account = await self._get_associated_token_address(wallet_address, to_token)
+                logger.info(f"目标代币账户: {to_token_account}")
+                
+                # 检查账户是否存在
+                account_exists = await self._check_token_account_exists(to_token_account)
+                logger.info(f"目标账户状态: {{\n" +
+                          f"  地址: {to_token_account},\n" +
+                          f"  是否存在: {account_exists}\n" +
+                          f"}}")
+                
+                # 如果需要创建关联账户，添加额外费用
+                create_ata_fee = 0
+                if not account_exists and to_token != "So11111111111111111111111111111111111111112":
+                    create_ata_fee = 2039280  # 创建关联账户的费用
+                    logger.info("需要创建关联代币账户")
+                
+                # 计算总费用
+                total_fee = base_fee + create_ata_fee
+                
+                # 获取 SOL 当前价格
+                sol_price = await self._get_sol_price()
+                
+                # 计算美元价格
+                usd_fee = (total_fee / 1e9) * sol_price if sol_price > 0 else 0
+                
+                result = {
+                    'total_fee': total_fee,  # 总费用（lamports）
+                    'base_fee': base_fee,    # 基础费用（lamports）
+                    'create_ata_fee': create_ata_fee,  # 创建账户费用（如果需要）
+                    'total_fee_sol': total_fee / 1e9,  # 总费用（SOL）
+                    'total_fee_usd': usd_fee,  # 总费用（USD）
+                    'needs_ata_creation': not account_exists and to_token != "So11111111111111111111111111111111111111112"
+                }
+                
+                logger.info(f"费用估算结果: {json.dumps(result, indent=2)}")
+                return result
+                
             except Exception as e:
-                logger.warning(f"获取SOL价格失败: {str(e)}")
-            
-            # 计算美元价格
-            usd_fee = (total_fee / 1e9) * sol_price if sol_price > 0 else 0
-            
-            return {
-                'total_fee': total_fee,  # 总费用（lamports）
-                'base_fee': base_fee,    # 基础费用（lamports）
-                'create_ata_fee': create_ata_fee,  # 创建账户费用（如果需要）（lamports）
-                'total_fee_sol': total_fee / 1e9,  # 总费用（SOL）
-                'total_fee_usd': usd_fee,  # 总费用（USD）
-                'needs_ata_creation': not account_exists and to_token != 'So11111111111111111111111111111111111111112'
-            }
+                logger.error(f"估算费用时出错: {str(e)}")
+                raise SwapError(f"估算交易费用失败: {str(e)}")
             
         except Exception as e:
             logger.error(f"估算交易费用失败: {str(e)}")
             raise SwapError(f"估算交易费用失败: {str(e)}")
 
+    async def _get_sol_price(self) -> float:
+        """获取 SOL 当前价格"""
+        try:
+            session = await self._get_session()
+            url = f"{self.jup_api_urls[1]}/token_price?address=So11111111111111111111111111111111111111112"
+            
+            async with session.get(url, headers={"X-API-KEY": "f5a3c6b3-6c64-4452-a1a9-b8f707b3e98e"}) as response:
+                if response.status == 200:
+                    price_data = await response.json()
+                    if price_data and isinstance(price_data, dict):
+                        return float(price_data.get('value', 0))
+                logger.warning(f"获取 SOL 价格失败: HTTP {response.status}")
+                return 0
+        except Exception as e:
+            logger.warning(f"获取 SOL 价格失败: {str(e)}")
+            return 0
+
     async def _get_associated_token_address(self, wallet_address: str, token_address: str) -> str:
         """获取关联代币账户地址"""
         try:
-            wallet_pubkey = Pubkey.from_string(wallet_address)
-            token_pubkey = Pubkey.from_string(token_address)
+            logger.info(f"获取关联代币账户: {{\n" +
+                      f"  钱包地址: {wallet_address},\n" +
+                      f"  代币地址: {token_address}\n" +
+                      f"}}")
             
-            # 使用 find_program_address 查找关联代币账户地址
-            seeds = [
-                bytes(wallet_pubkey),
-                bytes(TOKEN_PROGRAM_ID),
-                bytes(token_pubkey)
-            ]
-            ata, _ = Pubkey.find_program_address(seeds, ASSOCIATED_TOKEN_PROGRAM_ID)
-            return str(ata)
+            # 如果是 SOL，直接返回钱包地址
+            if token_address == "So11111111111111111111111111111111111111112":
+                logger.info("SOL 代币直接使用钱包地址")
+                return wallet_address
+            
+            try:
+                # 转换钱包地址和代币地址为 Pubkey
+                wallet_pubkey = Pubkey.from_string(wallet_address)
+                token_pubkey = Pubkey.from_string(token_address)
+                token_program_id = Pubkey.from_string(str(TOKEN_PROGRAM_ID))
+                associated_token_program_id = Pubkey.from_string(str(ASSOCIATED_TOKEN_PROGRAM_ID))
+                
+                logger.debug(f"公钥转换结果: {{\n" +
+                          f"  钱包: {wallet_pubkey},\n" +
+                          f"  代币: {token_pubkey},\n" +
+                          f"  代币程序: {token_program_id},\n" +
+                          f"  关联代币程序: {associated_token_program_id}\n" +
+                          f"}}")
+                
+                # 构建种子
+                seeds = [
+                    bytes(wallet_pubkey),
+                    bytes(token_program_id),
+                    bytes(token_pubkey)
+                ]
+                
+                # 查找程序派生地址
+                ata, _ = Pubkey.find_program_address(
+                    seeds,
+                    associated_token_program_id
+                )
+                
+                ata_address = str(ata)
+                logger.info(f"关联代币账户地址: {ata_address}")
+                return ata_address
+                
+            except ValueError as e:
+                logger.error(f"公钥转换失败: {str(e)}")
+                raise SwapError(f"无效的地址格式: {str(e)}")
+                
         except Exception as e:
             logger.error(f"获取关联代币账户失败: {str(e)}")
-            raise SwapError("无法获取关联代币账户")
-
+            raise SwapError(f"无法获取关联代币账户: {str(e)}")
+            
     async def _check_token_account_exists(self, account_address: str) -> bool:
         """检查代币账户是否存在"""
         try:
             logger.debug(f"检查账户 {account_address} 是否存在")
-            client = AsyncClient(RPCConfig.SOLANA_MAINNET_RPC_URL)
-            response = await client.get_account_info(account_address)
             
-            if response and isinstance(response, dict):
-                value = response.get('result', {}).get('value')
-                exists = value is not None and len(value) > 0
-                logger.debug(f"账户 {account_address} 存在: {exists}")
-                return exists
-            return False
+            try:
+                # 转换账户地址为 Pubkey
+                account_pubkey = Pubkey.from_string(account_address)
+                logger.debug(f"账户公钥: {account_pubkey}")
+                
+                # 获取账户信息
+                response = await self.rpc_client.get_account_info(str(account_pubkey))
+                
+                if response and isinstance(response, dict):
+                    value = response.get('result', {}).get('value')
+                    exists = value is not None and len(value) > 0
+                    logger.debug(f"账户 {account_address} 存在: {exists}")
+                    return exists
+                return False
+                
+            except ValueError as e:
+                logger.error(f"账户地址转换失败: {str(e)}")
+                return False
+                
         except Exception as e:
             error_msg = f"检查代币账户失败: {str(e)}"
             if hasattr(e, '__class__'):
