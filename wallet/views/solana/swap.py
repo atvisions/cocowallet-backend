@@ -11,9 +11,11 @@ from rest_framework.parsers import JSONParser
 import logging
 import asyncio
 from decimal import Decimal
+import decimal
+import json
 
 from ...models import Wallet
-from ...services.solana.swap import SolanaSwapService
+from ...services.solana.swap import SolanaSwapService, SwapError
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
@@ -154,30 +156,45 @@ class SolanaSwapViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-    @action(detail=False, methods=['post'], url_path='execute')
+    @action(detail=False, methods=['post'])
     def execute(self, request, wallet_id=None):
-        """
-        执行兑换交易
-        """
-        device_id = request.data.get('device_id')
-        quote_id = request.data.get('quote_id')
-        from_token = request.data.get('from_token')
-        to_token = request.data.get('to_token')
-        amount = request.data.get('amount')
-        payment_password = request.data.get('payment_password')
-        slippage = request.data.get('slippage', '0.5')
-
-        if not all([device_id, quote_id, from_token, to_token, amount, payment_password]):
-            return Response(
-                {
-                    'status': 'error',
-                    'message': '缺少必要参数',
-                    'code': 'MISSING_PARAMS'
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
+        """执行代币兑换"""
         try:
+            # 获取请求参数
+            device_id = request.data.get('device_id')
+            quote_id = request.data.get('quote_id')
+            from_token = request.data.get('from_token')
+            to_token = request.data.get('to_token')
+            amount = request.data.get('amount')
+            payment_password = request.data.get('payment_password')
+            slippage = request.data.get('slippage')
+            
+            # 验证必要参数
+            if not all([device_id, quote_id, from_token, to_token, amount, payment_password]):
+                return Response(
+                    {
+                        'status': 'error',
+                        'message': '缺少必要参数',
+                        'code': 'MISSING_PARAMS'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # 验证 quote_id 格式
+            try:
+                quote_data = json.loads(quote_id)
+                logger.debug(f"解析的报价数据: {quote_data}")
+            except json.JSONDecodeError as e:
+                return Response(
+                    {
+                        'status': 'error',
+                        'message': '无效的报价数据格式',
+                        'code': 'INVALID_QUOTE_FORMAT'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # 验证钱包访问权限
             wallet = get_object_or_404(Wallet, id=wallet_id)
             if not self.check_wallet_access(wallet, device_id):
                 return Response(
@@ -188,76 +205,131 @@ class SolanaSwapViewSet(viewsets.ViewSet):
                     },
                     status=status.HTTP_403_FORBIDDEN
                 )
-                
-            # 验证支付密码并获取私钥
+            
+            # 验证支付密码
             if not wallet.check_payment_password(payment_password):
                 return Response(
                     {
                         'status': 'error',
                         'message': '支付密码错误',
                         'code': 'INVALID_PAYMENT_PASSWORD'
-                    },
+                    }, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
+            # 设置支付密码并获取私钥
+            wallet.payment_password = payment_password
             try:
-                # 设置支付密码属性
-                wallet.payment_password = payment_password
                 private_key = wallet.decrypt_private_key()
+                if not private_key:
+                    raise ValueError("获取私钥失败")
             except Exception as e:
                 logger.error(f"解密私钥失败: {str(e)}")
                 return Response(
                     {
                         'status': 'error',
-                        'message': f'解密私钥失败: {str(e)}',
-                        'code': 'DECRYPT_FAILED'
-                    },
+                        'message': f'获取私钥失败: {str(e)}',
+                        'code': 'GET_PRIVATE_KEY_FAILED'
+                    }, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
-
-            # 创建事件循环
+            
+            # 转换数值类型并处理精度
+            try:
+                # 获取代币精度
+                from_token_decimals = 5  # Bonk 代币精度为 5
+                if from_token == 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v':
+                    from_token_decimals = 6  # USDC 代币精度为 6
+                elif from_token == 'So11111111111111111111111111111111111111112':
+                    from_token_decimals = 9  # SOL 代币精度为 9
+                
+                # 转换金额为 Decimal
+                amount_decimal = Decimal(amount)
+                
+                # 转换滑点
+                if slippage:
+                    slippage = Decimal(slippage)
+                else:
+                    slippage = Decimal('0.5')
+                    
+                # 确保金额不超过代币精度
+                max_decimals = Decimal('10') ** (-from_token_decimals)
+                if amount_decimal % max_decimals != 0:
+                    return Response(
+                        {
+                            'status': 'error',
+                            'message': f'金额精度超过代币精度 ({from_token_decimals})',
+                            'code': 'INVALID_AMOUNT_PRECISION'
+                        }, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+            except (TypeError, ValueError, decimal.InvalidOperation) as e:
+                return Response(
+                    {
+                        'status': 'error',
+                        'message': f'金额或滑点格式错误: {str(e)}',
+                        'code': 'INVALID_NUMBER_FORMAT'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # 执行兑换
+            swap_service = SolanaSwapService()
+            
+            # 异步执行兑换
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
             try:
-                swap_service = SolanaSwapService()
-                # 同步调用异步方法
                 result = loop.run_until_complete(
                     swap_service.execute_swap(
                         quote_id=quote_id,
                         from_token=from_token,
                         to_token=to_token,
-                        amount=Decimal(amount),
+                        amount=int(amount_decimal),  # 转换为整数
                         from_address=wallet.address,
                         private_key=private_key,
-                        slippage=float(slippage)
+                        slippage=slippage
                     )
                 )
+                
                 return Response({
                     'status': 'success',
                     'data': result
                 })
+            except SwapError as e:
+                logger.error(f"执行兑换失败: {str(e)}")
+                return Response(
+                    {
+                        'status': 'error',
+                        'message': str(e),
+                        'code': 'SWAP_FAILED'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            except Exception as e:
+                logger.error(f"执行兑换时发生未知错误: {str(e)}")
+                return Response(
+                    {
+                        'status': 'error',
+                        'message': f'执行兑换失败: {str(e)}',
+                        'code': 'UNKNOWN_ERROR'
+                    }, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
             finally:
                 loop.close()
                 
-        except Wallet.DoesNotExist:
-            return Response(
-                {
-                    'status': 'error',
-                    'message': '钱包不存在',
-                    'code': 'WALLET_NOT_FOUND'
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
         except Exception as e:
-            logger.error(f"执行兑换交易失败: {str(e)}")
+            logger.error(f"执行兑换视图错误: {str(e)}")
             return Response(
                 {
                     'status': 'error',
-                    'message': str(e),
-                    'code': 'SWAP_FAILED'
-                },
-                status=status.HTTP_400_BAD_REQUEST
+                    'message': f'执行兑换失败: {str(e)}',
+                    'code': 'VIEW_ERROR'
+                }, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
     @action(detail=False, methods=['get'], url_path='prices')
