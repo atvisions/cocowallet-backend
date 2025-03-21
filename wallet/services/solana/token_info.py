@@ -26,156 +26,141 @@ class SolanaTokenInfoService:
         self.timeout = aiohttp.ClientTimeout(total=30, connect=5, sock_connect=5, sock_read=10)
         self.max_retries = 3
 
+        # 在类的开头添加 Bonk 代币的常量
+        self.BONK_TOKEN_INFO = {
+            'name': 'Bonk',
+            'symbol': 'BONK',
+            'decimals': 5,
+            'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263/logo.png',
+            'description': 'Bonk is a community driven project on Solana',
+            'website': 'https://bonkcoin.com',
+            'twitter': 'https://twitter.com/bonk_inu',
+            'verified': True,
+            'contract_type': 'SPL'
+        }
+
+        # 添加已知代币的常量
+        self.KNOWN_TOKENS = {
+            'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': {
+                'name': 'Bonk',
+                'symbol': 'BONK',
+                'decimals': 5,
+                'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263/logo.png',
+            },
+            '2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv': {
+                'name': 'Solend',
+                'symbol': 'SLND',
+                'decimals': 6,
+                'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv/logo.png',
+                'website': 'https://solend.fi',
+                'twitter': 'https://twitter.com/solendprotocol',
+                'description': 'Solend is a decentralized lending protocol on Solana'
+            }
+        }
+
     async def get_token_info(self, token_address: str) -> Dict:
         """获取代币基本信息"""
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             try:
-                # 从 API 获取最新数据
-                url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/metadata"
-                response = await self._fetch_with_retry(session, url)
+                # 添加详细日志
+                logger.info(f"开始获取代币信息: {token_address}")
                 
-                if response:
-                    # 从 links 中提取社交媒体链接
-                    links = response.get('links', {})
-                    
-                    token_data = {
-                        'name': response.get('name', 'Unknown Token'),
-                        'symbol': response.get('symbol', 'Unknown'),
-                        'decimals': int(response.get('decimals', 0)),
-                        'logo': response.get('logo', ''),
-                        'description': response.get('description') or '',
-                        'website': links.get('website', ''),
-                        'twitter': links.get('twitter', ''),
-                        'telegram': links.get('telegram', ''),
-                        'discord': links.get('discord', ''),
-                        'github': links.get('github', ''),
-                        'medium': links.get('medium', ''),
-                        'total_supply': response.get('totalSupply', '0'),
-                        'total_supply_formatted': response.get('totalSupplyFormatted', '0'),
-                        'is_native': token_address == 'So11111111111111111111111111111111111111112',
-                        'verified': bool(response.get('metaplex', {}).get('primarySaleHappened', False)),
-                        'contract_type': response.get('standard', 'SPL'),
-                        'from_cache': False
-                    }
+                # 获取代币元数据
+                url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/metadata"
+                logger.info(f"请求Moralis元数据URL: {url}")
+                logger.info(f"请求头: {self.headers}")
+                
+                # 添加重试机制和错误处理
+                retry_count = 0
+                max_retries = 3
+                
+                while retry_count < max_retries:
+                    try:
+                        metadata_response = await self._fetch_with_retry(session, url)
+                        logger.info(f"Moralis元数据响应 (尝试 {retry_count + 1}): {metadata_response}")
+                        
+                        if metadata_response:
+                            break
+                        
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            await asyncio.sleep(1)  # 等待1秒后重试
+                    except Exception as e:
+                        logger.error(f"获取元数据失败 (尝试 {retry_count + 1}): {str(e)}")
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            await asyncio.sleep(1)
+                        else:
+                            raise
+                
+                # 获取代币价格
+                price_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/price"
+                logger.info(f"请求Moralis价格URL: {price_url}")
+                
+                retry_count = 0
+                while retry_count < max_retries:
+                    try:
+                        price_response = await self._fetch_with_retry(session, price_url)
+                        logger.info(f"Moralis价格响应 (尝试 {retry_count + 1}): {price_response}")
+                        
+                        if price_response:
+                            break
+                        
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            await asyncio.sleep(1)
+                    except Exception as e:
+                        logger.error(f"获取价格失败 (尝试 {retry_count + 1}): {str(e)}")
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            await asyncio.sleep(1)
+                        else:
+                            raise
 
-                    # 获取价格信息
-                    price_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/price"
-                    logger.info(f"获取代币价格: {price_url}")
-                    price_data = await self._fetch_with_retry(session, price_url)
-                    
-                    if price_data:
-                        logger.info(f"获取到价格数据: {price_data}")
-                        try:
-                            # 处理价格数据
-                            price = float(price_data.get('usdPrice', 0))
-                            price_change_24h = float(price_data.get('usdPrice24hrPercentChange', 0))
-                            
-                            # 计算市值
-                            total_supply = float(token_data['total_supply_formatted'])
-                            market_cap = price * total_supply
-                            
-                            # 如果价格过小，使用科学计数法
-                            if price < 0.000001:
-                                price_str = '{:.10e}'.format(price)
-                            else:
-                                price_str = str(price)
-                                
-                            token_data.update({
-                                'price': price,
-                                'price_change_24h': price_change_24h,  # 保持原始值（可以是负数）
-                                'price_change_7d': 0,  # Moralis API 目前不提供这些数据
-                                'price_change_30d': 0,
-                                'market_cap': market_cap,
-                                'market_cap_rank': 0,  # Moralis API 目前不提供这个数据
-                                'volume_24h': 0,  # Moralis API 目前不提供这个数据
-                                'volume_change_24h': 0,
-                                'circulating_supply': str(total_supply),  # 使用总供应量作为流通量
-                                'max_supply': token_data['total_supply_formatted'],
-                                'ath': 0,  # Moralis API 目前不提供这些数据
-                                'ath_date': '',
-                                'atl': 0,
-                                'atl_date': ''
-                            })
-                            logger.info(f"更新后的代币数据: {token_data}")
-                        except (ValueError, TypeError) as e:
-                            logger.error(f"处理价格数据时出错: {str(e)}")
-                            token_data.update({
-                                'price': 0,
-                                'price_change_24h': 0,
-                                'price_change_7d': 0,
-                                'price_change_30d': 0,
-                                'market_cap': 0,
-                                'market_cap_rank': 0,
-                                'volume_24h': 0,
-                                'volume_change_24h': 0,
-                                'circulating_supply': '0',
-                                'max_supply': '0',
-                                'ath': 0,
-                                'ath_date': '',
-                                'atl': 0,
-                                'atl_date': ''
-                            })
-                    else:
-                        logger.warning(f"无法获取价格数据")
+                # 检查响应
+                if not metadata_response:
+                    logger.error(f"无法获取代币元数据: {token_address}")
+                    return {}
+
+                # 处理元数据响应
+                links = metadata_response.get('links', {})
+                token_data = {
+                    'name': metadata_response.get('name', 'Unknown Token'),
+                    'symbol': metadata_response.get('symbol', 'Unknown'),
+                    'decimals': int(metadata_response.get('decimals', 0)),
+                    'logo': metadata_response.get('logo', ''),
+                    'description': metadata_response.get('description') or '',
+                    'website': links.get('website', ''),
+                    'twitter': links.get('twitter', ''),
+                    'telegram': links.get('telegram', ''),
+                    'discord': links.get('discord', ''),
+                    'github': links.get('github', ''),
+                    'medium': links.get('medium', ''),
+                    'total_supply': metadata_response.get('totalSupply', '0'),
+                    'total_supply_formatted': metadata_response.get('totalSupplyFormatted', '0'),
+                    'is_native': token_address == 'So11111111111111111111111111111111111111112',
+                    'verified': bool(metadata_response.get('metaplex', {}).get('primarySaleHappened', False)),
+                    'contract_type': metadata_response.get('standard', 'SPL'),
+                    'from_cache': False
+                }
+
+                # 处理价格数据
+                if price_response:
+                    try:
+                        price = float(price_response.get('usdPrice', 0))
+                        price_change_24h = float(price_response.get('usdPrice24hrPercentChange', 0))
+                        
                         token_data.update({
-                            'price': 0,
-                            'price_change_24h': 0,
-                            'price_change_7d': 0,
-                            'price_change_30d': 0,
-                            'market_cap': 0,
-                            'market_cap_rank': 0,
-                            'volume_24h': 0,
-                            'volume_change_24h': 0,
-                            'circulating_supply': '0',
-                            'max_supply': '0',
-                            'ath': 0,
-                            'ath_date': '',
-                            'atl': 0,
-                            'atl_date': ''
+                            'price': price,
+                            'price_change_24h': price_change_24h,
+                            'market_cap': price * float(token_data['total_supply_formatted']),
+                            'volume_24h': float(price_response.get('volume24h', 0))
                         })
+                    except Exception as e:
+                        logger.error(f"处理价格数据失败: {str(e)}")
 
-                    # 更新数据库
-                    await sync_to_async(Token.objects.update_or_create)(
-                        chain='SOL',
-                        address=token_address,
-                        defaults={
-                            'name': token_data['name'],
-                            'symbol': token_data['symbol'],
-                            'decimals': token_data['decimals'],
-                            'logo': token_data['logo'],
-                            'type': 'token',
-                            'contract_type': token_data['contract_type'],
-                            'description': token_data['description'],
-                            'website': token_data['website'],
-                            'twitter': token_data['twitter'],
-                            'telegram': token_data['telegram'],
-                            'discord': token_data['discord'],
-                            'github': token_data['github'],
-                            'medium': token_data['medium'],
-                            'total_supply': token_data['total_supply'],
-                            'total_supply_formatted': token_data['total_supply_formatted'],
-                            'verified': token_data['verified'],
-                            'is_native': token_data['is_native'],
-                            'last_price': float(token_data['price']),  # 使用 last_price
-                            'last_price_change': float(token_data['price_change_24h']),  # 使用 last_price_change
-                            'price_change_7d': float(token_data['price_change_7d']),
-                            'price_change_30d': float(token_data['price_change_30d']),
-                            'market_cap': float(token_data['market_cap']),
-                            'market_cap_rank': token_data['market_cap_rank'],
-                            'volume_24h': float(token_data['volume_24h']),
-                            'volume_change_24h': float(token_data['volume_change_24h']),
-                            'circulating_supply': token_data['circulating_supply'],
-                            'max_supply': token_data['max_supply'],
-                            'ath': float(token_data['ath']),
-                            'ath_date': token_data['ath_date'],
-                            'atl': float(token_data['atl']),
-                            'atl_date': token_data['atl_date'],
-                            'updated_at': timezone.now()
-                        }
-                    )
-                    return token_data
-
-                return {}
+                logger.info(f"最终的代币数据: {token_data}")
+                return token_data
 
             except Exception as e:
                 logger.error(f"获取代币信息时出错: {str(e)}")

@@ -18,6 +18,7 @@ import base58
 import json
 import base64
 import ssl
+import time
 
 from ...services.solana_config import MoralisConfig, RPCConfig
 from ...exceptions import SwapError, InsufficientBalanceError
@@ -514,6 +515,123 @@ class SolanaSwapService:
             logger.warning(f"检查路由时出错: {str(e)}")
             return True  # 如果检查出错，默认返回 True 继续尝试
 
+    async def _save_transaction(self, wallet_address: str, to_address: str, amount: Decimal,
+                              from_token: str, to_token: str, tx_hash: str, tx_info: Dict[str, Any]) -> None:
+        """保存交易记录"""
+        try:
+            logger.info("开始保存 Swap 交易记录...")
+            logger.info(f"交易信息: wallet_address={wallet_address}, from_token={from_token}, to_token={to_token}")
+            logger.info(f"amount={amount}, tx_hash={tx_hash}")
+            
+            # 安全地记录交易详情
+            try:
+                logger.info(f"交易详情: {json.dumps(tx_info, indent=2)}")
+            except Exception:
+                logger.info(f"交易详情: {str(tx_info)}")
+            
+            # 获取钱包 - 使用 filter().first() 而不是 get()
+            from ...models import Wallet, Transaction as DBTransaction, Token
+            wallet = await Wallet.objects.filter(address=wallet_address, chain='SOL', is_active=True).afirst()
+            
+            if not wallet:
+                logger.error(f"找不到匹配的钱包: address={wallet_address}, chain=SOL")
+                return
+            
+            logger.info(f"获取到钱包信息: {wallet.address}, id={wallet.id}")
+            
+            # 获取代币信息
+            from_token_obj = None
+            to_token_obj = None
+            
+            try:
+                # 尝试获取源代币
+                from_token_obj = await Token.objects.filter(chain='SOL', address=from_token).afirst()
+                # 尝试获取目标代币
+                to_token_obj = await Token.objects.filter(chain='SOL', address=to_token).afirst()
+            except Exception as e:
+                logger.warning(f"获取代币信息失败: {str(e)}")
+            
+            # 准备交易记录数据，使用默认值处理可能缺失的字段
+            status = 'SUCCESS'
+            if tx_info:
+                if isinstance(tx_info, dict):
+                    status = 'SUCCESS' if tx_info.get('status') == 'confirmed' else 'PENDING'
+                    fee = tx_info.get('fee', 5000)
+                    slot = tx_info.get('slot', 0)
+                else:
+                    fee = 5000
+                    slot = 0
+            else:
+                fee = 5000
+                slot = 0
+            
+            # 提取正确的交易哈希
+            if isinstance(tx_hash, dict) and 'result' in tx_hash:
+                actual_tx_hash = tx_hash['result']
+            elif isinstance(tx_hash, str):
+                actual_tx_hash = tx_hash
+            else:
+                # 尝试从字典中提取
+                try:
+                    if isinstance(tx_hash, dict):
+                        actual_tx_hash = str(tx_hash.get('result', tx_hash))
+                    else:
+                        actual_tx_hash = str(tx_hash)
+                except:
+                    actual_tx_hash = str(tx_hash)
+            
+            # 准备交易数据
+            tx_data = {
+                'wallet': wallet,
+                'chain': 'SOL',
+                'tx_hash': actual_tx_hash,
+                'tx_type': 'SWAP',
+                'status': status,
+                'from_address': wallet_address,
+                'to_address': wallet_address,  # Swap 通常是同一个钱包地址
+                'amount': amount,
+                'token': from_token_obj,  # 使用 token 而不是 token_address
+                'to_token_address': to_token,  # 这个字段已经添加到模型中
+                'gas_price': Decimal(str(fee / 1e9)),
+                'gas_used': Decimal('1'),
+                'block_number': slot,
+                'block_timestamp': timezone.now(),
+                'token_info': {  # 添加代币信息
+                    'from_token': {
+                        'address': from_token,
+                        'symbol': from_token_obj.symbol if from_token_obj else 'Unknown',
+                        'decimals': from_token_obj.decimals if from_token_obj else 0
+                    },
+                    'to_token': {
+                        'address': to_token,
+                        'symbol': to_token_obj.symbol if to_token_obj else 'Unknown',
+                        'decimals': to_token_obj.decimals if to_token_obj else 0
+                    }
+                }
+            }
+            
+            # 安全地记录准备保存的数据
+            try:
+                logger.info(f"准备保存的交易数据: {json.dumps({k: str(v) for k, v in tx_data.items() if k not in ['wallet', 'token', 'token_info']}, indent=2)}")
+            except Exception:
+                logger.info(f"准备保存的交易数据: tx_hash={actual_tx_hash}, status={status}")
+            
+            # 检查交易记录是否已存在
+            existing_tx = await DBTransaction.objects.filter(tx_hash=actual_tx_hash, wallet=wallet).afirst()
+            if existing_tx:
+                logger.info(f"交易记录已存在: id={existing_tx.id}, tx_hash={actual_tx_hash}")
+                return
+            
+            # 创建交易记录
+            transaction = await DBTransaction.objects.acreate(**tx_data)
+            logger.info(f"交易记录创建成功: id={transaction.id}, tx_hash={actual_tx_hash}")
+            
+        except Exception as e:
+            logger.error(f"保存交易记录失败: {str(e)}")
+            logger.error(f"错误类型: {type(e).__name__}")
+            # 不抛出异常，因为交易已经成功了
+            pass
+
     async def execute_swap(self,
         quote_id: str,
         from_token: str,
@@ -614,6 +732,39 @@ class SolanaSwapService:
                 )
                 
                 logger.info(f"交易已发送，签名: {signature}")
+                
+                # 等待交易确认，增加等待时间
+                await asyncio.sleep(8)  # 增加等待时间，给交易更多时间确认
+                
+                # 获取交易详情
+                try:
+                    tx_details = await self.get_transaction_status(signature)
+                    logger.info(f"获取到交易详情: {tx_details}")
+                except Exception as e:
+                    logger.warning(f"获取交易详情失败，但交易可能已成功: {str(e)}")
+                    # 使用基本信息
+                    tx_details = {
+                        'status': 'pending',
+                        'signature': signature,
+                        'slot': 0,
+                        'timestamp': int(time.time()),
+                        'fee': 5000,  # 默认费用
+                    }
+                
+                # 保存交易记录
+                try:
+                    await self._save_transaction(
+                        wallet_address=from_address,
+                        to_address=from_address,  # Swap 通常是同一个钱包地址
+                        amount=amount,
+                        from_token=from_token,
+                        to_token=to_token,
+                        tx_hash=signature,
+                        tx_info=tx_details
+                    )
+                except Exception as save_error:
+                    logger.error(f"保存交易记录失败，但交易可能已成功: {str(save_error)}")
+                
                 return {
                     'status': 'success',
                     'signature': signature,
@@ -632,34 +783,84 @@ class SolanaSwapService:
     async def get_transaction_status(self, signature: str) -> Dict[str, Any]:
         """获取交易状态"""
         try:
-            tx_info = await self.rpc_client.get_transaction(
-                signature,
-                commitment=Commitment("confirmed")
-            )
-            
-            if not tx_info or not isinstance(tx_info, dict):
-                raise SwapError("无法获取交易信息")
-                
-            tx_result = tx_info.get('result', {})
-            if not tx_result:
-                raise SwapError("交易信息为空")
-                
-            meta = tx_result.get('meta', {})
-            if meta.get('err') is not None:
-                raise SwapError(f"交易失败: {meta.get('err')}")
-                
-            return {
-                'status': 'confirmed',
-                'slot': tx_result.get('slot', 0),
-                'timestamp': tx_result.get('blockTime', 0),
-                'fee': meta.get('fee', 0),
-                'logs': meta.get('logMessages', []),
-                'confirmations': tx_result.get('confirmations', 0)
-            }
+            # 增加重试逻辑
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    tx_info = await self.rpc_client.get_transaction(
+                        signature,
+                        commitment=Commitment("confirmed")
+                    )
+                    
+                    if not tx_info or not isinstance(tx_info, dict):
+                        if attempt < max_retries - 1:
+                            logger.warning(f"交易信息为空，等待2秒后重试 (尝试 {attempt+1}/{max_retries})")
+                            await asyncio.sleep(2)
+                            continue
+                        # 如果最后一次尝试仍然失败，返回基本信息
+                        return {
+                            'status': 'pending',
+                            'signature': signature,
+                            'slot': 0,
+                            'timestamp': int(time.time()),
+                            'fee': 5000,  # 默认费用
+                        }
+                        
+                    tx_result = tx_info.get('result', {})
+                    if not tx_result:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"交易结果为空，等待2秒后重试 (尝试 {attempt+1}/{max_retries})")
+                            await asyncio.sleep(2)
+                            continue
+                        # 如果最后一次尝试仍然失败，返回基本信息
+                        return {
+                            'status': 'pending',
+                            'signature': signature,
+                            'slot': 0,
+                            'timestamp': int(time.time()),
+                            'fee': 5000,  # 默认费用
+                        }
+                    
+                    meta = tx_result.get('meta', {})
+                    if meta.get('err') is not None:
+                        raise SwapError(f"交易失败: {meta.get('err')}")
+                        
+                    return {
+                        'status': 'confirmed',
+                        'slot': tx_result.get('slot', 0),
+                        'timestamp': tx_result.get('blockTime', int(time.time())),
+                        'fee': meta.get('fee', 5000),
+                        'logs': meta.get('logMessages', []),
+                        'confirmations': tx_result.get('confirmations', 0)
+                    }
+                except SwapError:
+                    # 如果是明确的交易失败，直接抛出
+                    raise
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"获取交易状态出错: {str(e)}，等待2秒后重试")
+                        await asyncio.sleep(2)
+                    else:
+                        logger.error(f"多次尝试获取交易状态失败: {str(e)}")
+                        # 返回基本信息而不是抛出异常
+                        return {
+                            'status': 'pending',
+                            'signature': signature,
+                            'slot': 0,
+                            'timestamp': int(time.time()),
+                            'fee': 5000,  # 默认费用
+                        }
             
         except Exception as e:
             logger.error(f"获取交易状态失败: {str(e)}")
-            raise SwapError(f"获取交易状态失败: {str(e)}")
+            # 返回基本信息而不是抛出异常
+            return {
+                'status': 'pending',
+                'signature': signature,
+                'slot': 0,
+                'timestamp': int(time.time()),
+                'fee': 5000,  # 默认费用
+            }
 
     def get_transaction_status_sync(self, signature: str) -> Dict[str, Any]:
         """获取交易状态（同步方法）"""

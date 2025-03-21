@@ -16,10 +16,6 @@ MORALIS_API_KEY = os.getenv('MORALIS_API_KEY')
 ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 HELIUS_API_KEY = os.getenv('HELIUS_API_KEY')
 
-# 确保必要的 API key 存在
-if not MORALIS_API_KEY:
-    raise Exception("MORALIS_API_KEY not found in environment variables")
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -36,8 +32,6 @@ ALLOWED_HOSTS = ["*"]
 
 # Application definition
 INSTALLED_APPS = [
-    'jet.dashboard',  # 必须在 jet 之前
-    'jet',  # 必须在 django.contrib.admin 之前
     'corsheaders',
     'django.contrib.admin',
     'django.contrib.auth',
@@ -51,20 +45,52 @@ INSTALLED_APPS = [
     'channels',
 ]
 
+# CSRF 配置
+CSRF_TRUSTED_ORIGINS = [
+    'https://www.cocowallet.io',
+    'https://cocowallet.io',
+    'https://api.cocowallet.io',
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+    'http://192.168.3.16:8000',  # 添加本地开发 IP
+]
+
+# 开发环境下的安全设置
+if DEBUG:
+    SECURE_PROXY_SSL_HEADER = None
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+    CSRF_USE_SESSIONS = False
+    CSRF_COOKIE_HTTPONLY = False
+
+# CORS 设置
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = [
+    'https://www.cocowallet.io',
+    'https://cocowallet.io',
+    'https://api.cocowallet.io',
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+    'http://192.168.3.16:8000',  # 添加本地开发 IP
+]
+
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True  # 开发环境允许所有来源
+
+# 中间件顺序很重要
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # CORS 中间件必须在 CommonMiddleware 之前
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
-CORS_ALLOWED_ORIGINS = [
-    "http://192.168.3.16:8081",  # Expo Go
-    "http://192.168.3.3",
-]
+
+# 移除 CORS_ALLOW_ALL_ORIGINS = True  # 这个设置太宽松了
+
 ROOT_URLCONF = 'config.urls'
 
 TEMPLATES = [
@@ -122,8 +148,8 @@ USE_I18N = True
 USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
-STATIC_URL = 'static/'
-STATIC_ROOT = os.path.join(BASE_DIR, 'static')
+STATIC_URL = '/static/'
+STATIC_ROOT = os.path.abspath(os.path.join(BASE_DIR, 'staticfiles'))
 
 # Media files
 MEDIA_URL = 'media/'
@@ -132,69 +158,9 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Django Jet 配置
-JET_DEFAULT_THEME = 'light-blue'
-JET_THEMES = [
-    {
-        'theme': 'default',
-        'color': '#47bac1',
-        'title': '默认'
-    },
-    {
-        'theme': 'green',
-        'color': '#44b78b',
-        'title': '绿色'
-    },
-    {
-        'theme': 'light-green',
-        'color': '#2faa60',
-        'title': '浅绿色'
-    },
-    {
-        'theme': 'light-violet',
-        'color': '#a464c4',
-        'title': '浅紫色'
-    },
-    {
-        'theme': 'light-blue',
-        'color': '#5EADDE',
-        'title': '浅蓝色'
-    },
-    {
-        'theme': 'light-gray',
-        'color': '#222',
-        'title': '浅灰色'
-    }
-]
-JET_SIDE_MENU_COMPACT = True  # 紧凑的侧边栏
-JET_CHANGE_FORM_SIBLING_LINKS = True  # 显示上一个/下一个链接
-
-# Jet 菜单配置
-JET_SIDE_MENU_ITEMS = [
-    {'label': '认证和授权', 'items': [
-        {'name': 'auth.user'},
-        {'name': 'auth.group'},
-    ]},
-    {'label': '钱包管理', 'items': [
-        {'name': 'wallet.wallet'},
-        {'name': 'wallet.mnemonicbackup'},
-        {'name': 'wallet.paymentpassword'},
-    ]},
-    {'label': '代币管理', 'items': [
-        {'name': 'wallet.tokenindex'},
-        {'name': 'wallet.token'},
-    ]},
-    {'label': 'NFT管理', 'items': [
-        {'name': 'wallet.nftcollection'},
-    ]},
-    {'label': '交易记录', 'items': [
-        {'name': 'wallet.transaction'},
-    ]},
-]
-
 # 登录界面配置
-SIMPLEUI_LOGIN_TITLE = 'Coco Wallet 管理后台'  # 登录页标题
-SIMPLEUI_LOGIN_BACKGROUND = None  # 使用默认背景
+# SIMPLEUI_LOGIN_TITLE = 'Coco Wallet 管理后台'  # 登录页标题
+# SIMPLEUI_LOGIN_BACKGROUND = None  # 使用默认背景
 
 # 支持的区块链配置
 SUPPORTED_CHAINS = {
@@ -241,7 +207,7 @@ LOGGING = {
     },
     'root': {
         'handlers': ['console'],
-        'level': 'DEBUG',
+        'level': 'INFO',
     },
     'loggers': {
         'wallet': {
@@ -271,3 +237,14 @@ CHANNEL_LAYERS = {
         'BACKEND': 'channels.layers.InMemoryChannelLayer'
     }
 }
+
+# 使用绝对路径
+STATICFILES_DIRS = [
+    os.path.abspath(os.path.join(BASE_DIR, 'static')),
+]
+
+# 添加这个配置
+STATICFILES_FINDERS = [
+    'django.contrib.staticfiles.finders.FileSystemFinder',
+    'django.contrib.staticfiles.finders.AppDirectoriesFinder',
+]

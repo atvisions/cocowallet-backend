@@ -1,167 +1,185 @@
 {% extends "admin/base_site.html" %}
-{% load i18n admin_urls static admin_list %}
+{% load i18n admin_urls static admin_modify %}
 
-{% block extrastyle %}
-  {{ block.super }}
-  <link rel="stylesheet" href="{% static "admin/css/forms.css" %}">
-  <style>
-    .progress {
-      width: 100%;
-      height: 20px;
-      background-color: #f5f5f5;
-      border-radius: 4px;
-      margin: 10px 0;
-    }
-    .progress-bar {
-      height: 100%;
-      background-color: #79aec8;
-      border-radius: 4px;
-      transition: width .6s ease;
-    }
-    .sync-container {
-      max-width: 800px;
-      margin: 20px;
-      padding: 20px;
-      background: white;
-      border-radius: 4px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-    .sync-button {
-      background: #79aec8;
-      padding: 10px 15px;
-      border: none;
-      border-radius: 4px;
-      color: white;
-      cursor: pointer;
-      font-size: 13px;
-    }
-    .sync-button:hover {
-      background: #417690;
-    }
-    .sync-button:disabled {
-      background: #cccccc;
-      cursor: not-allowed;
-    }
-    .status-message {
-      margin: 10px 0;
-      padding: 10px;
-      border-radius: 4px;
-    }
-    .status-success {
-      background: #dff0d8;
-      color: #3c763d;
-    }
-    .status-error {
-      background: #f2dede;
-      color: #a94442;
-    }
-  </style>
+{% block extrahead %}{{ block.super }}
+<script type="text/javascript" src="{% static 'admin/js/vendor/jquery/jquery.min.js' %}"></script>
+<script type="text/javascript" src="{% static 'admin/js/jquery.init.js' %}"></script>
+<script type="text/javascript" src="{% static 'admin/js/core.js' %}"></script>
+{{ media }}
+<style>
+  .sync-container {
+    max-width: 800px;
+    margin: 20px auto;
+    padding: 20px;
+    background-color: #f8f8f8;
+    border-radius: 5px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  }
+  .sync-container h2 {
+    margin-top: 0;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 10px;
+  }
+  .progress-container {
+    margin: 20px 0;
+    background-color: #e0e0e0;
+    border-radius: 4px;
+    height: 20px;
+    overflow: hidden;
+  }
+  .progress-bar {
+    height: 100%;
+    background-color: #1FC595;
+    width: 0%;
+    transition: width 0.3s ease;
+  }
+  .status-container {
+    margin-top: 20px;
+    padding: 15px;
+    border-radius: 4px;
+    background-color: #f0f0f0;
+  }
+  .status-idle {
+    background-color: #f0f0f0;
+  }
+  .status-running {
+    background-color: #e3f2fd;
+  }
+  .status-completed {
+    background-color: #e8f5e9;
+  }
+  .status-error {
+    background-color: #ffebee;
+  }
+  .button-container {
+    margin-top: 20px;
+    text-align: right;
+  }
+  .sync-button {
+    background-color: #1FC595;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .sync-button:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+  }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label='wallet' %}">Wallet</a>
+&rsaquo; <a href="{% url 'admin:wallet_token_changelist' %}">Tokens</a>
+&rsaquo; {% trans 'Sync Metadata' %}
+</div>
 {% endblock %}
 
 {% block content %}
-<div class="sync-container">
-  <h1>同步代币元数据</h1>
-  
-  <div class="description">
-    <p>此操作将从 Jupiter 和 Solscan 获取最新的代币元数据，包括：</p>
-    <ul>
-      <li>基本信息（名称、符号、精度等）</li>
-      <li>社交媒体链接</li>
-      <li>供应量信息</li>
-      <li>验证状态</li>
-    </ul>
+<div id="content-main">
+  <div class="sync-container">
+    <h2>同步代币元数据</h2>
+    
+    <p>此功能将从外部源（如 Jupiter）同步代币元数据，包括名称、符号、小数位数、图标等信息。</p>
+    
+    <div class="progress-container">
+      <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+    </div>
+    
+    <div id="status-container" class="status-container status-idle">
+      <p id="status-message">未开始同步</p>
+      <p id="status-time"></p>
+    </div>
+    
+    <div class="button-container">
+      <button id="sync-button" class="sync-button">开始同步</button>
+    </div>
   </div>
+</div>
 
-  <div class="progress" style="display: none;">
-    <div class="progress-bar" role="progressbar" style="width: 0%"></div>
-  </div>
-
-  <div class="status-message" style="display: none;"></div>
-
-  <form method="post">
-    {% csrf_token %}
-    <button type="button" class="sync-button" id="startSync">开始同步</button>
-  </form>
-
-  <script>
-    document.addEventListener('DOMContentLoaded', function() {
-      const button = document.getElementById('startSync');
-      const progress = document.querySelector('.progress');
-      const progressBar = document.querySelector('.progress-bar');
-      const statusMessage = document.querySelector('.status-message');
-      const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
-
-      button.addEventListener('click', async function() {
-        try {
-          button.disabled = true;
-          progress.style.display = 'block';
-          statusMessage.style.display = 'none';
-
-          // 开始同步
-          const response = await fetch('{% url "admin:token_sync_metadata" %}', {
-            method: 'POST',
-            headers: {
-              'X-CSRFToken': csrfToken,
-              'Content-Type': 'application/json',
-            },
-            credentials: 'same-origin'
-          });
-
-          if (!response.ok) {
-            const errorData = await response.text();
-            throw new Error(`同步请求失败: ${errorData}`);
-          }
-
-          // 轮询同步状态
-          const checkStatus = async () => {
-            try {
-              const statusResponse = await fetch('{% url "admin:token_sync_metadata_status" %}');
-              if (!statusResponse.ok) {
-                throw new Error('获取状态失败');
-              }
-              
-              const data = await statusResponse.json();
-              console.log('同步状态:', data);
-
-              if (data.status === 'success') {
-                progressBar.style.width = '100%';
-                statusMessage.textContent = '同步完成！';
-                statusMessage.className = 'status-message status-success';
-                statusMessage.style.display = 'block';
-                button.disabled = false;
-              } else if (data.status === 'error') {
-                statusMessage.textContent = `同步失败: ${data.message}`;
-                statusMessage.className = 'status-message status-error';
-                statusMessage.style.display = 'block';
-                button.disabled = false;
-              } else {
-                // 更新进度
-                if (data.progress) {
-                  progressBar.style.width = `${data.progress}%`;
-                }
-                // 继续轮询
-                setTimeout(checkStatus, 1000);
-              }
-            } catch (error) {
-              console.error('检查状态时出错:', error);
-              statusMessage.textContent = `检查状态失败: ${error.message}`;
-              statusMessage.className = 'status-message status-error';
-              statusMessage.style.display = 'block';
-              button.disabled = false;
-            }
-          };
-
-          checkStatus();
-
-        } catch (error) {
-          console.error('同步出错:', error);
-          statusMessage.textContent = `发生错误: ${error.message}`;
-          statusMessage.className = 'status-message status-error';
-          statusMessage.style.display = 'block';
-          button.disabled = false;
+<script>
+  $(document).ready(function() {
+    var statusCheckInterval;
+    
+    // 检查同步状态
+    function checkSyncStatus() {
+      $.ajax({
+        url: '{% url "admin:sync_metadata_status" %}',
+        type: 'GET',
+        dataType: 'json',
+        success: function(response) {
+          updateStatusUI(response);
+        },
+        error: function(xhr) {
+          clearInterval(statusCheckInterval);
+          $('#status-container').removeClass().addClass('status-container status-error');
+          $('#status-message').text('获取状态失败: ' + (xhr.responseJSON ? xhr.responseJSON.message : '未知错误'));
+          $('#sync-button').prop('disabled', false);
+        }
+      });
+    }
+    
+    // 更新状态 UI
+    function updateStatusUI(status) {
+      // 更新进度条
+      $('#progress-bar').css('width', status.progress + '%');
+      
+      // 更新状态消息
+      $('#status-message').text(status.message || '未知状态');
+      
+      // 更新状态容器样式
+      $('#status-container').removeClass().addClass('status-container status-' + status.status);
+      
+      // 更新时间
+      if (status.timestamp) {
+        var date = new Date(status.timestamp);
+        $('#status-time').text('最后更新: ' + date.toLocaleString());
+      } else {
+        $('#status-time').text('');
+      }
+      
+      // 更新按钮状态
+      if (status.status === 'running') {
+        $('#sync-button').prop('disabled', true);
+      } else {
+        $('#sync-button').prop('disabled', false);
+      }
+      
+      // 如果同步完成或出错，停止轮询
+      if (status.status === 'completed' || status.status === 'error') {
+        clearInterval(statusCheckInterval);
+      }
+    }
+    
+    // 开始同步
+    $('#sync-button').click(function() {
+      $(this).prop('disabled', true);
+      
+      $.ajax({
+        url: '{% url "admin:sync_metadata" %}',
+        type: 'POST',
+        dataType: 'json',
+        success: function(response) {
+          $('#status-container').removeClass().addClass('status-container status-running');
+          $('#status-message').text('同步任务已启动');
+          
+          // 开始轮询状态
+          statusCheckInterval = setInterval(checkSyncStatus, 2000);
+        },
+        error: function(xhr) {
+          $('#status-container').removeClass().addClass('status-container status-error');
+          $('#status-message').text('启动同步失败: ' + (xhr.responseJSON ? xhr.responseJSON.message : '未知错误'));
+          $('#sync-button').prop('disabled', false);
         }
       });
     });
-  </script>
-</div>
-{% endblock %} 
+    
+    // 页面加载时检查状态
+    checkSyncStatus();
+  });
+</script>
+{% endblock %}

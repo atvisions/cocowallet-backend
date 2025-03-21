@@ -46,7 +46,7 @@ class EVMSwapService:
         self.timeout = aiohttp.ClientTimeout(total=30)
         self.chain_id = MoralisConfig.get_chain_id(chain)
         
-        # 设置钱包地址
+        # Set wallet address
         self.address = None
         
         # BaseSwap Router ABI
@@ -97,7 +97,7 @@ class EVMSwapService:
                 "type": "function"
             }]
         else:
-            # 标准 Uniswap V2 Router ABI
+            # Standard Uniswap V2 Router ABI
             self.router_abi = [{
                 "inputs": [
                     {"name": "amountOutMin", "type": "uint256"},
@@ -145,17 +145,17 @@ class EVMSwapService:
             }]
 
     def get_contract(self, address: str, abi: Optional[List[Dict[str, Any]]] = None) -> Any:
-        """获取合约实例
+        """Get contract instance
         
         Args:
-            address: 合约地址
-            abi: 合约 ABI，如果为 None 则使用 ERC20 标准 ABI
+            address: Contract address
+            abi: Contract ABI, if None use standard ERC20 ABI
             
         Returns:
-            Contract: 合约实例
+            Contract: Contract instance
         """
         if not abi:
-            # 使用标准 ERC20 ABI
+            # Use standard ERC20 ABI
             abi = [{
                 "constant": True,
                 "inputs": [],
@@ -1600,4 +1600,4 @@ class EVMSwapService:
             return {
                 'status': 'error',
                 'message': f'发送交易失败: {str(e)}'
-            } 
+            }

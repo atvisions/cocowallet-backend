@@ -310,6 +310,16 @@ class Token(models.Model):
     last_value = models.CharField(max_length=255, null=True, blank=True, verbose_name='最后价值')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
 
+    # 添加分类字段
+    category = models.ForeignKey(
+        'TokenCategory', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='tokens',
+        verbose_name='代币分类'
+    )
+
     class Meta:
         verbose_name = '代币'
         verbose_name_plural = '代币'
@@ -374,7 +384,7 @@ class Transaction(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, verbose_name='状态')
     from_address = models.CharField(max_length=100, verbose_name='发送地址')
     to_address = models.CharField(max_length=100, verbose_name='接收地址')
-    amount = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='数量')
+    amount = models.CharField(max_length=64, default='0')
     token = models.ForeignKey(Token, null=True, blank=True, on_delete=models.SET_NULL, verbose_name='代币')
     nft_collection = models.ForeignKey(NFTCollection, null=True, blank=True, on_delete=models.SET_NULL, verbose_name='NFT合集')
     nft_token_id = models.CharField(max_length=100, null=True, blank=True, verbose_name='NFT Token ID')
@@ -384,6 +394,7 @@ class Transaction(models.Model):
     block_number = models.IntegerField(verbose_name='区块高度')
     block_timestamp = models.DateTimeField(verbose_name='区块时间')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    to_token_address = models.CharField(max_length=255, null=True, blank=True, help_text="目标代币地址（用于Swap交易）")
 
     class Meta:
         verbose_name = '交易记录'
@@ -714,3 +725,23 @@ class TokenIndexReport(models.Model):
         
     def __str__(self):
         return f"代币索引报告 ({self.report_date.strftime('%Y-%m-%d %H:%M')})"
+
+class TokenCategory(models.Model):
+    """代币分类模型"""
+    name = models.CharField(max_length=50, verbose_name='分类名称')
+    code = models.CharField(max_length=20, unique=True, verbose_name='分类代码')
+    description = models.TextField(blank=True, null=True, verbose_name='分类描述')
+    icon = models.CharField(max_length=255, blank=True, null=True, verbose_name='分类图标')
+    priority = models.IntegerField(default=0, verbose_name='显示优先级')
+    is_active = models.BooleanField(default=True, verbose_name='是否启用')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        verbose_name = '代币分类'
+        verbose_name_plural = '代币分类'
+        ordering = ['priority', 'name']
+
+    def __str__(self):
+        return self.name
+

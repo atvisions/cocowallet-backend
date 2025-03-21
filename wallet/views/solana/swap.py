@@ -13,8 +13,9 @@ import asyncio
 from decimal import Decimal
 import decimal
 import json
+from django.utils import timezone
 
-from ...models import Wallet
+from ...models import Wallet, Token, Transaction
 from ...services.solana.swap import SolanaSwapService, SwapError
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -244,7 +245,7 @@ class SolanaSwapViewSet(viewsets.ViewSet):
                     from_token_decimals = 9  # SOL 代币精度为 9
                 
                 # 转换金额为 Decimal
-                amount_decimal = Decimal(amount)
+                amount_decimal = Decimal(amount) / Decimal(10 ** from_token_decimals)
                 
                 # 转换滑点
                 if slippage:
@@ -273,6 +274,51 @@ class SolanaSwapViewSet(viewsets.ViewSet):
                     }, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
+            
+            # 在保存交易记录前添加日志和检查
+            logger.info(f"原始金额: {amount}, 类型: {type(amount)}")
+
+            # 如果金额太大，可以尝试转换
+            if isinstance(amount, str) and len(amount) > 15:
+                try:
+                    # 尝试将金额转换为合理范围
+                    decimals = 9  # 根据代币类型调整
+                    amount_decimal = Decimal(amount) / Decimal(10 ** decimals)
+                    logger.info(f"转换后的金额: {amount_decimal}")
+                    amount = amount_decimal
+                except Exception as e:
+                    logger.error(f"转换金额失败: {str(e)}")
+            
+            # 获取代币的小数位数
+            token = Token.objects.filter(chain='SOL', address=from_token).first()
+            decimals = token.decimals if token else 9  # 默认使用 9 位小数（SOL）
+
+            # 转换金额
+            try:
+                amount_decimal = Decimal(amount) / Decimal(10 ** decimals)
+                logger.info(f"转换后的金额: {amount_decimal}")
+                
+                # 保存交易记录
+                transaction = Transaction(
+                    wallet=wallet,
+                    chain='SOL',
+                    tx_hash=quote_id,
+                    tx_type='SWAP',
+                    status='PENDING',
+                    from_address=wallet.address,
+                    to_address=wallet.address,
+                    amount=amount_decimal,  # 使用转换后的金额
+                    to_token_address=to_token,
+                    gas_price=Decimal('0.000005'),
+                    gas_used=Decimal('1'),
+                    block_number=0,
+                    block_timestamp=timezone.now()
+                )
+                transaction.save()
+                
+            except Exception as e:
+                logger.error(f"保存交易记录失败: {str(e)}")
+                logger.error(f"错误类型: {type(e).__name__}")
             
             # 执行兑换
             swap_service = SolanaSwapService()
