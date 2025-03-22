@@ -185,20 +185,37 @@ class ReferralViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        result = self.record_wallet_creation_internal(device_id)
+        
+        if result['status'] == 'success':
+            return Response({
+                'status': 'success',
+                'message': result['message']
+            })
+        else:
+            return Response(
+                {'status': 'error', 'message': result['message']},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def record_wallet_creation_internal(self, device_id):
+        """内部函数：记录钱包创建并奖励积分"""
         try:
-            # 查找推荐关系
+            # 查找推荐关系，不考虑 wallet_created 状态
             relationship = ReferralRelationship.objects.filter(
                 referred_device_id=device_id,
-                download_completed=True,
-                wallet_created=False
+                download_completed=True
             ).first()
             
             if not relationship:
                 # 没有找到符合条件的推荐关系，可能不是通过推荐下载的
-                return Response({
+                logger.info(f"设备 {device_id} 没有找到推荐关系")
+                return {
                     'status': 'success',
                     'message': '没有找到推荐关系，不奖励积分'
-                })
+                }
+            
+            logger.info(f"找到推荐关系: 推荐人={relationship.referrer_device_id}, 被推荐人={relationship.referred_device_id}")
             
             # 更新推荐关系
             relationship.wallet_created = True
@@ -206,6 +223,8 @@ class ReferralViewSet(viewsets.ViewSet):
             
             # 如果还没有奖励钱包创建积分
             if not relationship.wallet_points_awarded:
+                logger.info(f"为推荐人 {relationship.referrer_device_id} 奖励积分")
+                
                 # 获取或创建推荐人积分记录
                 user_points = UserPoints.get_or_create_user_points(relationship.referrer_device_id)
                 
@@ -220,17 +239,21 @@ class ReferralViewSet(viewsets.ViewSet):
                 # 标记已奖励钱包创建积分
                 relationship.wallet_points_awarded = True
                 relationship.save()
+                
+                logger.info(f"积分奖励成功，当前积分: {user_points.total_points}")
+            else:
+                logger.info(f"已经奖励过积分，不重复奖励")
             
-            return Response({
+            return {
                 'status': 'success',
                 'message': '钱包创建已记录，积分已奖励'
-            })
+            }
         except Exception as e:
-            logger.error(f"记录钱包创建失败: {str(e)}")
-            return Response(
-                {'status': 'error', 'message': f'记录钱包创建失败: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            logger.error(f"记录钱包创建失败: {str(e)}", exc_info=True)
+            return {
+                'status': 'error',
+                'message': f'记录钱包创建失败: {str(e)}'
+            }
     
     @action(detail=False, methods=['get'])
     def get_points(self, request):

@@ -9,21 +9,18 @@ logger = logging.getLogger(__name__)
 @receiver(post_save, sender=Wallet)
 def wallet_created(sender, instance, created, **kwargs):
     """当钱包被创建时触发"""
+    logger.info(f"钱包保存事件触发: 实例={instance.id}, 创建={created}, 设备ID={instance.device_id}")
+    
     if created:  # 只在新创建钱包时触发
         try:
             device_id = instance.device_id
             if device_id:
-                # 创建一个模拟请求对象
-                class MockRequest:
-                    def __init__(self, data):
-                        self.data = data
-                
-                # 创建推荐视图集实例
-                referral_viewset = ReferralViewSet()
-                # 调用记录钱包创建的方法
-                response = referral_viewset.record_wallet_creation(
-                    request=MockRequest(data={'device_id': device_id})
-                )
-                logger.info(f"记录钱包创建结果: {response.data}")
+                logger.info(f"尝试为设备 {device_id} 记录钱包创建")
+                # 直接调用 record_wallet_creation_internal 方法
+                from .views.referral import record_wallet_creation_internal
+                result = record_wallet_creation_internal(device_id)
+                logger.info(f"记录钱包创建结果: {result}")
+            else:
+                logger.warning("钱包创建事件没有设备ID")
         except Exception as e:
-            logger.error(f"记录钱包创建失败: {str(e)}") 
+            logger.error(f"记录钱包创建失败: {str(e)}", exc_info=True) 
