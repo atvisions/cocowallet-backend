@@ -39,14 +39,14 @@
     </nav>
 
     <script>
-        // 移动端菜单交互
+        // Mobile menu interaction
         document.querySelector('.mobile-menu-btn').addEventListener('click', function() {
             this.classList.toggle('active');
             document.querySelector('.nav-links').classList.toggle('active');
             document.body.classList.toggle('menu-open');
         });
 
-        // 点击链接后关闭菜单
+        // Close menu after clicking links
         document.querySelectorAll('.nav-links a').forEach(link => {
             link.addEventListener('click', () => {
                 document.querySelector('.mobile-menu-btn').classList.remove('active');
@@ -55,12 +55,12 @@
             });
         });
 
-        // Logo旋转效果
+        // Logo rotation effect
         let lastScrollPosition = window.scrollY;
         window.addEventListener('scroll', () => {
             const currentScrollPosition = window.scrollY;
             const scrollDifference = currentScrollPosition - lastScrollPosition;
-            const rotationSpeed = 0.5; // 控制旋转速度的系数
+            const rotationSpeed = 0.5; // Rotation speed coefficient
             const logo = document.querySelector('.logo img');
             const currentRotation = parseFloat(logo.style.transform.replace('rotate(', '').replace('deg)', '') || 0);
             const newRotation = currentRotation + (scrollDifference * rotationSpeed);
@@ -68,36 +68,60 @@
             lastScrollPosition = currentScrollPosition;
         });
 
-        // 记录下载事件
-        document.addEventListener('DOMContentLoaded', function() {
-            // 获取推荐码
+        // Record download event - moved outside DOMContentLoaded to ensure it always executes
+        function setupReferralTracking() {
+            // Get referral code
             const urlParams = new URLSearchParams(window.location.search);
-            const refCode = urlParams.get('ref');
+            const refCode = urlParams.get('ref') || localStorage.getItem('coco_wallet_ref_code');
             
             if (refCode) {
-                // 将推荐码存储在 localStorage 中
+                // Store referral code in localStorage
                 try {
                     localStorage.setItem('coco_wallet_ref_code', refCode);
-                    console.log('推荐码已存储:', refCode);
+                    console.log('Referral code stored:', refCode);
+                    
+                    // Generate temporary device ID immediately, don't wait for download click
+                    let tempDeviceId = localStorage.getItem('coco_wallet_temp_device_id');
+                    if (!tempDeviceId) {
+                        tempDeviceId = 'web_' + generateUUID();
+                        localStorage.setItem('coco_wallet_temp_device_id', tempDeviceId);
+                    }
+                    console.log('Temporary device ID:', tempDeviceId);
+                    
+                    // Record visit event
+                    fetch('/api/v1/referrals/record_visit/', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            referrer_code: refCode,
+                            device_id: tempDeviceId
+                        }),
+                    })
+                    .then(response => response.json())
+                    .then(data => console.log('Visit recorded successfully:', data))
+                    .catch(error => console.error('Failed to record visit:', error));
                 } catch (e) {
-                    console.error('存储推荐码失败:', e);
+                    console.error('Failed to store referral information:', e);
                 }
-                
-                // 为所有下载链接添加点击事件
-                document.querySelectorAll('.download-link').forEach(link => {
-                    link.addEventListener('click', function(e) {
-                        // 生成临时设备ID
-                        const tempDeviceId = 'web_download_' + Date.now();
+            }
+            
+            // Add click event to all download links - add event listeners regardless of referral code
+            console.log('Setting up download link event listeners');
+            document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(link => {
+                console.log('Found download link:', link);
+                link.addEventListener('click', function(e) {
+                    console.log('Download link clicked');
+                    
+                    // Get stored temporary device ID and referral code
+                    const tempDeviceId = localStorage.getItem('coco_wallet_temp_device_id');
+                    const refCode = localStorage.getItem('coco_wallet_ref_code');
+                    
+                    if (tempDeviceId && refCode) {
+                        console.log('User clicked download, using temporary device ID:', tempDeviceId, 'referral code:', refCode);
                         
-                        // 将临时设备ID存储在 localStorage 中
-                        try {
-                            localStorage.setItem('coco_wallet_temp_device_id', tempDeviceId);
-                            console.log('临时设备ID已存储:', tempDeviceId);
-                        } catch (e) {
-                            console.error('存储临时设备ID失败:', e);
-                        }
-                        
-                        // 记录下载事件
+                        // Record download event
                         fetch('/api/v1/referrals/record_web_download/', {
                             method: 'POST',
                             headers: {
@@ -108,13 +132,68 @@
                                 device_id: tempDeviceId
                             }),
                         })
-                        .then(response => response.json())
-                        .then(data => console.log('Download recorded successfully:', data))
-                        .catch(error => console.error('Failed to record download:', error));
-                    });
+                        .then(response => {
+                            if (!response.ok) {
+                                throw new Error('Network response was not ok');
+                            }
+                            return response.json();
+                        })
+                        .then(data => {
+                            console.log('Download recorded successfully:', data);
+                            // Show success message
+                            if (data.status === 'success') {
+                                const successMsg = document.createElement('div');
+                                successMsg.className = 'download-success-message';
+                                successMsg.textContent = `Download recorded, referrer will receive ${data.points_awarded || 5} points reward!`;
+                                successMsg.style.position = 'fixed';
+                                successMsg.style.bottom = '20px';
+                                successMsg.style.left = '50%';
+                                successMsg.style.transform = 'translateX(-50%)';
+                                successMsg.style.backgroundColor = '#4CAF50';
+                                successMsg.style.color = 'white';
+                                successMsg.style.padding = '10px 20px';
+                                successMsg.style.borderRadius = '5px';
+                                successMsg.style.zIndex = '1000';
+                                document.body.appendChild(successMsg);
+                                
+                                // Remove message after 3 seconds
+                                setTimeout(() => {
+                                    document.body.removeChild(successMsg);
+                                }, 3000);
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Failed to record download:', error);
+                            // Add retry logic
+                            setTimeout(() => {
+                                console.log('Attempting to record download again...');
+                                // Retry code can be added here
+                            }, 2000);
+                        });
+                    } else {
+                        console.log('No referral information, normal download');
+                    }
                 });
-            }
+            });
+        }
+
+        // Call setup function on DOMContentLoaded
+        document.addEventListener('DOMContentLoaded', function() {
+            setupReferralTracking();
         });
+
+        // Also call immediately if document is already complete or interactive
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+            setTimeout(setupReferralTracking, 1);
+        }
+
+        // Generate UUID function
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
     </script>
 
     <!-- Hero Section -->

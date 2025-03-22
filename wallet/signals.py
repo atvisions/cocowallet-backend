@@ -8,19 +8,19 @@ logger = logging.getLogger(__name__)
 
 @receiver(post_save, sender=Wallet)
 def wallet_created(sender, instance, created, **kwargs):
-    """当钱包被创建时触发"""
-    logger.info(f"钱包保存事件触发: 实例={instance.id}, 创建={created}, 设备ID={instance.device_id}")
+    """Triggered when wallet is created"""
+    logger.info(f"Wallet save event triggered: instance={instance.id}, created={created}, device_id={instance.device_id}")
     
-    if created:  # 只在新创建钱包时触发
+    if created:  # Only trigger on new wallet creation
         try:
             device_id = instance.device_id
             if device_id:
-                logger.info(f"尝试为设备 {device_id} 记录钱包创建")
-                # 直接调用 record_wallet_creation_internal 方法
+                logger.info(f"Attempting to record wallet creation for device {device_id}")
+                # Directly call record_wallet_creation_internal method
                 from .views.referral import record_wallet_creation_internal
                 result = record_wallet_creation_internal(device_id)
-                logger.info(f"记录钱包创建结果: {result}")
+                logger.info(f"Wallet creation record result: {result}")
             else:
-                logger.warning("钱包创建事件没有设备ID")
+                logger.warning("Wallet creation event has no device ID")
         except Exception as e:
-            logger.error(f"记录钱包创建失败: {str(e)}", exc_info=True) 
+            logger.error(f"Failed to record wallet creation: {str(e)}", exc_info=True) 

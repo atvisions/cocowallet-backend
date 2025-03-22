@@ -175,7 +175,7 @@ class ReferralLinkSerializer(serializers.ModelSerializer):
         return f"{base_url}?ref={obj.code}"
 
 class ReferralRelationshipSerializer(serializers.ModelSerializer):
-    """推荐关系序列化器"""
+    """Referral relationship serializer"""
     status = serializers.SerializerMethodField()
     
     class Meta:
@@ -186,13 +186,13 @@ class ReferralRelationshipSerializer(serializers.ModelSerializer):
                            'created_at', 'status']
     
     def get_status(self, obj):
-        """获取推荐状态"""
+        """Get referral status"""
         if obj.wallet_created:
-            return "完成"
+            return "Completed"
         elif obj.download_completed:
-            return "已下载，未创建钱包"
+            return "Downloaded, wallet not created"
         else:
-            return "未完成"
+            return "Incomplete"
 
 class UserPointsSerializer(serializers.ModelSerializer):
     """用户积分序列化器"""
@@ -202,7 +202,7 @@ class UserPointsSerializer(serializers.ModelSerializer):
         read_only_fields = ['device_id', 'total_points', 'created_at', 'updated_at']
 
 class PointsHistorySerializer(serializers.ModelSerializer):
-    """积分历史序列化器"""
+    """Points history serializer"""
     action_display = serializers.SerializerMethodField()
     
     class Meta:
@@ -213,7 +213,7 @@ class PointsHistorySerializer(serializers.ModelSerializer):
                            'related_device_id', 'created_at']
     
     def get_action_display(self, obj):
-        """获取行为类型显示名称"""
+        """Get action type display name"""
         return dict(PointsHistory.ACTION_TYPES).get(obj.action_type, obj.action_type)
 
 class ReferralStatsSerializer(serializers.Serializer):

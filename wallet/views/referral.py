@@ -111,12 +111,12 @@ class ReferralViewSet(viewsets.ViewSet):
             )
     
     @action(detail=False, methods=['post'])
-    def record_download(self, request):
-        """记录下载并奖励积分"""
+    def record_web_download(self, request):
+        """记录网页下载并奖励积分"""
         referrer_code = request.data.get('referrer_code')
-        referred_device_id = request.data.get('device_id')
+        device_id = request.data.get('device_id')
         
-        if not all([referrer_code, referred_device_id]):
+        if not all([referrer_code, device_id]):
             return Response(
                 {'status': 'error', 'message': '缺少必要参数'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -125,48 +125,24 @@ class ReferralViewSet(viewsets.ViewSet):
         try:
             # 查找推荐链接
             referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
-            referrer_device_id = referral_link.device_id
             
-            # 防止自我推荐
-            if referrer_device_id == referred_device_id:
-                return Response(
-                    {'status': 'error', 'message': '不能推荐自己'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            # 记录下载
+            success = referral_link.record_download(device_id)
             
-            # 创建或更新推荐关系
-            relationship, created = ReferralRelationship.objects.get_or_create(
-                referrer_device_id=referrer_device_id,
-                referred_device_id=referred_device_id,
-                defaults={
-                    'download_completed': True,
-                    'wallet_created': False,
-                    'download_points_awarded': False,
-                    'wallet_points_awarded': False
-                }
-            )
-            
-            # 如果是新关系，奖励下载积分
-            if created or not relationship.download_points_awarded:
-                # 获取或创建推荐人积分记录
-                user_points = UserPoints.get_or_create_user_points(referrer_device_id)
+            if success:
+                # 获取奖励的积分数量
+                points_awarded = 5  # 修改这里，从1分改为5分
                 
-                # 添加积分 (1分)
-                user_points.add_points(
-                    points=1,
-                    action_type='DOWNLOAD_REFERRAL',
-                    description=f'用户 {referred_device_id} 通过您的推荐下载了应用',
-                    related_device_id=referred_device_id
-                )
-                
-                # 标记已奖励下载积分
-                relationship.download_points_awarded = True
-                relationship.save()
-            
-            return Response({
-                'status': 'success',
-                'message': '下载记录已保存，积分已奖励'
-            })
+                return Response({
+                    'status': 'success',
+                    'message': '下载记录已保存，积分已奖励',
+                    'points_awarded': points_awarded
+                })
+            else:
+                return Response({
+                    'status': 'error',
+                    'message': '不能推荐自己'
+                }, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"记录下载失败: {str(e)}")
             return Response(
@@ -392,42 +368,6 @@ class ReferralViewSet(viewsets.ViewSet):
             )
     
     @action(detail=False, methods=['post'])
-    def record_web_download(self, request):
-        """记录网页下载并奖励积分"""
-        referrer_code = request.data.get('referrer_code')
-        device_id = request.data.get('device_id')
-        
-        if not all([referrer_code, device_id]):
-            return Response(
-                {'status': 'error', 'message': '缺少必要参数'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            # 查找推荐链接
-            referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
-            
-            # 记录下载
-            success = referral_link.record_download(device_id)
-            
-            if success:
-                return Response({
-                    'status': 'success',
-                    'message': '下载记录已保存，积分已奖励'
-                })
-            else:
-                return Response({
-                    'status': 'error',
-                    'message': '不能推荐自己'
-                }, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            logger.error(f"记录下载失败: {str(e)}")
-            return Response(
-                {'status': 'error', 'message': f'记录下载失败: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-    
-    @action(detail=False, methods=['post'])
     def update_device_id(self, request):
         """更新设备ID"""
         old_device_id = request.data.get('old_device_id')
@@ -462,5 +402,37 @@ class ReferralViewSet(viewsets.ViewSet):
             logger.error(f"更新设备ID失败: {str(e)}", exc_info=True)
             return Response(
                 {'status': 'error', 'message': f'更新设备ID失败: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['post'])
+    def record_visit(self, request):
+        """记录网站访问"""
+        referrer_code = request.data.get('referrer_code')
+        device_id = request.data.get('device_id')
+        
+        if not all([referrer_code, device_id]):
+            return Response(
+                {'status': 'error', 'message': '缺少必要参数'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # 查找推荐链接
+            referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
+            
+            # 增加点击次数
+            referral_link.increment_clicks()
+            
+            logger.info(f"记录访问: 推荐码={referrer_code}, 设备ID={device_id}")
+            
+            return Response({
+                'status': 'success',
+                'message': '访问已记录'
+            })
+        except Exception as e:
+            logger.error(f"记录访问失败: {str(e)}")
+            return Response(
+                {'status': 'error', 'message': f'记录访问失败: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             ) 
