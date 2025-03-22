@@ -17,3 +17,5 @@ class WalletConfig(AppConfig):
         
         # 启用嵌套事件循环支持
         nest_asyncio.apply()
+
+        import wallet.signals  # 导入信号模块

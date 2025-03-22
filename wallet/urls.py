@@ -7,6 +7,7 @@ from .views.solana import SolanaWalletViewSet, SolanaSwapViewSet
 from .views.solana.history import SolanaHistoryViewSet
 from .views.nft import SolanaNFTViewSet, EVMNFTViewSet
 from .views.evm import EVMWalletViewSet
+from .views.referral import ReferralViewSet
 
 # 创建路由器
 router = DefaultRouter()
@@ -18,6 +19,7 @@ router.register(r'solana/wallets/(?P<wallet_id>[^/.]+)/swap', SolanaSwapViewSet,
 router.register(r'solana/nfts', SolanaNFTViewSet, basename='solana-nft')
 router.register(r'evm/wallets', EVMWalletViewSet, basename='evm-wallet')
 router.register(r'evm/nfts', EVMNFTViewSet, basename='evm-nft')
+router.register(r'referrals', ReferralViewSet, basename='referral')
 
 # API 路由
 urlpatterns = [

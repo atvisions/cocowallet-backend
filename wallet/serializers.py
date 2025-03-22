@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import Wallet, MnemonicBackup, PaymentPassword
+from .models import (
+    Wallet, MnemonicBackup, PaymentPassword,
+    ReferralLink, ReferralRelationship, UserPoints, PointsHistory
+)
 from django.conf import settings
 from PIL import Image, ImageDraw
 import os
@@ -156,3 +159,68 @@ class ChainSelectionSerializer(serializers.Serializer):
             raise serializers.ValidationError(f"{value} 即将支持")
             
         return value
+
+class ReferralLinkSerializer(serializers.ModelSerializer):
+    """推荐链接序列化器"""
+    full_link = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = ReferralLink
+        fields = ['code', 'clicks', 'created_at', 'full_link']
+        read_only_fields = ['code', 'clicks', 'created_at']
+    
+    def get_full_link(self, obj):
+        """获取完整的推荐链接"""
+        base_url = "https://www.cocowallet.io/download"
+        return f"{base_url}?ref={obj.code}"
+
+class ReferralRelationshipSerializer(serializers.ModelSerializer):
+    """推荐关系序列化器"""
+    status = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = ReferralRelationship
+        fields = ['referred_device_id', 'download_completed', 'wallet_created', 
+                  'created_at', 'status']
+        read_only_fields = ['referred_device_id', 'download_completed', 'wallet_created', 
+                           'created_at', 'status']
+    
+    def get_status(self, obj):
+        """获取推荐状态"""
+        if obj.wallet_created:
+            return "完成"
+        elif obj.download_completed:
+            return "已下载，未创建钱包"
+        else:
+            return "未完成"
+
+class UserPointsSerializer(serializers.ModelSerializer):
+    """用户积分序列化器"""
+    class Meta:
+        model = UserPoints
+        fields = ['device_id', 'total_points', 'created_at', 'updated_at']
+        read_only_fields = ['device_id', 'total_points', 'created_at', 'updated_at']
+
+class PointsHistorySerializer(serializers.ModelSerializer):
+    """积分历史序列化器"""
+    action_display = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = PointsHistory
+        fields = ['points', 'action_type', 'action_display', 'description', 
+                  'related_device_id', 'created_at']
+        read_only_fields = ['points', 'action_type', 'action_display', 'description', 
+                           'related_device_id', 'created_at']
+    
+    def get_action_display(self, obj):
+        """获取行为类型显示名称"""
+        return dict(PointsHistory.ACTION_TYPES).get(obj.action_type, obj.action_type)
+
+class ReferralStatsSerializer(serializers.Serializer):
+    """推荐统计序列化器"""
+    total_referrals = serializers.IntegerField()
+    completed_referrals = serializers.IntegerField()
+    pending_referrals = serializers.IntegerField()
+    total_points = serializers.IntegerField()
+    download_points = serializers.IntegerField()
+    wallet_points = serializers.IntegerField()

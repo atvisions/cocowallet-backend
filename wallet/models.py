@@ -745,3 +745,154 @@ class TokenCategory(models.Model):
     def __str__(self):
         return self.name
 
+class ReferralRelationship(models.Model):
+    """推荐关系模型"""
+    referrer_device_id = models.CharField(max_length=100, verbose_name='推荐人设备ID')
+    referred_device_id = models.CharField(max_length=100, verbose_name='被推荐人设备ID')
+    download_completed = models.BooleanField(default=True, verbose_name='是否完成下载')
+    wallet_created = models.BooleanField(default=False, verbose_name='是否创建/导入钱包')
+    download_points_awarded = models.BooleanField(default=False, verbose_name='是否已奖励下载积分')
+    wallet_points_awarded = models.BooleanField(default=False, verbose_name='是否已奖励创建钱包积分')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        verbose_name = '推荐关系'
+        verbose_name_plural = '推荐关系'
+        unique_together = ['referrer_device_id', 'referred_device_id']
+        indexes = [
+            models.Index(fields=['referrer_device_id']),
+            models.Index(fields=['referred_device_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.referrer_device_id} -> {self.referred_device_id}"
+
+class UserPoints(models.Model):
+    """用户积分模型"""
+    device_id = models.CharField(max_length=100, unique=True, verbose_name='设备ID')
+    total_points = models.IntegerField(default=0, verbose_name='总积分')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        verbose_name = '用户积分'
+        verbose_name_plural = '用户积分'
+        indexes = [
+            models.Index(fields=['device_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.device_id}: {self.total_points}分"
+
+    @classmethod
+    def get_or_create_user_points(cls, device_id):
+        """获取或创建用户积分记录"""
+        user_points, created = cls.objects.get_or_create(
+            device_id=device_id,
+            defaults={'total_points': 0}
+        )
+        return user_points
+
+    def add_points(self, points, action_type, description=None, related_device_id=None):
+        """添加积分并记录历史"""
+        self.total_points += points
+        self.save()
+        
+        # 创建积分历史记录
+        PointsHistory.objects.create(
+            device_id=self.device_id,
+            points=points,
+            action_type=action_type,
+            description=description,
+            related_device_id=related_device_id
+        )
+        
+        return self.total_points
+
+class PointsHistory(models.Model):
+    """积分历史模型"""
+    ACTION_TYPES = [
+        ('DOWNLOAD_REFERRAL', '下载推荐'),
+        ('WALLET_REFERRAL', '钱包创建推荐'),
+        ('POINTS_USED', '积分使用'),
+        ('ADMIN_ADJUSTMENT', '管理员调整'),
+        ('OTHER', '其他'),
+    ]
+    
+    device_id = models.CharField(max_length=100, verbose_name='设备ID')
+    points = models.IntegerField(verbose_name='积分变动')
+    action_type = models.CharField(max_length=20, choices=ACTION_TYPES, verbose_name='行为类型')
+    description = models.TextField(null=True, blank=True, verbose_name='描述')
+    related_device_id = models.CharField(max_length=100, null=True, blank=True, verbose_name='相关设备ID')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+
+    class Meta:
+        verbose_name = '积分历史'
+        verbose_name_plural = '积分历史'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['device_id']),
+            models.Index(fields=['action_type']),
+            models.Index(fields=['created_at']),
+        ]
+
+    def __str__(self):
+        action = dict(self.ACTION_TYPES).get(self.action_type, self.action_type)
+        return f"{self.device_id}: {self.points}分 ({action})"
+
+class ReferralLink(models.Model):
+    """推荐链接模型"""
+    device_id = models.CharField(max_length=100, verbose_name='设备ID')
+    code = models.CharField(max_length=20, unique=True, verbose_name='推荐码')
+    is_active = models.BooleanField(default=True, verbose_name='是否激活')
+    clicks = models.IntegerField(default=0, verbose_name='点击次数')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        verbose_name = '推荐链接'
+        verbose_name_plural = '推荐链接'
+        indexes = [
+            models.Index(fields=['device_id']),
+            models.Index(fields=['code']),
+        ]
+
+    def __str__(self):
+        return f"{self.device_id}: {self.code}"
+
+    @classmethod
+    def generate_code(cls, length=8):
+        """生成唯一推荐码"""
+        import random
+        import string
+        
+        while True:
+            # 生成随机字符串
+            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+            
+            # 检查是否已存在
+            if not cls.objects.filter(code=code).exists():
+                return code
+
+    @classmethod
+    def get_or_create_link(cls, device_id):
+        """获取或创建推荐链接"""
+        referral_link = cls.objects.filter(device_id=device_id, is_active=True).first()
+        
+        if not referral_link:
+            code = cls.generate_code()
+            referral_link = cls.objects.create(
+                device_id=device_id,
+                code=code,
+                is_active=True
+            )
+            
+        return referral_link
+
+    def increment_clicks(self):
+        """增加点击次数"""
+        self.clicks += 1
+        self.save()
+        return self.clicks
+

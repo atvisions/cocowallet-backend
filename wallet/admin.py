@@ -8,7 +8,8 @@ from .models import (
     Wallet, Token, NFTCollection, Transaction,
     MnemonicBackup, PaymentPassword, TokenIndex,
     TokenIndexSource, TokenIndexMetrics, TokenIndexGrade,
-    TokenIndexReport, TokenCategory
+    TokenIndexReport, TokenCategory,
+    ReferralRelationship, UserPoints, PointsHistory, ReferralLink
 )
 import re
 from django.urls import path
@@ -747,3 +748,33 @@ class TokenIndexReportAdmin(admin.ModelAdmin):
     """索引库报告管理"""
     list_display = ('report_date', 'total_tokens', 'grade_a_count', 'grade_b_count', 'grade_c_count', 'new_tokens', 'removed_tokens')
     readonly_fields = ('report_date', 'total_tokens', 'grade_a_count', 'grade_b_count', 'grade_c_count', 'new_tokens', 'removed_tokens', 'details')
+
+@admin.register(ReferralRelationship)
+class ReferralRelationshipAdmin(admin.ModelAdmin):
+    list_display = ('referrer_device_id', 'referred_device_id', 'download_completed', 
+                    'wallet_created', 'download_points_awarded', 'wallet_points_awarded', 
+                    'created_at')
+    list_filter = ('download_completed', 'wallet_created', 'download_points_awarded', 
+                   'wallet_points_awarded')
+    search_fields = ('referrer_device_id', 'referred_device_id')
+    date_hierarchy = 'created_at'
+
+@admin.register(UserPoints)
+class UserPointsAdmin(admin.ModelAdmin):
+    list_display = ('device_id', 'total_points', 'created_at', 'updated_at')
+    search_fields = ('device_id',)
+    date_hierarchy = 'created_at'
+
+@admin.register(PointsHistory)
+class PointsHistoryAdmin(admin.ModelAdmin):
+    list_display = ('device_id', 'points', 'action_type', 'related_device_id', 'created_at')
+    list_filter = ('action_type',)
+    search_fields = ('device_id', 'related_device_id', 'description')
+    date_hierarchy = 'created_at'
+
+@admin.register(ReferralLink)
+class ReferralLinkAdmin(admin.ModelAdmin):
+    list_display = ('device_id', 'code', 'is_active', 'clicks', 'created_at')
+    list_filter = ('is_active',)
+    search_fields = ('device_id', 'code')
+    date_hierarchy = 'created_at'

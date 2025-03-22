@@ -66,12 +66,8 @@ if DEBUG:
 # CORS 设置
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
-    'https://www.cocowallet.io',
-    'https://cocowallet.io',
-    'https://api.cocowallet.io',
-    'http://localhost:8000',
-    'http://127.0.0.1:8000',
-    'http://192.168.3.16:8000',  # 添加本地开发 IP
+    "https://www.cocowallet.io",
+    "https://cocowallet.io",
 ]
 
 if DEBUG:
@@ -248,3 +244,9 @@ STATICFILES_FINDERS = [
     'django.contrib.staticfiles.finders.FileSystemFinder',
     'django.contrib.staticfiles.finders.AppDirectoriesFinder',
 ]
+
+# 允许在 iframe 中嵌入
+X_FRAME_OPTIONS = 'ALLOW-FROM https://www.cocowallet.io'
+
+# 对于较新的浏览器，使用 CSP 策略
+CSP_FRAME_ANCESTORS = ["'self'", "https://www.cocowallet.io"]
