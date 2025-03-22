@@ -425,4 +425,42 @@ class ReferralViewSet(viewsets.ViewSet):
             return Response(
                 {'status': 'error', 'message': f'记录下载失败: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['post'])
+    def update_device_id(self, request):
+        """更新设备ID"""
+        old_device_id = request.data.get('old_device_id')
+        new_device_id = request.data.get('new_device_id')
+        
+        if not all([old_device_id, new_device_id]):
+            return Response(
+                {'status': 'error', 'message': '缺少必要参数'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # 查找指定的临时设备ID
+            relationships = ReferralRelationship.objects.filter(
+                referred_device_id=old_device_id
+            )
+            
+            updated_count = 0
+            for relationship in relationships:
+                # 更新设备ID
+                relationship.referred_device_id = new_device_id
+                relationship.save()
+                updated_count += 1
+                logger.info(f"更新设备 ID: {old_device_id} -> {new_device_id}")
+            
+            return Response({
+                'status': 'success',
+                'message': f'成功更新 {updated_count} 条推荐关系',
+                'data': {'updated_count': updated_count}
+            })
+        except Exception as e:
+            logger.error(f"更新设备ID失败: {str(e)}", exc_info=True)
+            return Response(
+                {'status': 'error', 'message': f'更新设备ID失败: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             ) 

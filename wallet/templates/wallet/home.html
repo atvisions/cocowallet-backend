@@ -75,9 +75,28 @@
             const refCode = urlParams.get('ref');
             
             if (refCode) {
+                // 将推荐码存储在 localStorage 中
+                try {
+                    localStorage.setItem('coco_wallet_ref_code', refCode);
+                    console.log('推荐码已存储:', refCode);
+                } catch (e) {
+                    console.error('存储推荐码失败:', e);
+                }
+                
                 // 为所有下载链接添加点击事件
                 document.querySelectorAll('.download-link').forEach(link => {
                     link.addEventListener('click', function(e) {
+                        // 生成临时设备ID
+                        const tempDeviceId = 'web_download_' + Date.now();
+                        
+                        // 将临时设备ID存储在 localStorage 中
+                        try {
+                            localStorage.setItem('coco_wallet_temp_device_id', tempDeviceId);
+                            console.log('临时设备ID已存储:', tempDeviceId);
+                        } catch (e) {
+                            console.error('存储临时设备ID失败:', e);
+                        }
+                        
                         // 记录下载事件
                         fetch('/api/v1/referrals/record_web_download/', {
                             method: 'POST',
@@ -86,7 +105,7 @@
                             },
                             body: JSON.stringify({
                                 referrer_code: refCode,
-                                device_id: 'web_download_' + Date.now() // 生成临时设备ID
+                                device_id: tempDeviceId
                             }),
                         })
                         .then(response => response.json())
