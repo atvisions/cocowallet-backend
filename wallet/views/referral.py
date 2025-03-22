@@ -366,4 +366,40 @@ class ReferralViewSet(viewsets.ViewSet):
             return Response(
                 {'status': 'error', 'message': f'获取推荐统计失败: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['post'])
+    def record_web_download(self, request):
+        """记录网页下载并奖励积分"""
+        referrer_code = request.data.get('referrer_code')
+        device_id = request.data.get('device_id')
+        
+        if not all([referrer_code, device_id]):
+            return Response(
+                {'status': 'error', 'message': '缺少必要参数'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # 查找推荐链接
+            referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
+            
+            # 记录下载
+            success = referral_link.record_download(device_id)
+            
+            if success:
+                return Response({
+                    'status': 'success',
+                    'message': '下载记录已保存，积分已奖励'
+                })
+            else:
+                return Response({
+                    'status': 'error',
+                    'message': '不能推荐自己'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"记录下载失败: {str(e)}")
+            return Response(
+                {'status': 'error', 'message': f'记录下载失败: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             ) 

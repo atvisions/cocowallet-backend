@@ -171,7 +171,7 @@ class ReferralLinkSerializer(serializers.ModelSerializer):
     
     def get_full_link(self, obj):
         """获取完整的推荐链接"""
-        base_url = "https://www.cocowallet.io/download"
+        base_url = "https://www.cocowallet.io/"
         return f"{base_url}?ref={obj.code}"
 
 class ReferralRelationshipSerializer(serializers.ModelSerializer):

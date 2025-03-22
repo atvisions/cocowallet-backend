@@ -896,3 +896,45 @@ class ReferralLink(models.Model):
         self.save()
         return self.clicks
 
+    def record_download(self, device_id):
+        """记录下载并增加点击次数"""
+        from .models import ReferralRelationship, UserPoints
+        
+        # 增加点击次数
+        self.increment_clicks()
+        
+        # 防止自我推荐
+        if self.device_id == device_id:
+            return False
+        
+        # 创建或更新推荐关系
+        relationship, created = ReferralRelationship.objects.get_or_create(
+            referrer_device_id=self.device_id,
+            referred_device_id=device_id,
+            defaults={
+                'download_completed': True,
+                'wallet_created': False,
+                'download_points_awarded': False,
+                'wallet_points_awarded': False
+            }
+        )
+        
+        # 如果是新关系，奖励下载积分
+        if created or not relationship.download_points_awarded:
+            # 获取或创建推荐人积分记录
+            user_points = UserPoints.get_or_create_user_points(self.device_id)
+            
+            # 添加积分 (1分)
+            user_points.add_points(
+                points=1,
+                action_type='DOWNLOAD_REFERRAL',
+                description=f'用户 {device_id} 通过您的推荐下载了应用',
+                related_device_id=device_id
+            )
+            
+            # 标记已奖励下载积分
+            relationship.download_points_awarded = True
+            relationship.save()
+        
+        return True
+

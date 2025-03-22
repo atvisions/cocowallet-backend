@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="375" height="812" viewBox="0 0 375 812" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- 背景 -->
+    <rect width="375" height="812" fill="#171C32"/>
+    
+    <!-- 状态栏 -->
+    <rect width="375" height="44" fill="#1A1F36"/>
+    <text x="30" y="27" font-family="Inter" font-size="14" fill="white">9:41</text>
+    <path d="M338 16h19a4 4 0 014 4v4a4 4 0 01-4 4h-19a4 4 0 01-4-4v-4a4 4 0 014-4" fill="white"/>
+    <path d="M315 17v14h-3V17h3zm7 0v14h-3V17h3zm7 0v14h-3V17h3z" fill="white"/>
+    
+    <!-- 顶部导航 -->
+    <rect y="44" width="375" height="60" fill="#1A1F36"/>
+    <text x="20" y="82" font-family="Inter" font-size="20" font-weight="600" fill="white">Portfolio</text>
+    <circle cx="345" cy="74" r="20" fill="#1FC595" fill-opacity="0.1"/>
+    <path d="M345 64a10 10 0 110 20 10 10 0 010-20" stroke="#1FC595" stroke-width="2"/>
+    
+    <!-- 总资产卡片 -->
+    <rect x="16" y="120" width="343" height="140" rx="20" fill="#1A1F36"/>
+    <text x="36" y="150" font-family="Inter" font-size="14" fill="#8E8E8E">Total Balance</text>
+    <text x="36" y="190" font-family="Inter" font-size="32" font-weight="700" fill="white">$12,345.67</text>
+    <text x="36" y="220" font-family="Inter" font-size="16" fill="#1FC595">+5.23% ($642.31)</text>
+    
+    <!-- 代币列表 -->
+    <text x="20" y="300" font-family="Inter" font-size="16" font-weight="600" fill="white">Assets</text>
+    
+    <!-- SOL -->
+    <rect x="16" y="320" width="343" height="80" rx="12" fill="#1A1F36"/>
+    <circle cx="56" cy="360" r="20" fill="#1FC595" fill-opacity="0.1"/>
+    <text x="96" y="355" font-family="Inter" font-size="16" font-weight="600" fill="white">Solana</text>
+    <text x="96" y="375" font-family="Inter" font-size="14" fill="#8E8E8E">SOL</text>
+    <text x="290" y="355" font-family="Inter" font-size="16" font-weight="600" fill="white">$89.24</text>
+    <text x="290" y="375" font-family="Inter" font-size="14" fill="#1FC595">+3.45%</text>
+    
+    <!-- DOGE -->
+    <rect x="16" y="412" width="343" height="80" rx="12" fill="#1A1F36"/>
+    <circle cx="56" cy="452" r="20" fill="#1FC595" fill-opacity="0.1"/>
+    <text x="96" y="447" font-family="Inter" font-size="16" font-weight="600" fill="white">Dogecoin</text>
+    <text x="96" y="467" font-family="Inter" font-size="14" fill="#8E8E8E">DOGE</text>
+    <text x="290" y="447" font-family="Inter" font-size="16" font-weight="600" fill="white">$0.0824</text>
+    <text x="290" y="467" font-family="Inter" font-size="14" fill="#1FC595">+2.18%</text>
+    
+    <!-- PEPE -->
+    <rect x="16" y="504" width="343" height="80" rx="12" fill="#1A1F36"/>
+    <circle cx="56" cy="544" r="20" fill="#1FC595" fill-opacity="0.1"/>
+    <text x="96" y="539" font-family="Inter" font-size="16" font-weight="600" fill="white">Pepe</text>
+    <text x="96" y="559" font-family="Inter" font-size="14" fill="#8E8E8E">PEPE</text>
+    <text x="290" y="539" font-family="Inter" font-size="16" font-weight="600" fill="white">$0.000012</text>
+    <text x="290" y="559" font-family="Inter" font-size="14" fill="#FF4B55">-1.23%</text>
+    
+    <!-- 底部导航栏 -->
+    <rect y="728" width="375" height="84" fill="#1A1F36"/>
+    <g transform="translate(30,748)">
+        <rect width="60" height="44" fill="none"/>
+        <path d="M30 12a4 4 0 110 8 4 4 0 010-8" fill="#1FC595"/>
+        <text x="30" y="36" font-family="Inter" font-size="12" fill="#1FC595" text-anchor="middle">Home</text>
+    </g>
+    <g transform="translate(120,748)">
+        <rect width="60" height="44" fill="none"/>
+        <path d="M30 12l4 4-4 4-4-4 4-4" stroke="#8E8E8E" stroke-width="2" fill="none"/>
+        <text x="30" y="36" font-family="Inter" font-size="12" fill="#8E8E8E" text-anchor="middle">Market</text>
+    </g>
+    <g transform="translate(210,748)">
+        <rect width="60" height="44" fill="none"/>
+        <circle cx="30" cy="16" r="4" stroke="#8E8E8E" stroke-width="2" fill="none"/>
+        <text x="30" y="36" font-family="Inter" font-size="12" fill="#8E8E8E" text-anchor="middle">Trade</text>
+    </g>
+    <g transform="translate(285,748)">
+        <rect width="60" height="44" fill="none"/>
+        <path d="M30 12a4 4 0 110 8 4 4 0 010-8" stroke="#8E8E8E" stroke-width="2" fill="none"/>
+        <text x="30" y="36" font-family="Inter" font-size="12" fill="#8E8E8E" text-anchor="middle">Profile</text>
+    </g>
+</svg> 

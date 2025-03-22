@@ -1,0 +1,264 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coco Wallet - AI-Powered Crypto Investment</title>
+    <link rel="stylesheet" href="{% static 'website/css/style.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="icon" href="{% static 'website/images/favicon.ico' %}" type="image/x-icon">
+    <style>
+        .logo img {
+            transform-origin: center center;
+            transition: transform 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="container">
+            <div class="logo">
+                <img src="{% static 'website/images/logo.png' %}" alt="Coco Wallet Logo">
+            </div>
+            <button class="mobile-menu-btn">
+                <span class="bar"></span>
+                <span class="bar"></span>
+                <span class="bar"></span>
+            </button>
+            <div class="nav-links">
+                <a href="#home">Home</a>
+                <a href="#about">About</a>
+                <a href="#how-it-works">How It Works</a>
+                <a href="#why-meme">Why Meme Coins</a>
+                <a href="{% static 'website/apk/cocowallet-1.0.0.apk' %}" class="download-btn download-link">Download App</a>
+            </div>
+        </div>
+    </nav>
+
+    <script>
+        // 移动端菜单交互
+        document.querySelector('.mobile-menu-btn').addEventListener('click', function() {
+            this.classList.toggle('active');
+            document.querySelector('.nav-links').classList.toggle('active');
+            document.body.classList.toggle('menu-open');
+        });
+
+        // 点击链接后关闭菜单
+        document.querySelectorAll('.nav-links a').forEach(link => {
+            link.addEventListener('click', () => {
+                document.querySelector('.mobile-menu-btn').classList.remove('active');
+                document.querySelector('.nav-links').classList.remove('active');
+                document.body.classList.remove('menu-open');
+            });
+        });
+
+        // Logo旋转效果
+        let lastScrollPosition = window.scrollY;
+        window.addEventListener('scroll', () => {
+            const currentScrollPosition = window.scrollY;
+            const scrollDifference = currentScrollPosition - lastScrollPosition;
+            const rotationSpeed = 0.5; // 控制旋转速度的系数
+            const logo = document.querySelector('.logo img');
+            const currentRotation = parseFloat(logo.style.transform.replace('rotate(', '').replace('deg)', '') || 0);
+            const newRotation = currentRotation + (scrollDifference * rotationSpeed);
+            logo.style.transform = `rotate(${newRotation}deg)`;
+            lastScrollPosition = currentScrollPosition;
+        });
+
+        // 记录下载事件
+        document.addEventListener('DOMContentLoaded', function() {
+            // 获取推荐码
+            const urlParams = new URLSearchParams(window.location.search);
+            const refCode = urlParams.get('ref');
+            
+            if (refCode) {
+                // 为所有下载链接添加点击事件
+                document.querySelectorAll('.download-link').forEach(link => {
+                    link.addEventListener('click', function(e) {
+                        // 记录下载事件
+                        fetch('/api/v1/referrals/record_web_download/', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                referrer_code: refCode,
+                                device_id: 'web_download_' + Date.now() // 生成临时设备ID
+                            }),
+                        })
+                        .then(response => response.json())
+                        .then(data => console.log('Download recorded successfully:', data))
+                        .catch(error => console.error('Failed to record download:', error));
+                    });
+                });
+            }
+        });
+    </script>
+
+    <!-- Hero Section -->
+    <section id="home" class="hero">
+        <div class="hero-background">
+            <div class="gradient-circle circle-1"></div>
+            <div class="gradient-circle circle-2"></div>
+            <div class="floating-coins">
+                <img src="{% static 'website/images/coins/solana.png' %}" alt="Solana" class="coin coin-1">
+                <img src="{% static 'website/images/coins/ethereum.png' %}" alt="Ethereum" class="coin coin-2">
+                <img src="{% static 'website/images/coins/base.png' %}" alt="Dogecoin" class="coin coin-4">
+            </div>
+        </div>
+        <div class="container">
+            <div class="hero-content">
+                <h1>Unlock Your Crypto Potential with Coco Wallet</h1>
+                <p>Empower your wealth journey with AI-driven meme coin investments.</p>
+                <div class="cta-group">
+                    <a href="{% static 'website/apk/cocowallet-1.0.0.apk' %}" class="cta-button download-link" id="heroDownloadBtn">
+                        <i class="fab fa-android"></i>
+                        <span>Download Now</span>
+                        <span class="version">v1.0.0</span>
+                    </a>
+                    <div class="app-stats">
+                        <div class="stat">
+                            <span class="stat-number">10K+</span>
+                            <span class="stat-label">Downloads</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-number">4.8</span>
+                            <span class="stat-label">Rating</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="hero-image">
+                <div class="phone-mockup">
+                    <object data="{% static 'website/images/app-screen.svg' %}" type="image/svg+xml" class="app-screen"></object>
+                    <div class="phone-frame"></div>
+                    <div class="phone-reflection"></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- What is Coco Wallet Section -->
+    <section id="about" class="about">
+        <div class="container">
+            <h2>Coco Wallet: AI-Powered Wealth Creation</h2>
+            <p>Coco Wallet is a revolutionary mobile app designed to help you create wealth through intelligent investments in meme coins. With the power of AI agents, Coco Wallet identifies the best low-market-cap meme coins and helps you make smarter investment decisions. Whether you're new to crypto or an experienced investor, Coco Wallet is your trusted partner in navigating the exciting world of meme coins and others.</p>
+        </div>
+    </section>
+
+    <!-- How it Works Section -->
+    <section id="how-it-works" class="features">
+        <div class="container">
+            <h2>Smart, Simple, Secure</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <i class="fas fa-robot"></i>
+                    <h3>AI Agent Assistance</h3>
+                    <p>Let our AI analyze market trends and identify promising opportunities.</p>
+                </div>
+                <div class="feature-card">
+                    <i class="fas fa-coins"></i>
+                    <h3>Meme Coins</h3>
+                    <p>Access a curated selection of high-potential meme coins.</p>
+                </div>
+                <div class="feature-card">
+                    <i class="fas fa-mobile-alt"></i>
+                    <h3>Easy-to-Use Interface</h3>
+                    <p>Simple and intuitive design for seamless trading experience.</p>
+                </div>
+            </div>
+            <p class="note">Note: The AI agent will be live in the next version.</p>
+        </div>
+    </section>
+
+    <!-- Why Meme Coins Section -->
+    <section id="why-meme" class="why-meme">
+        <div class="container">
+            <h2>Why Invest in Meme Coins?</h2>
+            <div class="meme-grid">
+                <div class="meme-card">
+                    <h3>High Reward Potential</h3>
+                    <p>Meme coins can explode in value in a short time, creating massive returns.</p>
+                </div>
+                <div class="meme-card">
+                    <h3>Community Driven</h3>
+                    <p>Meme coins thrive on strong community support, often driven by viral trends and social media buzz.</p>
+                </div>
+                <div class="meme-card">
+                    <h3>Low Barriers to Entry</h3>
+                    <p>Most meme coins are inexpensive, allowing users to invest small amounts with the potential for large gains.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Getting Started Section -->
+    <section id="getting-started" class="getting-started">
+        <div class="container">
+            <h2>Getting Started with Coco Wallet is Easy</h2>
+            <div class="steps">
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <h3>Download Coco Wallet</h3>
+                    <p>Available for Android, Coco Wallet is easy to set up.</p>
+                </div>
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <h3>Set Up Your AI Agent</h3>
+                    <p>Customize your preferences, and let the AI agent start recommending the best meme coins for you.</p>
+                </div>
+                <div class="step">
+                    <div class="step-number">3</div>
+                    <h3>Invest and Track</h3>
+                    <p>Make your first purchase and monitor your investments in real-time with Coco Wallet's seamless tracking features.</p>
+                </div>
+            </div>
+            <a href="{% static 'website/apk/cocowallet-1.0.0.apk' %}" class="cta-button download-link">Download Now and Start Investing</a>
+        </div>
+    </section>
+
+    <!-- AI Agent Section -->
+    <section id="ai-agent" class="ai-agent">
+        <div class="container">
+            <h2>Your Personal Investment Assistant</h2>
+            <p>Coco Wallet's AI Agent works behind the scenes to provide personalized investment recommendations. By analyzing global market data, social media trends, and historical performance, it helps you make informed decisions. The more you use it, the smarter it gets, learning from your preferences and risk tolerance.</p>
+        </div>
+    </section>
+
+    <!-- Target Audience Section -->
+    <section id="target" class="target">
+        <div class="container">
+            <h2>Designed for Emerging Markets</h2>
+            <p>Coco Wallet is tailored for users in Africa, Southeast Asia, and other regions where access to traditional investment opportunities is limited. These regions have seen rapid growth in the adoption of mobile technology and cryptocurrencies. With Coco Wallet, you can start your journey towards wealth creation with minimal initial investment and maximum potential for growth.</p>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-links">
+                    <a href="#home">Home</a>
+                    <a href="#how-it-works">How It Works</a>
+                    <a href="{% static 'website/apk/cocowallet-1.0.0.apk' %}" class="download-link">Download App</a>
+                    <a href="privacy.html">Privacy Policy</a>
+                    <a href="terms.html">Terms of Service</a>
+                    <a href="contact.html">Contact Us</a>
+                </div>
+                <div class="social-links">
+                    <a href="#"><i class="fab fa-twitter"></i></a>
+                    <a href="#"><i class="fab fa-facebook"></i></a>
+                    <a href="#"><i class="fab fa-instagram"></i></a>
+                    <a href="#"><i class="fab fa-linkedin"></i></a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2024 Coco Wallet. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>
