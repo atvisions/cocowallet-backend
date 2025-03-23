@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="icon" href="{% static 'website/images/favicon.ico' %}" type="image/x-icon">
+    <meta name="csrf-token" content="{{ csrf_token }}">
     <style>
         .logo img {
             transform-origin: center center;
@@ -204,6 +205,22 @@
                 var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
                 return v.toString(16);
             });
+        }
+
+        // 设置CSRF token在AJAX请求中使用
+        const csrftoken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+        
+        // 在AJAX请求前设置CSRF头
+        function setCsrfHeader(xhr) {
+            xhr.setRequestHeader('X-CSRFToken', csrftoken);
+        }
+        
+        // 示例AJAX请求
+        function exampleAjaxRequest() {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/endpoint/');
+            setCsrfHeader(xhr);
+            xhr.send(JSON.stringify(data));
         }
     </script>
 

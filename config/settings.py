@@ -52,6 +52,7 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -281,3 +282,16 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [],
 }
+
+# 添加CSRF配置
+CSRF_TRUSTED_ORIGINS = [
+    'https://www.cocowallet.io',
+    'https://cocowallet.io',
+    'http://localhost:8000',
+    'http://192.168.3.16:8000',
+]
+
+# 如果你的前端在不同域名下，确保设置正确的CSRF cookie
+CSRF_COOKIE_DOMAIN = '.cocowallet.io'  # 允许所有子域名共享CSRF cookie
+CSRF_USE_SESSIONS = False  # 使用cookie存储CSRF而非session
+CSRF_COOKIE_SAMESITE = 'Lax'  # 或根据需要设置为'None'，但必须确保HTTPS
