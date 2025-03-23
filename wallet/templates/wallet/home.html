@@ -33,7 +33,7 @@
                 <a href="#about">About</a>
                 <a href="#how-it-works">How It Works</a>
                 <a href="#why-meme">Why Meme Coins</a>
-                <a href="{% static 'website/apk/cocowallet-1.0.0.apk' %}" class="download-btn download-link">Download App</a>
+                <a href="/download/app?ref={{ referrer_code }}&temp_id={{ temp_device_id }}" class="download-btn download-link">Download App</a>
             </div>
         </div>
     </nav>
@@ -70,77 +70,90 @@
 
         // Record download event - moved outside DOMContentLoaded to ensure it always executes
         function setupReferralTracking() {
-            // Get referral code
+            // 获取推荐码
             const urlParams = new URLSearchParams(window.location.search);
-            const refCode = urlParams.get('ref') || localStorage.getItem('coco_wallet_ref_code');
+            const refCode = urlParams.get('ref');
             
             if (refCode) {
-                // Store referral code in localStorage
                 try {
-                    localStorage.setItem('coco_wallet_ref_code', refCode);
-                    console.log('Referral code stored:', refCode);
-                    
-                    // Generate temporary device ID immediately, don't wait for download click
-                    let tempDeviceId = localStorage.getItem('coco_wallet_temp_device_id');
-                    if (!tempDeviceId) {
-                        tempDeviceId = 'web_' + generateUUID();
-                        localStorage.setItem('coco_wallet_temp_device_id', tempDeviceId);
+                    // 检查是否已记录过访问
+                    const visitKey = 'visit_recorded_' + refCode;
+                    if (localStorage.getItem(visitKey) === 'true') {
+                        console.log('Visit already recorded for:', refCode);
+                        return;
                     }
-                    console.log('Temporary device ID:', tempDeviceId);
                     
-                    // Record visit event
+                    // 记录访问
                     fetch('/api/v1/referrals/record_visit/', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
+                            'Accept': 'application/json',
                         },
                         body: JSON.stringify({
                             referrer_code: refCode,
-                            device_id: tempDeviceId
-                        }),
+                            device_id: '{{ temp_device_id }}'
+                        })
                     })
-                    .then(response => response.json())
-                    .then(data => console.log('Visit recorded successfully:', data))
-                    .catch(error => console.error('Failed to record visit:', error));
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        return response.json();
+                    })
+                    .then(data => {
+                        if (data.status === 'success') {
+                            console.log('Visit recorded successfully');
+                            // 标记已记录访问
+                            localStorage.setItem(visitKey, 'true');
+                        } else {
+                            console.error('Failed to record visit:', data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Failed to record visit:', error.message);
+                    });
+                    
                 } catch (e) {
-                    console.error('Failed to store referral information:', e);
+                    console.error('Failed to process referral:', e);
                 }
             }
             
-            // Add click event to all download links - add event listeners regardless of referral code
+            // Add click event to all download links
             console.log('Setting up download link event listeners');
             document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(link => {
                 console.log('Found download link:', link);
-                link.addEventListener('click', function(e) {
+                link.addEventListener('click', async function(e) {
+                    e.preventDefault(); // 阻止默认行为
                     console.log('Download link clicked');
                     
-                    // Get stored temporary device ID and referral code
-                    const tempDeviceId = localStorage.getItem('coco_wallet_temp_device_id');
-                    const refCode = localStorage.getItem('coco_wallet_ref_code');
+                    // 使用当前页面的参数
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const refCode = urlParams.get('ref');
                     
-                    if (tempDeviceId && refCode) {
-                        console.log('User clicked download, using temporary device ID:', tempDeviceId, 'referral code:', refCode);
+                    if (refCode) {
+                        console.log('Recording download for ref code:', refCode);
                         
-                        // Record download event
-                        fetch('/api/v1/referrals/record_web_download/', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                referrer_code: refCode,
-                                device_id: tempDeviceId
-                            }),
-                        })
-                        .then(response => {
+                        try {
+                            // Record download event
+                            const response = await fetch('/api/v1/referrals/record_web_download/', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({
+                                    referrer_code: refCode,
+                                    device_id: '{{ temp_device_id }}'
+                                }),
+                            });
+
                             if (!response.ok) {
                                 throw new Error('Network response was not ok');
                             }
-                            return response.json();
-                        })
-                        .then(data => {
-                            console.log('Download recorded successfully:', data);
-                            // Show success message
+
+                            const data = await response.json();
+                            console.log('Download recorded response:', data);
+
                             if (data.status === 'success') {
                                 const successMsg = document.createElement('div');
                                 successMsg.className = 'download-success-message';
@@ -156,22 +169,20 @@
                                 successMsg.style.zIndex = '1000';
                                 document.body.appendChild(successMsg);
                                 
-                                // Remove message after 3 seconds
                                 setTimeout(() => {
                                     document.body.removeChild(successMsg);
+                                    // 记录成功后再进行下载
+                                    window.location.href = this.href;
                                 }, 3000);
                             }
-                        })
-                        .catch(error => {
+                        } catch (error) {
                             console.error('Failed to record download:', error);
-                            // Add retry logic
-                            setTimeout(() => {
-                                console.log('Attempting to record download again...');
-                                // Retry code can be added here
-                            }, 2000);
-                        });
+                            // 即使记录失败也允许下载
+                            window.location.href = this.href;
+                        }
                     } else {
-                        console.log('No referral information, normal download');
+                        // 没有推荐码时直接下载
+                        window.location.href = this.href;
                     }
                 });
             });
@@ -212,7 +223,7 @@
                 <h1>Unlock Your Crypto Potential with Coco Wallet</h1>
                 <p>Empower your wealth journey with AI-driven meme coin investments.</p>
                 <div class="cta-group">
-                    <a href="{% static 'website/apk/cocowallet-1.0.0.apk' %}" class="cta-button download-link" id="heroDownloadBtn">
+                    <a href="/download/app?ref={{ referrer_code }}&temp_id={{ temp_device_id }}" class="cta-button download-link" id="heroDownloadBtn">
                         <i class="fab fa-android"></i>
                         <span>Download Now</span>
                         <span class="version">v1.0.0</span>
@@ -314,7 +325,7 @@
                     <p>Make your first purchase and monitor your investments in real-time with Coco Wallet's seamless tracking features.</p>
                 </div>
             </div>
-            <a href="{% static 'website/apk/cocowallet-1.0.0.apk' %}" class="cta-button download-link">Download Now and Start Investing</a>
+            <a href="/download/app?ref={{ referrer_code }}&temp_id={{ temp_device_id }}" class="cta-button download-link">Download Now and Start Investing</a>
         </div>
     </section>
 
@@ -341,7 +352,7 @@
                 <div class="footer-links">
                     <a href="#home">Home</a>
                     <a href="#how-it-works">How It Works</a>
-                    <a href="{% static 'website/apk/cocowallet-1.0.0.apk' %}" class="download-link">Download App</a>
+                    <a href="/download/app?ref={{ referrer_code }}&temp_id={{ temp_device_id }}" class="download-link">Download App</a>
                     <a href="privacy.html">Privacy Policy</a>
                     <a href="terms.html">Terms of Service</a>
                     <a href="contact.html">Contact Us</a>

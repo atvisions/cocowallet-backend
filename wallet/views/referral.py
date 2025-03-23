@@ -4,6 +4,9 @@ from rest_framework.response import Response
 from django.db.models import Sum, Count, Q
 from django.shortcuts import get_object_or_404
 import logging
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+from rest_framework.permissions import AllowAny
 
 from ..models import ReferralLink, ReferralRelationship, UserPoints, PointsHistory
 from ..serializers import (
@@ -13,8 +16,12 @@ from ..serializers import (
 
 logger = logging.getLogger(__name__)
 
+@method_decorator(csrf_exempt, name='dispatch')
 class ReferralViewSet(viewsets.ViewSet):
     """推荐系统视图集"""
+    
+    permission_classes = [AllowAny]
+    authentication_classes = []
     
     def get_referral_stats(self, device_id):
         """获取推荐统计数据"""
@@ -113,16 +120,16 @@ class ReferralViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'])
     def record_web_download(self, request):
         """记录网页下载并奖励积分"""
-        referrer_code = request.data.get('referrer_code')
-        device_id = request.data.get('device_id')
-        
-        if not all([referrer_code, device_id]):
-            return Response(
-                {'status': 'error', 'message': '缺少必要参数'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         try:
+            referrer_code = request.data.get('referrer_code')
+            device_id = request.data.get('device_id')
+            
+            if not all([referrer_code, device_id]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=400)
+            
             # 查找推荐链接
             referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
             
@@ -130,8 +137,16 @@ class ReferralViewSet(viewsets.ViewSet):
             success = referral_link.record_download(device_id)
             
             if success:
-                # 获取奖励的积分数量
-                points_awarded = 5  # 修改这里，从1分改为5分
+                # 获取或创建用户积分
+                user_points = UserPoints.get_or_create_user_points(referral_link.device_id)
+                
+                # 添加下载积分
+                points_awarded = user_points.add_points(
+                    points=5,  # 下载奖励5分
+                    action_type='DOWNLOAD_REFERRAL',
+                    description=f'User {device_id} downloaded app',
+                    related_device_id=device_id
+                )
                 
                 return Response({
                     'status': 'success',
@@ -142,13 +157,19 @@ class ReferralViewSet(viewsets.ViewSet):
                 return Response({
                     'status': 'error',
                     'message': '不能推荐自己'
-                }, status=status.HTTP_400_BAD_REQUEST)
+                }, status=400)
+            
+        except ReferralLink.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': '无效的推荐码'
+            }, status=404)
         except Exception as e:
             logger.error(f"记录下载失败: {str(e)}")
-            return Response(
-                {'status': 'error', 'message': f'记录下载失败: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=500)
     
     @action(detail=False, methods=['post'])
     def record_wallet_creation(self, request):
@@ -408,31 +429,29 @@ class ReferralViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'])
     def record_visit(self, request):
         """记录网站访问"""
-        referrer_code = request.data.get('referrer_code')
-        device_id = request.data.get('device_id')
-        
-        if not all([referrer_code, device_id]):
-            return Response(
-                {'status': 'error', 'message': '缺少必要参数'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         try:
+            referrer_code = request.data.get('referrer_code')
+            device_id = request.data.get('device_id')
+            
+            if not all([referrer_code, device_id]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=400)
+            
             # 查找推荐链接
             referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
             
             # 增加点击次数
             referral_link.increment_clicks()
             
-            logger.info(f"记录访问: 推荐码={referrer_code}, 设备ID={device_id}")
-            
             return Response({
                 'status': 'success',
                 'message': '访问已记录'
             })
+            
         except Exception as e:
-            logger.error(f"记录访问失败: {str(e)}")
-            return Response(
-                {'status': 'error', 'message': f'记录访问失败: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            ) 
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=500) 

@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 import logging
+import mimetypes
 
 # 加载 .env 文件
 env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
@@ -15,6 +16,7 @@ load_dotenv(env_path)
 MORALIS_API_KEY = os.getenv('MORALIS_API_KEY')
 ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 HELIUS_API_KEY = os.getenv('HELIUS_API_KEY')
+REFERRAL_SECRET_KEY = os.getenv('REFERRAL_SECRET_KEY', '7fedd4558bc93349105de9b05b86c3ac58fa51eb516ced7dddd563b63c3f25c1')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -40,52 +42,77 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
-    'drf_yasg',
     'wallet',
     'channels',
 ]
-
-# CSRF 配置
-CSRF_TRUSTED_ORIGINS = [
-    'https://www.cocowallet.io',
-    'https://cocowallet.io',
-    'https://api.cocowallet.io',
-    'http://localhost:8000',
-    'http://127.0.0.1:8000',
-    'http://192.168.3.16:8000',  # 添加本地开发 IP
-]
-
-# 开发环境下的安全设置
-if DEBUG:
-    SECURE_PROXY_SSL_HEADER = None
-    SESSION_COOKIE_SECURE = False
-    CSRF_COOKIE_SECURE = False
-    CSRF_USE_SESSIONS = False
-    CSRF_COOKIE_HTTPONLY = False
-
-# CORS 设置
-CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOWED_ORIGINS = [
-    "https://www.cocowallet.io",
-    "https://cocowallet.io",
-]
-
-if DEBUG:
-    CORS_ALLOW_ALL_ORIGINS = True  # 开发环境允许所有来源
 
 # 中间件顺序很重要
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',  # CORS 中间件必须在 CommonMiddleware 之前
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-# 移除 CORS_ALLOW_ALL_ORIGINS = True  # 这个设置太宽松了
+# CORS 和 CSRF 设置
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = [
+    'http://192.168.3.16:8000',
+    'http://localhost:8000',
+    'https://www.cocowallet.io',
+    'https://cocowallet.io',
+    'app://cocowallet.io'
+]
+
+# 添加允许的请求头和方法
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+    'device-id',
+]
+
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+# 安全设置
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_SSL_REDIRECT = False  # 开发环境设为 False
+SESSION_COOKIE_SECURE = False  # 开发环境设为 False
+CSRF_COOKIE_SECURE = False  # 开发环境设为 False
+
+if not DEBUG:
+    ALLOWED_HOSTS = [
+        '192.168.3.16',
+        'localhost',
+        '.cocowallet.io',
+        'www.cocowallet.io',
+        'api.cocowallet.io',
+    ]
+    
+    # 生产环境的安全设置
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000  # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
 
 ROOT_URLCONF = 'config.urls'
 
@@ -145,7 +172,7 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = '/static/'
-STATIC_ROOT = os.path.abspath(os.path.join(BASE_DIR, 'staticfiles'))
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # Media files
 MEDIA_URL = 'media/'
@@ -236,7 +263,7 @@ CHANNEL_LAYERS = {
 
 # 使用绝对路径
 STATICFILES_DIRS = [
-    os.path.abspath(os.path.join(BASE_DIR, 'static')),
+    os.path.join(BASE_DIR, 'static'),
 ]
 
 # 添加这个配置
@@ -245,8 +272,12 @@ STATICFILES_FINDERS = [
     'django.contrib.staticfiles.finders.AppDirectoriesFinder',
 ]
 
-# 允许在 iframe 中嵌入
-X_FRAME_OPTIONS = 'ALLOW-FROM https://www.cocowallet.io'
+# 添加APK文件的MIME类型
+mimetypes.add_type('application/vnd.android.package-archive', '.apk')
 
-# 对于较新的浏览器，使用 CSP 策略
-CSP_FRAME_ANCESTORS = ["'self'", "https://www.cocowallet.io"]
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.AllowAny',
+    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': [],
+}

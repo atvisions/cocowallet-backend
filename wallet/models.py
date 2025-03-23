@@ -69,6 +69,8 @@ class Wallet(models.Model):
     
     _payment_password = None  # Add payment password attribute
     
+    referral_info = models.JSONField(null=True, blank=True)
+    
     @property
     def payment_password(self):
         return self._payment_password
@@ -795,11 +797,14 @@ class UserPoints(models.Model):
         return user_points
 
     def add_points(self, points, action_type, description=None, related_device_id=None):
-        """Add points and record history"""
+        """添加积分"""
+        logger.info(f"Adding points: {points} to device: {self.device_id}, "
+                   f"action: {action_type}, related: {related_device_id}")
+        
         self.total_points += points
         self.save()
         
-        # Create points history record
+        # 记录积分历史
         PointsHistory.objects.create(
             device_id=self.device_id,
             points=points,
@@ -808,7 +813,7 @@ class UserPoints(models.Model):
             related_device_id=related_device_id
         )
         
-        return self.total_points
+        return points
 
 class PointsHistory(models.Model):
     """Points history model"""
@@ -897,44 +902,23 @@ class ReferralLink(models.Model):
         return self.clicks
 
     def record_download(self, device_id):
-        """Record download and increment click count"""
-        from .models import ReferralRelationship, UserPoints
-        
-        # Increment click count
-        self.increment_clicks()
-        
-        # Prevent self-referral
-        if self.device_id == device_id:
+        """记录下载"""
+        # 不能推荐自己
+        if device_id == self.device_id:
             return False
-        
-        # Create or update referral relationship
+            
+        # 创建或更新推荐关系
         relationship, created = ReferralRelationship.objects.get_or_create(
             referrer_device_id=self.device_id,
             referred_device_id=device_id,
             defaults={
-                'download_completed': True,
-                'wallet_created': False,
-                'download_points_awarded': False,
-                'wallet_points_awarded': False
+                'download_completed': True
             }
         )
         
-        # If new relationship, award download points
-        if created or not relationship.download_points_awarded:
-            # Get or create referrer's points record
-            user_points = UserPoints.get_or_create_user_points(self.device_id)
-            
-            # Add points (5 points)
-            user_points.add_points(
-                points=5,
-                action_type='DOWNLOAD_REFERRAL',
-                description=f'User {device_id} downloaded the app through your referral',
-                related_device_id=device_id
-            )
-            
-            # Mark download points as awarded
-            relationship.download_points_awarded = True
+        if not created:
+            relationship.download_completed = True
             relationship.save()
-        
+            
         return True
 

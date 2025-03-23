@@ -62,13 +62,14 @@ class MnemonicBackupSerializer(serializers.ModelSerializer):
 
 class WalletCreateSerializer(serializers.ModelSerializer):
     """钱包创建序列化器"""
+    referral_info = serializers.JSONField(required=False)
     
     class Meta:
         model = Wallet
         fields = [
             'device_id', 'name', 'chain', 'address',
             'encrypted_private_key', 'avatar', 'is_watch_only',
-            'is_imported'
+            'is_imported', 'referral_info'
         ]
 
 class WalletUpdateSerializer(serializers.Serializer):
@@ -171,7 +172,7 @@ class ReferralLinkSerializer(serializers.ModelSerializer):
     
     def get_full_link(self, obj):
         """获取完整的推荐链接"""
-        base_url = "https://www.cocowallet.io/"
+        base_url = "http://192.168.3.16:8000/"
         return f"{base_url}?ref={obj.code}"
 
 class ReferralRelationshipSerializer(serializers.ModelSerializer):
