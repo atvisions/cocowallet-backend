@@ -8,7 +8,7 @@ build/
 develop-eggs/
 dist/
 downloads/
-config/settings.py
+static/*
 eggs/
 .eggs/
 lib/
