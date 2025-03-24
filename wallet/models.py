@@ -748,27 +748,16 @@ class TokenCategory(models.Model):
         return self.name
 
 class ReferralRelationship(models.Model):
-    """Recommendation relationship model"""
-    referrer_device_id = models.CharField(max_length=100, verbose_name='Referrer Device ID')
-    referred_device_id = models.CharField(max_length=100, verbose_name='Referred Device ID')
-    download_completed = models.BooleanField(default=True, verbose_name='Is Download Completed')
-    wallet_created = models.BooleanField(default=False, verbose_name='Is Wallet Created/Imported')
-    download_points_awarded = models.BooleanField(default=False, verbose_name='Is Download Points Awarded')
-    wallet_points_awarded = models.BooleanField(default=False, verbose_name='Is Wallet Points Awarded')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
+    """推荐关系模型"""
+    referrer_device_id = models.CharField(max_length=100)
+    referred_device_id = models.CharField(max_length=100)
+    download_completed = models.BooleanField(default=True)
+    download_points_awarded = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'Recommendation Relationship'
-        verbose_name_plural = 'Recommendation Relationships'
         unique_together = ['referrer_device_id', 'referred_device_id']
-        indexes = [
-            models.Index(fields=['referrer_device_id']),
-            models.Index(fields=['referred_device_id']),
-        ]
-
-    def __str__(self):
-        return f"{self.referrer_device_id} -> {self.referred_device_id}"
 
 class UserPoints(models.Model):
     """User points model"""

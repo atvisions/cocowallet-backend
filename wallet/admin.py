@@ -751,13 +751,20 @@ class TokenIndexReportAdmin(admin.ModelAdmin):
 
 @admin.register(ReferralRelationship)
 class ReferralRelationshipAdmin(admin.ModelAdmin):
-    list_display = ('referrer_device_id', 'referred_device_id', 'download_completed', 
-                    'wallet_created', 'download_points_awarded', 'wallet_points_awarded', 
-                    'created_at')
-    list_filter = ('download_completed', 'wallet_created', 'download_points_awarded', 
-                   'wallet_points_awarded')
-    search_fields = ('referrer_device_id', 'referred_device_id')
-    date_hierarchy = 'created_at'
+    list_display = [
+        'referrer_device_id', 
+        'referred_device_id', 
+        'download_completed',
+        'download_points_awarded',
+        'created_at'
+    ]
+    list_filter = [
+        'download_completed',
+        'download_points_awarded',
+        'created_at'
+    ]
+    search_fields = ['referrer_device_id', 'referred_device_id']
+    readonly_fields = ['created_at', 'updated_at']
 
 @admin.register(UserPoints)
 class UserPointsAdmin(admin.ModelAdmin):

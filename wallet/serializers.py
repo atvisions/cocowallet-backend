@@ -232,8 +232,5 @@ class PointsHistorySerializer(serializers.ModelSerializer):
 class ReferralStatsSerializer(serializers.Serializer):
     """推荐统计序列化器"""
     total_referrals = serializers.IntegerField()
-    completed_referrals = serializers.IntegerField()
-    pending_referrals = serializers.IntegerField()
     total_points = serializers.IntegerField()
     download_points = serializers.IntegerField()
-    wallet_points = serializers.IntegerField()

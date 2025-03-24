@@ -1,105 +1,106 @@
-from django.shortcuts import render, redirect
+from django.shortcuts import render
 from django.views.decorators.http import require_GET
-from ..models import ReferralLink
-import time
-import json
-import base64
-from django.templatetags.static import static
-import uuid
-import hmac
-import hashlib
-from django.conf import settings
-from django.http import FileResponse, HttpResponse
+from ..models import ReferralLink, ReferralRelationship, UserPoints
 import os
+from django.http import FileResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
+from django.conf import settings
 import logging
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
-
-def generate_signature(params):
-    """
-    生成签名
-    params: 需要签名的参数字典
-    """
-    # 按键排序
-    sorted_params = dict(sorted(params.items()))
-    
-    # 构建签名字符串
-    sign_str = '&'.join([f"{k}={v}" for k, v in sorted_params.items()])
-    
-    # 使用 HMAC-SHA256 生成签名
-    secret_key = getattr(settings, 'REFERRAL_SECRET_KEY', 'your-secret-key')
-    signature = hmac.new(
-        secret_key.encode(),
-        sign_str.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    
-    return signature
 
 @csrf_exempt
 @require_GET
 def home(request):
     """网站主页"""
     ref_code = request.GET.get('ref')
-    temp_device_id = f'web_{uuid.uuid4().hex}'  # 生成临时设备ID
     
     # 如果有推荐码，尝试查找对应的推荐链接
     if ref_code:
         try:
-            referral_link = ReferralLink.objects.get(code=ref_code, is_active=True)
-            
-            # 将推荐码存储在会话中，以便在用户下载应用后使用
-            request.session['referrer_code'] = ref_code
+            ReferralLink.objects.get(code=ref_code, is_active=True)
         except ReferralLink.DoesNotExist:
-            # 推荐码无效，忽略
-            pass
+            ref_code = None
     
     context = {
-        'referrer_code': ref_code,
-        'temp_device_id': temp_device_id
+        'referrer_code': ref_code
     }
     return render(request, 'wallet/home.html', context)
 
 @csrf_exempt
 @require_GET
 def download_app(request):
-    """处理应用下载请求 - 简化版，直接提供APK下载"""
+    """处理应用下载请求"""
     ref_code = request.GET.get('ref')
-    temp_id = request.GET.get('temp_id')
+    client_ip = request.META.get('HTTP_X_FORWARDED_FOR') or request.META.get('REMOTE_ADDR')
     
-    # 记录下载请求
-    logger.info(f"收到下载请求: ref={ref_code}, temp_id={temp_id}")
+    logger.info(f"收到下载请求: ref={ref_code}, ip={client_ip}")
     
-    # 如果有推荐码，尝试记录点击
+    # 如果有推荐码，记录下载并奖励积分
     if ref_code:
         try:
+            # 查找推荐链接
             referral_link = ReferralLink.objects.get(code=ref_code, is_active=True)
+            
+            # 检查是否是自己推荐自己（IP检查）
+            referrer_downloads = cache.get(f"referrer_ip_{client_ip}_{ref_code}") or []
+            if client_ip in referrer_downloads:
+                logger.warning(f"检测到重复下载: ip={client_ip}, ref={ref_code}")
+                return HttpResponse('请不要重复下载', status=400)
+            
+            # 检查24小时内该IP的下载次数
+            ip_download_count = cache.get(f"ip_downloads_{client_ip}") or 0
+            if ip_download_count >= 3:  # 每个IP 24小时内最多3次下载
+                logger.warning(f"IP下载次数超限: ip={client_ip}, count={ip_download_count}")
+                return HttpResponse('下载次数超出限制，请24小时后再试', status=400)
+            
+            # 增加点击次数
             referral_link.increment_clicks()
             
-            # 将推荐码存储在会话中，以便在用户下载应用后使用
-            request.session['referrer_code'] = ref_code
-            logger.info(f"记录推荐点击: ref={ref_code}, 累计点击={referral_link.clicks}")
+            # 获取或创建推荐关系
+            relationship, created = ReferralRelationship.objects.get_or_create(
+                referrer_device_id=referral_link.device_id,
+                defaults={'download_completed': True}
+            )
+            
+            # 如果未发放过下载奖励
+            if not relationship.download_points_awarded:
+                # 检查推荐人24小时内获得的积分
+                referrer_points = cache.get(f"referrer_points_{referral_link.device_id}") or 0
+                if referrer_points >= 500:  # 改为500积分（100次推荐）
+                    logger.warning(f"推荐人积分超限: device_id={referral_link.device_id}, points={referrer_points}")
+                    return HttpResponse('推荐人今日积分已达上限', status=400)
+                
+                # 获取推荐人的积分账户
+                user_points = UserPoints.get_or_create_user_points(
+                    referral_link.device_id
+                )
+                
+                # 添加积分奖励
+                user_points.add_points(
+                    points=5,
+                    action_type='DOWNLOAD_REFERRAL',
+                    description=f'New user downloaded the app through referral code {ref_code}',
+                    related_device_id=referral_link.device_id
+                )
+                
+                # 更新缓存
+                cache.set(f"referrer_points_{referral_link.device_id}", referrer_points + 5, 86400)  # 24小时
+                cache.set(f"ip_downloads_{client_ip}", ip_download_count + 1, 86400)  # 24小时
+                referrer_downloads.append(client_ip)
+                cache.set(f"referrer_ip_{client_ip}_{ref_code}", referrer_downloads, 86400)  # 24小时
+                
+                # 标记已发放奖励
+                relationship.download_points_awarded = True
+                relationship.save()
+                
+                logger.info(f"已发放下载奖励: 推荐人={referral_link.device_id}, 积分=5")
+            
         except ReferralLink.DoesNotExist:
-            # 推荐码无效，忽略
-            logger.warning(f"无效的推荐码: {ref_code}")
-            pass
-    
-    # 构建下载参数
-    download_params = {
-        'referrer': ref_code or '',
-        'temp_device_id': temp_id or '',
-        'timestamp': int(time.time())
-    }
-    
-    # 生成签名
-    signature = generate_signature(download_params)
-    download_params['sign'] = signature
-    
-    # 编码参数
-    encoded_params = base64.urlsafe_b64encode(
-        json.dumps(download_params).encode()
-    ).decode()
+            logger.error(f"无效的推荐码: {ref_code}")
+        except Exception as e:
+            logger.error(f"处理推荐下载失败: {str(e)}")
     
     # APK文件路径
     apk_path = os.path.join(settings.STATIC_ROOT if not settings.DEBUG else settings.STATICFILES_DIRS[0], 
@@ -117,9 +118,6 @@ def download_app(request):
             content_type='application/vnd.android.package-archive'
         )
         response['Content-Disposition'] = 'attachment; filename="cocowallet-1.0.0.apk"'
-        
-        # 添加安装参数
-        response['X-Install-Params'] = encoded_params
         
         # 记录成功的下载响应
         file_size = os.path.getsize(apk_path)

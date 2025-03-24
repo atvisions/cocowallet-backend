@@ -25,40 +25,24 @@ class ReferralViewSet(viewsets.ViewSet):
     
     def get_referral_stats(self, device_id):
         """获取推荐统计数据"""
-        # 获取推荐关系统计
         total_referrals = ReferralRelationship.objects.filter(
             referrer_device_id=device_id
         ).count()
-        
-        completed_referrals = ReferralRelationship.objects.filter(
-            referrer_device_id=device_id,
-            wallet_created=True
-        ).count()
-        
-        pending_referrals = total_referrals - completed_referrals
         
         # 获取积分统计
         user_points = UserPoints.get_or_create_user_points(device_id)
         total_points = user_points.total_points
         
-        # 获取不同类型的积分
+        # 获取下载积分
         download_points = PointsHistory.objects.filter(
             device_id=device_id,
             action_type='DOWNLOAD_REFERRAL'
         ).aggregate(total=Sum('points'))['total'] or 0
         
-        wallet_points = PointsHistory.objects.filter(
-            device_id=device_id,
-            action_type='WALLET_REFERRAL'
-        ).aggregate(total=Sum('points'))['total'] or 0
-        
         return {
             'total_referrals': total_referrals,
-            'completed_referrals': completed_referrals,
-            'pending_referrals': pending_referrals,
             'total_points': total_points,
-            'download_points': download_points,
-            'wallet_points': wallet_points
+            'download_points': download_points
         }
     
     @action(detail=False, methods=['get'])
@@ -131,45 +115,64 @@ class ReferralViewSet(viewsets.ViewSet):
                 }, status=400)
             
             # 查找推荐链接
-            referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
+            referral_link = ReferralLink.objects.get(code=referrer_code, is_active=True)
             
-            # 记录下载
-            success = referral_link.record_download(device_id)
+            # 防止自己推荐自己
+            if referral_link.device_id == device_id:
+                return Response({
+                    'status': 'error',
+                    'message': 'Cannot refer yourself'
+                }, status=400)
             
-            if success:
-                # 获取或创建用户积分
-                user_points = UserPoints.get_or_create_user_points(referral_link.device_id)
+            # 获取或创建推荐关系
+            relationship, created = ReferralRelationship.objects.get_or_create(
+                referrer_device_id=referral_link.device_id,
+                referred_device_id=device_id,
+                defaults={'download_completed': True}
+            )
+            
+            # 如果未发放过下载奖励
+            if not relationship.download_points_awarded:
+                # 获取推荐人的积分账户
+                user_points = UserPoints.get_or_create_user_points(
+                    referral_link.device_id
+                )
                 
-                # 添加下载积分
-                points_awarded = user_points.add_points(
-                    points=5,  # 下载奖励5分
+                # 添加积分奖励
+                user_points.add_points(
+                    points=5,  # 下载奖励5积分
                     action_type='DOWNLOAD_REFERRAL',
-                    description=f'User {device_id} downloaded app',
+                    description=f'User {device_id} downloaded the app',
                     related_device_id=device_id
                 )
                 
+                # 标记已发放奖励
+                relationship.download_points_awarded = True
+                relationship.save()
+                
+                logger.info(f"已发放下载奖励: 推荐人={referral_link.device_id}, 被推荐人={device_id}, 积分=5")
+                
                 return Response({
                     'status': 'success',
-                    'message': '下载记录已保存，积分已奖励',
-                    'points_awarded': points_awarded
+                    'message': 'Download recorded and points awarded'
                 })
             else:
                 return Response({
-                    'status': 'error',
-                    'message': '不能推荐自己'
-                }, status=400)
-            
+                    'status': 'success',
+                    'message': 'Download recorded, points already awarded previously'
+                })
         except ReferralLink.DoesNotExist:
+            logger.error(f"推荐码不存在: {referrer_code}")
             return Response({
                 'status': 'error',
                 'message': '无效的推荐码'
             }, status=404)
         except Exception as e:
-            logger.error(f"记录下载失败: {str(e)}")
+            logger.error(f"记录下载失败: {str(e)}", exc_info=True)
             return Response({
                 'status': 'error',
                 'message': str(e)
-            }, status=500)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['post'])
     def record_wallet_creation(self, request):

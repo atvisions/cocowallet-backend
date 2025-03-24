@@ -51,7 +51,7 @@
                 <a href="#about">About</a>
                 <a href="#how-it-works">How It Works</a>
                 <a href="#why-meme">Why Meme Coins</a>
-                <a href="/download/app?ref={{ referrer_code }}&temp_id={{ temp_device_id }}" class="download-btn download-link">Download App</a>
+                <a href="/download/app?ref={{ referrer_code }}" class="download-btn download-link">Download App</a>
             </div>
         </div>
     </nav>
@@ -86,244 +86,52 @@
             lastScrollPosition = currentScrollPosition;
         });
 
-        // 生成更可靠的设备指纹
-        function generateDeviceFingerprint() {
-            const components = [
-                navigator.userAgent,
-                navigator.language,
-                new Date().getTimezoneOffset(),
-                screen.width + 'x' + screen.height + 'x' + screen.colorDepth,
-                navigator.deviceMemory || '',
-                navigator.hardwareConcurrency || '',
-                navigator.platform || ''
-            ];
-            
-            const fingerprint = components.join('|||');
-            const hash = hashCode(fingerprint);
-            return 'web_' + Math.abs(hash).toString(16);
-        }
-        
-        // 简单的字符串哈希函数
-        function hashCode(str) {
-            let hash = 0;
-            for (let i = 0, len = str.length; i < len; i++) {
-                let chr = str.charCodeAt(i);
-                hash = ((hash << 5) - hash) + chr;
-                hash |= 0; // Convert to 32bit integer
-            }
-            return hash;
-        }
-        
-        // 更新设备ID生成方式
-        function getOrCreateDeviceId() {
-            let deviceId = localStorage.getItem('coco_device_id');
-            
-            if (!deviceId) {
-                deviceId = generateDeviceFingerprint();
-                localStorage.setItem('coco_device_id', deviceId);
-            }
-            
-            return deviceId;
-        }
-        
-        // 在记录访问和下载函数中添加额外的防护
-        function setupReferralTracking() {
-            // 获取推荐码
-            const urlParams = new URLSearchParams(window.location.search);
-            const refCode = urlParams.get('ref');
-            
-            if (refCode) {
-                try {
-                    // 检查是否已记录过访问
-                    const visitKey = 'visit_recorded_' + refCode;
-                    const lastVisit = localStorage.getItem(visitKey);
-                    const now = Date.now();
-                    
-                    // 如果24小时内已记录，则不再记录
-                    if (lastVisit && (now - parseInt(lastVisit)) < 86400000) {
-                        console.log('Visit already recorded for:', refCode);
-                        return;
-                    }
-                    
-                    // 使用可靠的设备ID
-                    const reliableDeviceId = getOrCreateDeviceId();
-                    
-                    // 记录访问
-                    fetch('/api/v1/referrals/record_visit/', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Accept': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            referrer_code: refCode,
-                            device_id: reliableDeviceId
-                        })
-                    })
-                    .then(response => {
-                        if (!response.ok) {
-                            throw new Error(`HTTP error! status: ${response.status}`);
-                        }
-                        return response.json();
-                    })
-                    .then(data => {
-                        if (data.status === 'success') {
-                            console.log('Visit recorded successfully');
-                            // 标记已记录访问（存储时间戳）
-                            localStorage.setItem(visitKey, now.toString());
-                        } else {
-                            console.error('Failed to record visit:', data.message);
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Failed to record visit:', error.message);
-                    });
-                    
-                } catch (e) {
-                    console.error('Failed to process referral:', e);
+        // 修改下载链接事件处理
+        document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(link => {
+            link.addEventListener('click', async function(e) {
+                e.preventDefault();
+                
+                // 防止重复点击
+                if (this.getAttribute('data-downloading') === 'true') {
+                    return;
                 }
-            }
-            
-            // 修改下载链接事件处理
-            console.log('Setting up download link event listeners');
-            document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(link => {
-                console.log('Found download link:', link);
-                link.addEventListener('click', async function(e) {
-                    e.preventDefault();
-                    console.log('Download link clicked');
-                    
-                    // 防止重复点击
-                    if (this.getAttribute('data-downloading') === 'true') {
-                        console.log('Download already in progress');
-                        return;
-                    }
-                    
-                    // 标记为正在下载，并禁用所有下载按钮
-                    this.setAttribute('data-downloading', 'true');
-                    document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
-                        btn.style.opacity = '0.5';
-                        btn.style.pointerEvents = 'none';
-                    });
-                    
-                    // 保存原始文本，并显示加载状态
-                    const originalText = this.innerHTML;
-                    this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 下载中...';
-                    
+                
+                // 标记为正在下载
+                this.setAttribute('data-downloading', 'true');
+                document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
+                    btn.style.opacity = '0.5';
+                    btn.style.pointerEvents = 'none';
+                });
+                
+                // 显示下载中状态
+                const originalText = this.innerHTML;
+                this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 下载中...';
+                
+                try {
+                    // 获取推荐码
                     const urlParams = new URLSearchParams(window.location.search);
                     const refCode = urlParams.get('ref');
                     
-                    if (refCode) {
-                        console.log('Recording download for ref code:', refCode);
-                        
-                        // 检查24小时内是否已经记录过此推荐码的下载
-                        const downloadKey = 'download_recorded_' + refCode;
-                        const lastDownload = localStorage.getItem(downloadKey);
-                        const now = Date.now();
-                        
-                        // 如果24小时内已经为此推荐码记录过下载，直接下载
-                        if (lastDownload && (now - parseInt(lastDownload)) < 86400000) {
-                            console.log('Download already recorded for this referral code in last 24 hours');
-                            // 直接下载，不记录
-                            const deviceId = getOrCreateDeviceId();
-                            const directUrl = new URL(this.href, window.location.origin);
-                            directUrl.searchParams.set('temp_id', deviceId);
-                            window.location.href = directUrl.toString();
-                            return;
-                        }
-                        
-                        try {
-                            // 使用一致的设备指纹ID
-                            const deviceId = getOrCreateDeviceId();
-                            
-                            // 记录下载事件前先确保URL中的temp_id与设备指纹一致
-                            const currentUrl = new URL(this.href, window.location.origin);
-                            currentUrl.searchParams.set('temp_id', deviceId);
-                            
-                            // Record download event - 使用相同的设备ID
-                            const response = await fetch('/api/v1/referrals/record_web_download/', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                },
-                                body: JSON.stringify({
-                                    referrer_code: refCode,
-                                    device_id: deviceId  // 保持一致性
-                                }),
-                            });
-
-                            if (!response.ok) {
-                                throw new Error('Network response was not ok');
-                            }
-                            
-                            // 记录下载已完成 - 存储时间戳
-                            localStorage.setItem(downloadKey, now.toString());
-
-                            // 使用更新后的URL进行下载
-                            window.location.href = currentUrl.toString();
-                            
-                        } catch (error) {
-                            console.error('Failed to record download:', error);
-                            // 恢复按钮状态
-                            this.innerHTML = originalText;
-                            document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
-                                btn.style.opacity = '1';
-                                btn.style.pointerEvents = 'auto';
-                                btn.removeAttribute('data-downloading');
-                            });
-                            
-                            // 即使记录失败也允许下载，但确保使用更新后的URL
-                            const deviceId = getOrCreateDeviceId();
-                            const fallbackUrl = new URL(this.href, window.location.origin);
-                            fallbackUrl.searchParams.set('temp_id', deviceId);
-                            window.location.href = fallbackUrl.toString();
-                        }
-                    } else {
-                        // 没有推荐码时直接下载，但仍确保URL中包含设备指纹
-                        const deviceId = getOrCreateDeviceId();
-                        const directUrl = new URL(this.href, window.location.origin);
-                        directUrl.searchParams.set('temp_id', deviceId);
-                        window.location.href = directUrl.toString();
-                    }
-                });
-            });
-        }
-
-        // 更新所有下载链接使用指纹设备ID
-        function updateDownloadLinks() {
-            const deviceId = getOrCreateDeviceId();
-            const downloadLinks = document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]');
-            
-            downloadLinks.forEach(link => {
-                try {
-                    const url = new URL(link.href, window.location.origin);
-                    url.searchParams.set('temp_id', deviceId);
-                    link.href = url.toString();
-                } catch (e) {
-                    console.error('Failed to update download link:', e);
+                    // 构建下载URL，只带推荐码参数
+                    const downloadUrl = refCode ? 
+                        `/download/app?ref=${refCode}` : 
+                        '/download/app';
+                    
+                    // 开始下载
+                    window.location.href = downloadUrl;
+                    
+                } catch (error) {
+                    console.error('Download failed:', error);
+                    // 恢复按钮状态
+                    this.innerHTML = originalText;
+                    document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
+                        btn.style.opacity = '1';
+                        btn.style.pointerEvents = 'auto';
+                        btn.removeAttribute('data-downloading');
+                    });
                 }
             });
-        }
-
-        // 在页面加载时执行
-        document.addEventListener('DOMContentLoaded', function() {
-            setupReferralTracking();
-            updateDownloadLinks();
         });
-
-        // 也可以立即执行
-        if (document.readyState === 'complete' || document.readyState === 'interactive') {
-            setTimeout(function() {
-                updateDownloadLinks();
-            }, 1);
-        }
-
-        // Generate UUID function
-        function generateUUID() {
-            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
-            });
-        }
     </script>
 
     <!-- Hero Section -->
@@ -342,7 +150,7 @@
                 <h1>Unlock Your Crypto Potential with Coco Wallet</h1>
                 <p>Empower your wealth journey with AI-driven meme coin investments.</p>
                 <div class="cta-group">
-                    <a href="/download/app?ref={{ referrer_code }}&temp_id={{ temp_device_id }}" class="cta-button download-link" id="heroDownloadBtn">
+                    <a href="/download/app?ref={{ referrer_code }}" class="cta-button download-link" id="heroDownloadBtn">
                         <i class="fab fa-android"></i>
                         <span>Download Now</span>
                         <span class="version">v1.0.0</span>
@@ -444,7 +252,7 @@
                     <p>Make your first purchase and monitor your investments in real-time with Coco Wallet's seamless tracking features.</p>
                 </div>
             </div>
-            <a href="/download/app?ref={{ referrer_code }}&temp_id={{ temp_device_id }}" class="cta-button download-link">Download Now and Start Investing</a>
+            <a href="/download/app?ref={{ referrer_code }}" class="cta-button download-link">Download Now and Start Investing</a>
         </div>
     </section>
 
@@ -471,7 +279,7 @@
                 <div class="footer-links">
                     <a href="#home">Home</a>
                     <a href="#how-it-works">How It Works</a>
-                    <a href="/download/app?ref={{ referrer_code }}&temp_id={{ temp_device_id }}" class="download-link">Download App</a>
+                    <a href="/download/app?ref={{ referrer_code }}" class="download-link">Download App</a>
                     <a href="privacy.html">Privacy Policy</a>
                     <a href="terms.html">Terms of Service</a>
                     <a href="contact.html">Contact Us</a>
