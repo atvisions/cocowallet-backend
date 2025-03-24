@@ -42,6 +42,7 @@ def generate_avatar(size=200, bg_color=None):
 
 class WalletSerializer(serializers.ModelSerializer):
     """钱包序列化器"""
+    avatar = serializers.SerializerMethodField()
     
     class Meta:
         model = Wallet
@@ -52,6 +53,16 @@ class WalletSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def get_avatar(self, obj):
+        """获取头像 URL"""
+        if obj.avatar:
+            # 根据 DEBUG 配置返回不同的 URL
+            if settings.DEBUG:
+                return f'http://192.168.3.16:8000{obj.avatar.url}'
+            else:
+                return f'https://www.cocowallet.io{obj.avatar.url}'
+        return None
+    
 class MnemonicBackupSerializer(serializers.ModelSerializer):
     """助记词备份序列化器"""
     
@@ -172,7 +183,8 @@ class ReferralLinkSerializer(serializers.ModelSerializer):
     
     def get_full_link(self, obj):
         """获取完整的推荐链接"""
-        base_url = "http://192.168.3.16:8000/"
+        # 根据 DEBUG 配置返回不同的基础 URL
+        base_url = "http://192.168.3.16:8000/" if settings.DEBUG else "https://www.cocowallet.io/"
         return f"{base_url}?ref={obj.code}"
 
 class ReferralRelationshipSerializer(serializers.ModelSerializer):
