@@ -7,6 +7,10 @@ import logging
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from rest_framework.permissions import AllowAny
+from django.http import HttpResponse
+from django.core.cache import cache
+import time
+from datetime import datetime, timedelta
 
 from ..models import ReferralLink, ReferralRelationship, UserPoints, PointsHistory
 from ..serializers import (
@@ -117,6 +121,27 @@ class ReferralViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
+    # 添加防刷接口的方法
+    def rate_limit(self, key, limit=10, period=60):
+        """简单的速率限制
+        key: 缓存键
+        limit: 时间段内允许的最大请求数
+        period: 时间段(秒)
+        """
+        current_time = int(time.time())
+        cache_key = f"rate_limit:{key}:{current_time // period}"
+        
+        # 获取当前计数
+        count = cache.get(cache_key, 0)
+        
+        # 如果超出限制
+        if count >= limit:
+            return False
+        
+        # 增加计数
+        cache.set(cache_key, count + 1, period)
+        return True
+    
     @action(detail=False, methods=['post'])
     def record_web_download(self, request):
         """记录网页下载并奖励积分"""
@@ -129,6 +154,13 @@ class ReferralViewSet(viewsets.ViewSet):
                     'status': 'error',
                     'message': '缺少必要参数'
                 }, status=400)
+            
+            # 速率限制 - 每设备每小时最多5次下载
+            if not self.rate_limit(f"download:{device_id}", limit=5, period=3600):
+                return Response({
+                    'status': 'error',
+                    'message': '请求过于频繁，请稍后再试'
+                }, status=429)
             
             # 查找推荐链接
             referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
@@ -158,12 +190,6 @@ class ReferralViewSet(viewsets.ViewSet):
                     'status': 'error',
                     'message': '不能推荐自己'
                 }, status=400)
-            
-        except ReferralLink.DoesNotExist:
-            return Response({
-                'status': 'error',
-                'message': '无效的推荐码'
-            }, status=404)
         except Exception as e:
             logger.error(f"记录下载失败: {str(e)}")
             return Response({
@@ -401,23 +427,69 @@ class ReferralViewSet(viewsets.ViewSet):
             )
         
         try:
-            # 查找指定的临时设备ID
+            # 1. 更新推荐关系中的被推荐人设备ID
             relationships = ReferralRelationship.objects.filter(
                 referred_device_id=old_device_id
             )
             
-            updated_count = 0
+            updated_rel_count = 0
             for relationship in relationships:
-                # 更新设备ID
                 relationship.referred_device_id = new_device_id
                 relationship.save()
-                updated_count += 1
-                logger.info(f"更新设备 ID: {old_device_id} -> {new_device_id}")
+                updated_rel_count += 1
+                logger.info(f"更新推荐关系中的设备ID: {old_device_id} -> {new_device_id}")
+            
+            # 2. 更新推荐关系中的推荐人设备ID（如果有）
+            referrer_relationships = ReferralRelationship.objects.filter(
+                referrer_device_id=old_device_id
+            )
+            
+            updated_referrer_count = 0
+            for rel in referrer_relationships:
+                rel.referrer_device_id = new_device_id
+                rel.save()
+                updated_referrer_count += 1
+                logger.info(f"更新推荐人设备ID: {old_device_id} -> {new_device_id}")
+            
+            # 3. 更新用户积分记录
+            try:
+                user_points = UserPoints.objects.get(device_id=old_device_id)
+                user_points.device_id = new_device_id
+                user_points.save()
+                logger.info(f"更新用户积分设备ID: {old_device_id} -> {new_device_id}")
+            except UserPoints.DoesNotExist:
+                logger.info(f"未找到设备ID为 {old_device_id} 的用户积分记录")
+            
+            # 4. 更新积分历史记录
+            points_history_count = PointsHistory.objects.filter(
+                device_id=old_device_id
+            ).update(device_id=new_device_id)
+            
+            if points_history_count > 0:
+                logger.info(f"更新了 {points_history_count} 条积分历史记录的设备ID")
+            
+            # 5. 更新推荐链接的设备ID（如果有）
+            try:
+                referral_link = ReferralLink.objects.get(device_id=old_device_id)
+                referral_link.device_id = new_device_id
+                referral_link.save()
+                logger.info(f"更新推荐链接设备ID: {old_device_id} -> {new_device_id}")
+            except ReferralLink.DoesNotExist:
+                logger.info(f"未找到设备ID为 {old_device_id} 的推荐链接")
+            
+            # 汇总更新结果
+            total_updated = updated_rel_count + updated_referrer_count + points_history_count + (1 if 'user_points' in locals() else 0) + (1 if 'referral_link' in locals() else 0)
             
             return Response({
                 'status': 'success',
-                'message': f'成功更新 {updated_count} 条推荐关系',
-                'data': {'updated_count': updated_count}
+                'message': f'成功更新 {total_updated} 条记录的设备ID',
+                'data': {
+                    'referred_relationships': updated_rel_count,
+                    'referrer_relationships': updated_referrer_count,
+                    'points_histories': points_history_count,
+                    'user_points_updated': 'user_points' in locals(),
+                    'referral_link_updated': 'referral_link' in locals()
+                }
             })
         except Exception as e:
             logger.error(f"更新设备ID失败: {str(e)}", exc_info=True)
@@ -439,6 +511,13 @@ class ReferralViewSet(viewsets.ViewSet):
                     'message': '缺少必要参数'
                 }, status=400)
             
+            # 速率限制 - 每设备每分钟最多3次访问记录
+            if not self.rate_limit(f"visit:{device_id}", limit=3, period=60):
+                return Response({
+                    'status': 'success',  # 返回成功但不实际记录
+                    'message': '访问已记录'
+                })
+            
             # 查找推荐链接
             referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
             
@@ -452,6 +531,6 @@ class ReferralViewSet(viewsets.ViewSet):
             
         except Exception as e:
             return Response({
-                'status': 'error',
+                'status': 'error', 
                 'message': str(e)
             }, status=500) 

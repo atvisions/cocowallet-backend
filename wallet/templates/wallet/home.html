@@ -69,7 +69,47 @@
             lastScrollPosition = currentScrollPosition;
         });
 
-        // Record download event - moved outside DOMContentLoaded to ensure it always executes
+        // 生成更可靠的设备指纹
+        function generateDeviceFingerprint() {
+            const components = [
+                navigator.userAgent,
+                navigator.language,
+                new Date().getTimezoneOffset(),
+                screen.width + 'x' + screen.height + 'x' + screen.colorDepth,
+                navigator.deviceMemory || '',
+                navigator.hardwareConcurrency || '',
+                navigator.platform || ''
+            ];
+            
+            const fingerprint = components.join('|||');
+            const hash = hashCode(fingerprint);
+            return 'web_' + Math.abs(hash).toString(16);
+        }
+        
+        // 简单的字符串哈希函数
+        function hashCode(str) {
+            let hash = 0;
+            for (let i = 0, len = str.length; i < len; i++) {
+                let chr = str.charCodeAt(i);
+                hash = ((hash << 5) - hash) + chr;
+                hash |= 0; // Convert to 32bit integer
+            }
+            return hash;
+        }
+        
+        // 更新设备ID生成方式
+        function getOrCreateDeviceId() {
+            let deviceId = localStorage.getItem('coco_device_id');
+            
+            if (!deviceId) {
+                deviceId = generateDeviceFingerprint();
+                localStorage.setItem('coco_device_id', deviceId);
+            }
+            
+            return deviceId;
+        }
+        
+        // 在记录访问和下载函数中添加额外的防护
         function setupReferralTracking() {
             // 获取推荐码
             const urlParams = new URLSearchParams(window.location.search);
@@ -79,10 +119,17 @@
                 try {
                     // 检查是否已记录过访问
                     const visitKey = 'visit_recorded_' + refCode;
-                    if (localStorage.getItem(visitKey) === 'true') {
+                    const lastVisit = localStorage.getItem(visitKey);
+                    const now = Date.now();
+                    
+                    // 如果24小时内已记录，则不再记录
+                    if (lastVisit && (now - parseInt(lastVisit)) < 86400000) {
                         console.log('Visit already recorded for:', refCode);
                         return;
                     }
+                    
+                    // 使用可靠的设备ID
+                    const reliableDeviceId = getOrCreateDeviceId();
                     
                     // 记录访问
                     fetch('/api/v1/referrals/record_visit/', {
@@ -93,7 +140,7 @@
                         },
                         body: JSON.stringify({
                             referrer_code: refCode,
-                            device_id: '{{ temp_device_id }}'
+                            device_id: reliableDeviceId
                         })
                     })
                     .then(response => {
@@ -105,8 +152,8 @@
                     .then(data => {
                         if (data.status === 'success') {
                             console.log('Visit recorded successfully');
-                            // 标记已记录访问
-                            localStorage.setItem(visitKey, 'true');
+                            // 标记已记录访问（存储时间戳）
+                            localStorage.setItem(visitKey, now.toString());
                         } else {
                             console.error('Failed to record visit:', data.message);
                         }
@@ -125,10 +172,9 @@
             document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(link => {
                 console.log('Found download link:', link);
                 link.addEventListener('click', async function(e) {
-                    e.preventDefault(); // 阻止默认行为
+                    e.preventDefault();
                     console.log('Download link clicked');
                     
-                    // 使用当前页面的参数
                     const urlParams = new URLSearchParams(window.location.search);
                     const refCode = urlParams.get('ref');
                     
@@ -136,7 +182,14 @@
                         console.log('Recording download for ref code:', refCode);
                         
                         try {
-                            // Record download event
+                            // 使用一致的设备指纹ID
+                            const deviceId = getOrCreateDeviceId();
+                            
+                            // 记录下载事件前先确保URL中的temp_id与设备指纹一致
+                            const currentUrl = new URL(this.href, window.location.origin);
+                            currentUrl.searchParams.set('temp_id', deviceId);
+                            
+                            // Record download event - 使用相同的设备ID
                             const response = await fetch('/api/v1/referrals/record_web_download/', {
                                 method: 'POST',
                                 headers: {
@@ -144,7 +197,7 @@
                                 },
                                 body: JSON.stringify({
                                     referrer_code: refCode,
-                                    device_id: '{{ temp_device_id }}'
+                                    device_id: deviceId  // 保持一致性
                                 }),
                             });
 
@@ -152,51 +205,55 @@
                                 throw new Error('Network response was not ok');
                             }
 
-                            const data = await response.json();
-                            console.log('Download recorded response:', data);
-
-                            if (data.status === 'success') {
-                                const successMsg = document.createElement('div');
-                                successMsg.className = 'download-success-message';
-                                successMsg.textContent = `Download recorded, referrer will receive ${data.points_awarded || 5} points reward!`;
-                                successMsg.style.position = 'fixed';
-                                successMsg.style.bottom = '20px';
-                                successMsg.style.left = '50%';
-                                successMsg.style.transform = 'translateX(-50%)';
-                                successMsg.style.backgroundColor = '#4CAF50';
-                                successMsg.style.color = 'white';
-                                successMsg.style.padding = '10px 20px';
-                                successMsg.style.borderRadius = '5px';
-                                successMsg.style.zIndex = '1000';
-                                document.body.appendChild(successMsg);
-                                
-                                setTimeout(() => {
-                                    document.body.removeChild(successMsg);
-                                    // 记录成功后再进行下载
-                                    window.location.href = this.href;
-                                }, 3000);
-                            }
+                            // 使用更新后的URL进行下载
+                            window.location.href = currentUrl.toString();
+                            
                         } catch (error) {
                             console.error('Failed to record download:', error);
-                            // 即使记录失败也允许下载
-                            window.location.href = this.href;
+                            // 即使记录失败也允许下载，但确保使用更新后的URL
+                            const deviceId = getOrCreateDeviceId();
+                            const fallbackUrl = new URL(this.href, window.location.origin);
+                            fallbackUrl.searchParams.set('temp_id', deviceId);
+                            window.location.href = fallbackUrl.toString();
                         }
                     } else {
-                        // 没有推荐码时直接下载
-                        window.location.href = this.href;
+                        // 没有推荐码时直接下载，但仍确保URL中包含设备指纹
+                        const deviceId = getOrCreateDeviceId();
+                        const directUrl = new URL(this.href, window.location.origin);
+                        directUrl.searchParams.set('temp_id', deviceId);
+                        window.location.href = directUrl.toString();
                     }
                 });
             });
         }
 
-        // Call setup function on DOMContentLoaded
+        // 更新所有下载链接使用指纹设备ID
+        function updateDownloadLinks() {
+            const deviceId = getOrCreateDeviceId();
+            const downloadLinks = document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]');
+            
+            downloadLinks.forEach(link => {
+                try {
+                    const url = new URL(link.href, window.location.origin);
+                    url.searchParams.set('temp_id', deviceId);
+                    link.href = url.toString();
+                } catch (e) {
+                    console.error('Failed to update download link:', e);
+                }
+            });
+        }
+
+        // 在页面加载时执行
         document.addEventListener('DOMContentLoaded', function() {
             setupReferralTracking();
+            updateDownloadLinks();
         });
 
-        // Also call immediately if document is already complete or interactive
+        // 也可以立即执行
         if (document.readyState === 'complete' || document.readyState === 'interactive') {
-            setTimeout(setupReferralTracking, 1);
+            setTimeout(function() {
+                updateDownloadLinks();
+            }, 1);
         }
 
         // Generate UUID function
@@ -205,22 +262,6 @@
                 var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
                 return v.toString(16);
             });
-        }
-
-        // 设置CSRF token在AJAX请求中使用
-        const csrftoken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
-        
-        // 在AJAX请求前设置CSRF头
-        function setCsrfHeader(xhr) {
-            xhr.setRequestHeader('X-CSRFToken', csrftoken);
-        }
-        
-        // 示例AJAX请求
-        function exampleAjaxRequest() {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/api/endpoint/');
-            setCsrfHeader(xhr);
-            xhr.send(JSON.stringify(data));
         }
     </script>
 

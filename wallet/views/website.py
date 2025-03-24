@@ -11,6 +11,10 @@ import hashlib
 from django.conf import settings
 from django.http import FileResponse, HttpResponse
 import os
+from django.views.decorators.csrf import csrf_exempt
+import logging
+
+logger = logging.getLogger(__name__)
 
 def generate_signature(params):
     """
@@ -33,6 +37,7 @@ def generate_signature(params):
     
     return signature
 
+@csrf_exempt
 @require_GET
 def home(request):
     """网站主页"""
@@ -56,15 +61,34 @@ def home(request):
     }
     return render(request, 'wallet/home.html', context)
 
+@csrf_exempt
 @require_GET
 def download_app(request):
+    """处理应用下载请求 - 简化版，直接提供APK下载"""
     ref_code = request.GET.get('ref')
     temp_id = request.GET.get('temp_id')
     
+    # 记录下载请求
+    logger.info(f"收到下载请求: ref={ref_code}, temp_id={temp_id}")
+    
+    # 如果有推荐码，尝试记录点击
+    if ref_code:
+        try:
+            referral_link = ReferralLink.objects.get(code=ref_code, is_active=True)
+            referral_link.increment_clicks()
+            
+            # 将推荐码存储在会话中，以便在用户下载应用后使用
+            request.session['referrer_code'] = ref_code
+            logger.info(f"记录推荐点击: ref={ref_code}, 累计点击={referral_link.clicks}")
+        except ReferralLink.DoesNotExist:
+            # 推荐码无效，忽略
+            logger.warning(f"无效的推荐码: {ref_code}")
+            pass
+    
     # 构建下载参数
     download_params = {
-        'referrer': ref_code,
-        'temp_device_id': temp_id,
+        'referrer': ref_code or '',
+        'temp_device_id': temp_id or '',
         'timestamp': int(time.time())
     }
     
@@ -83,16 +107,25 @@ def download_app(request):
     
     # 检查文件是否存在
     if not os.path.exists(apk_path):
-        return HttpResponse('APK file not found', status=404)
+        logger.error(f"APK文件未找到: {apk_path}")
+        return HttpResponse('抱歉，APK文件未找到。请联系客服。', status=404)
     
     # 返回文件响应
-    response = FileResponse(
-        open(apk_path, 'rb'),
-        content_type='application/vnd.android.package-archive'
-    )
-    response['Content-Disposition'] = 'attachment; filename="cocowallet-1.0.0.apk"'
-    
-    # 添加安装参数
-    response['X-Install-Params'] = encoded_params
-    
-    return response 
+    try:
+        response = FileResponse(
+            open(apk_path, 'rb'),
+            content_type='application/vnd.android.package-archive'
+        )
+        response['Content-Disposition'] = 'attachment; filename="cocowallet-1.0.0.apk"'
+        
+        # 添加安装参数
+        response['X-Install-Params'] = encoded_params
+        
+        # 记录成功的下载响应
+        file_size = os.path.getsize(apk_path)
+        logger.info(f"成功提供APK下载: size={file_size} bytes")
+        
+        return response
+    except Exception as e:
+        logger.error(f"提供APK下载时出错: {str(e)}")
+        return HttpResponse('下载过程中出现错误，请稍后重试。', status=500) 
