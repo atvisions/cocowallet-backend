@@ -123,24 +123,42 @@ class ReferralViewSet(viewsets.ViewSet):
     
     # 添加防刷接口的方法
     def rate_limit(self, key, limit=10, period=60):
-        """简单的速率限制
-        key: 缓存键
-        limit: 时间段内允许的最大请求数
-        period: 时间段(秒)
         """
-        current_time = int(time.time())
-        cache_key = f"rate_limit:{key}:{current_time // period}"
+        实现请求频率限制
+        key: 限制键名
+        limit: 时间窗口内允许的最大请求数
+        period: 时间窗口长度（秒）
         
-        # 获取当前计数
-        count = cache.get(cache_key, 0)
-        
-        # 如果超出限制
-        if count >= limit:
-            return False
-        
-        # 增加计数
-        cache.set(cache_key, count + 1, period)
-        return True
+        返回：True表示已达到限制，False表示未达到限制
+        """
+        try:
+            # 使用Redis或缓存实现更可靠的速率限制
+            current_time = int(time.time())
+            window_key = f"{key}:window"
+            count_key = f"{key}:count"
+            
+            # 获取当前窗口的开始时间和计数
+            window_start = cache.get(window_key)
+            current_count = cache.get(count_key, 0)
+            
+            # 如果窗口不存在或已过期，创建新窗口
+            if window_start is None or (current_time - window_start) > period:
+                window_start = current_time
+                current_count = 0
+                cache.set(window_key, window_start, period)
+            
+            # 检查是否超过限制
+            if current_count >= limit:
+                return True  # 已达到限制
+            
+            # 增加计数并更新缓存
+            current_count += 1
+            cache.set(count_key, current_count, period)
+            
+            return False  # 未达到限制
+        except Exception as e:
+            logger.error(f"Rate limit error: {str(e)}")
+            return False  # 如果出错，默认不限制
     
     @action(detail=False, methods=['post'])
     def record_web_download(self, request):
@@ -155,47 +173,99 @@ class ReferralViewSet(viewsets.ViewSet):
                     'message': '缺少必要参数'
                 }, status=400)
             
-            # 速率限制 - 每设备每小时最多5次下载
-            if not self.rate_limit(f"download:{device_id}", limit=5, period=3600):
+            # 查找推荐链接
+            referral_link = ReferralLink.objects.get(code=referrer_code, is_active=True)
+            
+            # 防止自己推荐自己
+            if referral_link.device_id == device_id:
                 return Response({
                     'status': 'error',
-                    'message': '请求过于频繁，请稍后再试'
-                }, status=429)
+                    'message': 'Cannot refer yourself'
+                }, status=400)
             
-            # 查找推荐链接
-            referral_link = get_object_or_404(ReferralLink, code=referrer_code, is_active=True)
+            # 添加IP地址检查机制
+            client_ip = self.get_client_ip(request)
             
-            # 记录下载
-            success = referral_link.record_download(device_id)
+            # 检查该IP和推荐码组合是否已经记录过下载
+            ip_download_key = f"ip_download_{referrer_code}_{client_ip}"
+            if self.rate_limit(ip_download_key, 1, 86400):  # 每24小时每IP每推荐码只能记录一次下载
+                return Response({
+                    'status': 'success',
+                    'message': 'Download already recorded from this location'
+                })
             
-            if success:
-                # 获取或创建用户积分
-                user_points = UserPoints.get_or_create_user_points(referral_link.device_id)
+            # 获取或创建推荐关系
+            relationship, created = ReferralRelationship.objects.get_or_create(
+                referrer_device_id=referral_link.device_id,
+                referred_device_id=device_id,
+                defaults={'download_completed': True}
+            )
+            
+            # 如果已存在关系但尚未标记下载完成
+            if not created and not relationship.download_completed:
+                relationship.download_completed = True
+                relationship.save(update_fields=['download_completed'])
+            
+            # 如果已经发放过下载奖励，则不再发放
+            if not relationship.download_points_awarded:
+                # 全局限制：每个推荐链接每天最多获得10次下载奖励
+                daily_rewards_key = f"daily_rewards_{referrer_code}"
+                max_daily_rewards = 10
                 
-                # 添加下载积分
-                points_awarded = user_points.add_points(
-                    points=5,  # 下载奖励5分
+                if self.rate_limit(daily_rewards_key, max_daily_rewards, 86400):
+                    return Response({
+                        'status': 'success',
+                        'message': 'Daily download rewards limit reached for this referral code'
+                    })
+                
+                # 获取推荐人的积分账户
+                user_points = UserPoints.get_or_create_user_points(
+                    referral_link.device_id
+                )
+                
+                # 添加积分奖励
+                user_points.add_points(
+                    points=5,  # 下载奖励5积分
                     action_type='DOWNLOAD_REFERRAL',
-                    description=f'User {device_id} downloaded app',
+                    description=f'User {device_id} downloaded the app',
                     related_device_id=device_id
                 )
                 
+                # 标记已发放奖励
+                relationship.download_points_awarded = True
+                relationship.save(update_fields=['download_points_awarded'])
+                
                 return Response({
                     'status': 'success',
-                    'message': '下载记录已保存，积分已奖励',
-                    'points_awarded': points_awarded
+                    'message': 'Download recorded and points awarded'
                 })
             else:
                 return Response({
-                    'status': 'error',
-                    'message': '不能推荐自己'
-                }, status=400)
+                    'status': 'success',
+                    'message': 'Download recorded, points already awarded previously'
+                })
+        except ReferralLink.DoesNotExist:
+            logger.error(f"推荐链接不存在: {referrer_code}")
+            return Response(
+                {'status': 'error', 'message': f'推荐链接不存在: {referrer_code}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
         except Exception as e:
             logger.error(f"记录下载失败: {str(e)}")
             return Response({
                 'status': 'error',
                 'message': str(e)
-            }, status=500)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    # 添加一个辅助方法获取客户端IP
+    def get_client_ip(self, request):
+        """获取客户端真实IP地址"""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            ip = x_forwarded_for.split(',')[0]
+        else:
+            ip = request.META.get('REMOTE_ADDR', '0.0.0.0')
+        return ip
     
     @action(detail=False, methods=['post'])
     def record_wallet_creation(self, request):

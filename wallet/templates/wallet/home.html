@@ -15,6 +15,23 @@
             transform-origin: center center;
             transition: transform 0.3s ease;
         }
+        .download-link[data-downloading="true"],
+        .download-btn[data-downloading="true"],
+        [id="heroDownloadBtn"][data-downloading="true"] {
+            opacity: 0.5;
+            pointer-events: none;
+            cursor: not-allowed;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .fa-spin {
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
     </style>
 </head>
 <body>
@@ -167,7 +184,7 @@
                 }
             }
             
-            // Add click event to all download links
+            // 修改下载链接事件处理
             console.log('Setting up download link event listeners');
             document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(link => {
                 console.log('Found download link:', link);
@@ -175,11 +192,44 @@
                     e.preventDefault();
                     console.log('Download link clicked');
                     
+                    // 防止重复点击
+                    if (this.getAttribute('data-downloading') === 'true') {
+                        console.log('Download already in progress');
+                        return;
+                    }
+                    
+                    // 标记为正在下载，并禁用所有下载按钮
+                    this.setAttribute('data-downloading', 'true');
+                    document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
+                        btn.style.opacity = '0.5';
+                        btn.style.pointerEvents = 'none';
+                    });
+                    
+                    // 保存原始文本，并显示加载状态
+                    const originalText = this.innerHTML;
+                    this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 下载中...';
+                    
                     const urlParams = new URLSearchParams(window.location.search);
                     const refCode = urlParams.get('ref');
                     
                     if (refCode) {
                         console.log('Recording download for ref code:', refCode);
+                        
+                        // 检查24小时内是否已经记录过此推荐码的下载
+                        const downloadKey = 'download_recorded_' + refCode;
+                        const lastDownload = localStorage.getItem(downloadKey);
+                        const now = Date.now();
+                        
+                        // 如果24小时内已经为此推荐码记录过下载，直接下载
+                        if (lastDownload && (now - parseInt(lastDownload)) < 86400000) {
+                            console.log('Download already recorded for this referral code in last 24 hours');
+                            // 直接下载，不记录
+                            const deviceId = getOrCreateDeviceId();
+                            const directUrl = new URL(this.href, window.location.origin);
+                            directUrl.searchParams.set('temp_id', deviceId);
+                            window.location.href = directUrl.toString();
+                            return;
+                        }
                         
                         try {
                             // 使用一致的设备指纹ID
@@ -204,12 +254,23 @@
                             if (!response.ok) {
                                 throw new Error('Network response was not ok');
                             }
+                            
+                            // 记录下载已完成 - 存储时间戳
+                            localStorage.setItem(downloadKey, now.toString());
 
                             // 使用更新后的URL进行下载
                             window.location.href = currentUrl.toString();
                             
                         } catch (error) {
                             console.error('Failed to record download:', error);
+                            // 恢复按钮状态
+                            this.innerHTML = originalText;
+                            document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
+                                btn.style.opacity = '1';
+                                btn.style.pointerEvents = 'auto';
+                                btn.removeAttribute('data-downloading');
+                            });
+                            
                             // 即使记录失败也允许下载，但确保使用更新后的URL
                             const deviceId = getOrCreateDeviceId();
                             const fallbackUrl = new URL(this.href, window.location.origin);
