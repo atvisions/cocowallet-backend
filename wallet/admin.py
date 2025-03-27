@@ -115,12 +115,16 @@ class TokenAdminForm(forms.ModelForm):
             label='链'
         )
         
-        # 修改 address 字段的 widget，减小宽度
+        # 修改 address 字段的 widget
         self.fields['address'].widget = forms.TextInput(attrs={
             'class': 'vTextField',
             'style': 'width: 400px; display: inline-block; margin-right: 10px;'
         })
-        self.fields['address'].help_text = '<button type="button" class="sync-button">同步元数据</button>'
+        # 添加同步按钮到 address 字段的帮助文本中
+        self.fields['address'].help_text = mark_safe(
+            '<button type="button" class="sync-button">同步元数据</button>'
+            '<span class="sync-status"></span>'
+        )
 
 @admin.register(TokenCategory)
 class TokenCategoryAdmin(admin.ModelAdmin):
@@ -137,6 +141,8 @@ class TokenCategoryAdmin(admin.ModelAdmin):
 @admin.register(Token)
 class TokenAdmin(admin.ModelAdmin):
     """代币管理"""
+    form = TokenAdminForm
+    
     def logo_img(self, obj):
         """显示代币logo"""
         if obj.logo:
