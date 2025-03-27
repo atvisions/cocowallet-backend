@@ -90,6 +90,8 @@ class Command(BaseCommand):
             address = options.get('address')
             chain = options.get('chain')
             
+            logger.info(f"开始同步代币 {address} 的元数据")
+            
             # 获取代币服务
             token_service = ChainServiceFactory.get_token_info_service(chain)
             if not token_service:
@@ -105,24 +107,32 @@ class Command(BaseCommand):
                 chain=chain,
                 address=address,
                 defaults={
-                    'name': token_data.get('name', ''),
-                    'symbol': token_data.get('symbol', ''),
-                    'decimals': token_data.get('decimals', 0),
-                    'logo': token_data.get('logo', ''),
-                    'website': token_data.get('website', ''),
-                    'twitter': token_data.get('twitter', ''),
-                    'telegram': token_data.get('telegram', ''),
-                    'discord': token_data.get('discord', ''),
-                    'description': token_data.get('description', ''),
-                    'metaplex_data': token_data.get('metaplex_data', None),  # 添加 metaplex_data
-                    'is_verified': True
+                    'name': token_data['name'],
+                    'symbol': token_data['symbol'],
+                    'decimals': token_data['decimals'],
+                    'logo': token_data['logo'],
+                    'description': token_data['description'],
+                    'website': token_data['website'],
+                    'twitter': token_data['twitter'],
+                    'telegram': token_data['telegram'],
+                    'discord': token_data['discord'],
+                    'github': token_data['github'],
+                    'medium': token_data['medium'],
+                    'total_supply': token_data['total_supply'],
+                    'total_supply_formatted': token_data['total_supply_formatted'],
+                    'is_native': token_data['is_native'],
+                    'is_verified': token_data['verified'],
+                    'metaplex_data': token_data['metaplex_data'],
+                    'is_visible': True
                 }
             )
             
+            logger.info(f"{'创建' if created else '更新'}代币成功: {token.symbol}")
             return token_data
             
         except Exception as e:
             logger.error(f"同步代币 {address} 失败: {str(e)}")
+            logger.exception(e)
             raise
 
     async def _sync_from_jupiter(self):

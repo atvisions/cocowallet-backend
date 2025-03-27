@@ -109,24 +109,18 @@ class TokenAdminForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # 将 chain 字段改为只有 Solana 选项的选择框
         self.fields['chain'] = forms.ChoiceField(
-            choices=[('SOL', 'Solana')],  # 只保留 Solana 选项
-            initial='SOL',  # 设置默认值
+            choices=[('SOL', 'Solana')],
+            initial='SOL',
             label='链'
         )
         
-        # 添加批量导入字段
-        if not self.instance.pk:  # 只在创建新记录时显示
-            self.fields['bulk_import'] = forms.FileField(
-                required=False,
-                label='批量导入 (CSV/JSON)',
-                help_text='上传 CSV 或 JSON 文件批量导入代币'
-            )
-
-    def clean_address(self):
-        # 返回原始地址，不进行任何转换
-        return self.cleaned_data['address']
+        # 修改 address 字段的 widget，减小宽度
+        self.fields['address'].widget = forms.TextInput(attrs={
+            'class': 'vTextField',
+            'style': 'width: 400px; display: inline-block; margin-right: 10px;'
+        })
+        self.fields['address'].help_text = '<button type="button" class="sync-button">同步元数据</button>'
 
 @admin.register(TokenCategory)
 class TokenCategoryAdmin(admin.ModelAdmin):
@@ -143,32 +137,68 @@ class TokenCategoryAdmin(admin.ModelAdmin):
 @admin.register(Token)
 class TokenAdmin(admin.ModelAdmin):
     """代币管理"""
-    list_display = ('symbol', 'name', 'chain', 'address', 'is_verified', 'is_visible', 'is_recommended')
+    def logo_img(self, obj):
+        """显示代币logo"""
+        if obj.logo:
+            return format_html('<img src="{}" style="width: 32px; height: 32px; border-radius: 50%;" />', obj.logo)
+        return '-'
+    logo_img.short_description = 'Logo'
+
+    list_display = ('logo_img', 'symbol', 'name', 'chain', 'address', 'is_verified', 'is_visible', 'is_recommended')
     list_filter = ('chain', 'is_verified', 'is_recommended', 'is_visible')
     search_fields = ('symbol', 'name', 'address')
     list_editable = ['is_verified', 'is_visible', 'is_recommended']
     readonly_fields = ('created_at', 'updated_at')
     
-    def get_queryset(self, request):
-        """获取查询集"""
-        # 移除任何涉及 code 字段的过滤
-        return super().get_queryset(request)
+    class Media:
+        css = {
+            'all': ('admin/css/token_sync.css',)
+        }
+        js = ('admin/js/token_sync.js',)
     
-    def sync_token_metadata(self, request, queryset):
-        """同步代币元数据"""
-        for token in queryset:
-            try:
-                # 调用同步命令
-                call_command('sync_token_metadata', 
-                           address=token.address, 
-                           chain=token.chain)
-                self.message_user(request, f'成功同步代币 {token.symbol} 的元数据')
-            except Exception as e:
-                self.message_user(request, f'同步代币 {token.symbol} 失败: {str(e)}', level=messages.ERROR)
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path('sync-metadata/<str:address>/',
+                 self.admin_site.admin_view(self.sync_metadata_view),
+                 name='token_sync_metadata'),
+        ]
+        return custom_urls + urls
     
-    sync_token_metadata.short_description = "同步选中代币的元数据"
-    
-    actions = ['sync_token_metadata']
+    def sync_metadata_view(self, request, address):
+        """处理同步元数据请求"""
+        try:
+            logger.info(f"开始同步代币元数据: {address}")
+            
+            # 创建命令实例并直接调用 handle_async
+            from wallet.management.commands.sync_token_metadata import Command
+            command = Command()
+            
+            # 使用 asyncio 运行异步函数
+            import asyncio
+            token_data = asyncio.run(command.handle_async(
+                address=address,
+                chain='SOL'
+            ))
+            
+            # 打印返回的数据
+            logger.info(f"同步命令返回的数据: {json.dumps(token_data, indent=2)}")
+            
+            if not token_data:
+                raise ValueError("未获取到代币数据")
+            
+            return JsonResponse({
+                'status': 'success',
+                'message': '元数据同步成功',
+                'data': token_data
+            })
+        except Exception as e:
+            logger.error(f"同步代币元数据失败: {address}, 错误: {str(e)}")
+            logger.exception(e)  # 打印完整的错误堆栈
+            return JsonResponse({
+                'status': 'error',
+                'message': f'同步失败: {str(e)}'
+            }, status=500)
 
 @admin.register(Wallet)
 class WalletAdmin(admin.ModelAdmin):

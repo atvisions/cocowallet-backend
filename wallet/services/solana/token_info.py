@@ -20,47 +20,6 @@ class SolanaTokenInfoService:
     """Solana 代币信息服务"""
     
     def __init__(self):
-        self.helius_api_key = settings.HELIUS_API_KEY
-        self.base_url = "https://api.helius.xyz/v0"
-        
-    async def get_token_metadata(self, address: str) -> Optional[Dict]:
-        """获取代币元数据
-        
-        Args:
-            address: 代币地址
-            
-        Returns:
-            Dict: 代币元数据
-        """
-        try:
-            url = f"{self.base_url}/token-metadata?api-key={self.helius_api_key}"
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json={"mintAccounts": [address]}) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data and len(data) > 0:
-                            token_data = data[0]
-                            
-                            # 转换为标准格式
-                            return {
-                                'name': token_data.get('onChainMetadata', {}).get('metadata', {}).get('data', {}).get('name', ''),
-                                'symbol': token_data.get('onChainMetadata', {}).get('metadata', {}).get('data', {}).get('symbol', ''),
-                                'decimals': token_data.get('onChainMetadata', {}).get('metadata', {}).get('data', {}).get('decimals', 0),
-                                'logo': token_data.get('offChainMetadata', {}).get('image', ''),
-                                'description': token_data.get('offChainMetadata', {}).get('description', ''),
-                                'website': token_data.get('offChainMetadata', {}).get('external_url', ''),
-                                'metaplex_data': token_data  # 保存完整的 Metaplex 数据
-                            }
-                    
-                    logger.error(f"Failed to get token metadata: {await response.text()}")
-                    return None
-                    
-        except Exception as e:
-            logger.error(f"Error getting token metadata: {str(e)}")
-            return None
-
-    def __init__(self):
         self.headers = {
             "accept": "application/json",
             "X-API-Key": MoralisConfig.API_KEY
@@ -68,37 +27,109 @@ class SolanaTokenInfoService:
         self.timeout = aiohttp.ClientTimeout(total=30, connect=5, sock_connect=5, sock_read=10)
         self.max_retries = 3
 
-        # 在类的开头添加 Bonk 代币的常量
-        self.BONK_TOKEN_INFO = {
-            'name': 'Bonk',
-            'symbol': 'BONK',
-            'decimals': 5,
-            'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263/logo.png',
-            'description': 'Bonk is a community driven project on Solana',
-            'website': 'https://bonkcoin.com',
-            'twitter': 'https://twitter.com/bonk_inu',
-            'verified': True,
-            'contract_type': 'SPL'
-        }
+    async def get_token_metadata(self, address: str) -> Optional[Dict]:
+        """获取代币元数据"""
+        try:
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                # 获取代币元数据
+                url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{address}/metadata"
+                logger.debug(f"请求Moralis API获取代币元数据: {url}")
+                
+                metadata_response = await self._fetch_with_retry(session, url)
+                if not metadata_response:
+                    logger.error(f"无法获取代币元数据: {address}")
+                    return None
 
-        # 添加已知代币的常量
-        self.KNOWN_TOKENS = {
-            'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': {
-                'name': 'Bonk',
-                'symbol': 'BONK',
-                'decimals': 5,
-                'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263/logo.png',
-            },
-            '2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv': {
-                'name': 'Solend',
-                'symbol': 'SLND',
-                'decimals': 6,
-                'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv/logo.png',
-                'website': 'https://solend.fi',
-                'twitter': 'https://twitter.com/solendprotocol',
-                'description': 'Solend is a decentralized lending protocol on Solana'
-            }
-        }
+                logger.info(f"Moralis API返回的原始数据: {json.dumps(metadata_response, indent=2)}")
+                
+                # 从 links 中提取社交媒体链接
+                links = metadata_response.get('links', {})
+                
+                # 处理和转换数据
+                processed_data = {
+                    'name': metadata_response.get('name', ''),
+                    'symbol': metadata_response.get('symbol', ''),
+                    'decimals': int(metadata_response.get('decimals', 0)),
+                    'logo': metadata_response.get('logo', ''),
+                    'description': metadata_response.get('description', ''),
+                    'website': links.get('website', ''),
+                    'twitter': links.get('twitter', ''),
+                    'telegram': links.get('telegram', ''),
+                    'discord': links.get('discord', ''),
+                    'github': links.get('github', ''),
+                    'medium': links.get('medium', ''),
+                    'total_supply': metadata_response.get('totalSupply', ''),
+                    'total_supply_formatted': metadata_response.get('totalSupplyFormatted', ''),
+                    'is_native': address == 'So11111111111111111111111111111111111111112',
+                    'verified': bool(metadata_response.get('metaplex', {}).get('primarySaleHappened', False)),
+                    'contract_type': metadata_response.get('standard', 'SPL'),
+                    'metaplex_data': metadata_response.get('metaplex', {})
+                }
+
+                # 获取价格数据
+                price_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{address}/price"
+                price_response = await self._fetch_with_retry(session, price_url)
+                
+                if price_response:
+                    try:
+                        price = float(price_response.get('usdPrice', 0))
+                        price_change = float(price_response.get('24hrPercentChange', 0))
+                        
+                        processed_data.update({
+                            'price_usd': str(price),
+                            'price_change_24h': f"{price_change:+.2f}%",
+                            'volume_24h': str(price_response.get('volume24h', 0))
+                        })
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"处理价格数据失败: {str(e)}")
+
+                logger.info(f"处理后的数据: {json.dumps(processed_data, indent=2)}")
+                return processed_data
+
+        except Exception as e:
+            logger.error(f"获取代币元数据失败: {str(e)}")
+            logger.exception(e)
+            return None
+
+    async def _fetch_with_retry(self, session, url, method="get", **kwargs):
+        """带重试的HTTP请求函数"""
+        kwargs['headers'] = self.headers
+        if 'params' not in kwargs:
+            kwargs['params'] = {}
+        kwargs['params']['network'] = 'mainnet'
+        
+        logger.info(f"发起请求: {url}")
+        
+        for attempt in range(self.max_retries):
+            try:
+                async with getattr(session, method)(url, **kwargs) as response:
+                    response_text = await response.text()
+                    logger.info(f"响应状态码: {response.status}")
+                    
+                    if response.status == 200:
+                        try:
+                            data = json.loads(response_text)
+                            return data
+                        except json.JSONDecodeError as e:
+                            logger.error(f"JSON解析错误: {str(e)}")
+                            return None
+                    elif response.status == 429:  # Rate limit
+                        retry_after = int(response.headers.get('Retry-After', 2))
+                        logger.warning(f"请求频率限制，等待 {retry_after} 秒后重试")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    else:
+                        logger.error(f"请求失败: {url}, 状态码: {response.status}")
+                        return None
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    wait_time = 2 * (attempt + 1)
+                    logger.warning(f"请求出错: {str(e)}, {wait_time} 秒后重试")
+                    await asyncio.sleep(wait_time)
+                    continue
+                logger.error(f"请求最终失败: {str(e)}")
+                return None
+        return None
 
     async def get_token_info(self, token_address: str) -> Dict:
         """获取代币基本信息"""
@@ -208,240 +239,6 @@ class SolanaTokenInfoService:
                 logger.error(f"获取代币信息时出错: {str(e)}")
                 return {}
 
-    async def get_token_metadata(self, token_address: str) -> Dict:
-        """获取代币元数据"""
-        try:
-            # 初始化基础数据结构
-            token_data = {
-                'name': 'Unknown Token',
-                'symbol': 'Unknown',
-                'decimals': 0,
-                'logo': '',
-                'description': '',
-                'website': '',
-                'twitter': '',
-                'telegram': '',
-                'discord': '',
-                'github': '',
-                'medium': '',
-                'coingecko_id': '',
-                'total_supply': '0',
-                'total_supply_formatted': '0',
-                'security_score': 0,
-                'verified': False,
-                'possible_spam': False,
-                'is_native': token_address == 'So11111111111111111111111111111111111111112',
-                'price_usd': '0',
-                'price_change_24h': '+0.00%',
-                'from_cache': True
-            }
-            
-            # 首先从数据库获取代币信息
-            token = await sync_to_async(Token.objects.filter(
-                chain='SOL',
-                address=token_address
-            ).first)()
-            
-            # 如果数据库中有数据，使用数据库中的数据
-            if token:
-                token_data.update({
-                    'name': token.name,
-                    'symbol': token.symbol,
-                    'decimals': token.decimals,
-                    'logo': token.logo or '',
-                    'description': token.description or '',
-                    'website': token.website or '',
-                    'twitter': token.twitter or '',
-                    'telegram': token.telegram or '',
-                    'discord': token.discord or '',
-                    'github': token.github or '',
-                    'medium': token.medium or '',
-                    'coingecko_id': token.coingecko_id or '',
-                    'total_supply': token.total_supply or '0',
-                    'total_supply_formatted': token.total_supply_formatted or '0',
-                    'security_score': token.security_score or 0,
-                    'verified': token.verified,
-                    'possible_spam': token.possible_spam,
-                    'is_native': token.is_native,
-                    'price_usd': str(token.last_price or '0'),
-                    'price_change_24h': str(token.last_price_change or '+0.00%')
-                })
-            
-            # 使用 Moralis API 获取最新数据
-            try:
-                async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                    # 获取代币元数据
-                    url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/metadata"
-                    logger.debug(f"请求Moralis API获取代币元数据: {url}")
-                    
-                    async with session.get(url, headers=self.headers) as response:
-                        if response.status == 200:
-                            moralis_data = await response.json()
-                            logger.debug(f"Moralis API返回数据: {moralis_data}")
-                            
-                            if moralis_data:
-                                # 从 links 中提取社交媒体链接
-                                links = moralis_data.get('links', {})
-                                
-                                # 更新代币数据
-                                token_data.update({
-                                    'name': moralis_data.get('name', token_data['name']),
-                                    'symbol': moralis_data.get('symbol', token_data['symbol']),
-                                    'decimals': int(moralis_data.get('decimals', token_data['decimals'])),
-                                    'logo': moralis_data.get('logo', token_data['logo']),
-                                    'description': moralis_data.get('description', token_data['description']),
-                                    'website': links.get('website', token_data['website']),
-                                    'twitter': links.get('twitter', token_data['twitter']),
-                                    'telegram': links.get('telegram', token_data['telegram']),
-                                    'discord': links.get('discord', token_data['discord']),
-                                    'github': links.get('github', token_data['github']),
-                                    'medium': links.get('medium', token_data['medium']),
-                                    'total_supply': str(moralis_data.get('supply', token_data['total_supply'])),
-                                    'total_supply_formatted': str(float(moralis_data.get('supply', 0)) / (10 ** int(moralis_data.get('decimals', 9)))),
-                                    'verified': bool(moralis_data.get('metaplex', {}).get('primarySaleHappened', False)),
-                                    'from_cache': False
-                                })
-                    
-                    # 获取价格数据
-                    price_url = f"{MoralisConfig.SOLANA_URL}/token/mainnet/{token_address}/price"
-                    logger.debug(f"请求Moralis API获取代币价格: {price_url}")
-                    
-                    async with session.get(price_url, headers=self.headers) as response:
-                        if response.status == 200:
-                            price_data = await response.json()
-                            logger.debug(f"Moralis API返回价格数据: {price_data}")
-                            
-                            if price_data:
-                                try:
-                                    # 处理价格
-                                    price = float(price_data.get('usdPrice', 0))
-                                    if price < 0.000001:
-                                        price_str = '{:.12f}'.format(price)
-                                    elif price < 0.00001:
-                                        price_str = '{:.10f}'.format(price)
-                                    elif price < 0.0001:
-                                        price_str = '{:.8f}'.format(price)
-                                    elif price < 0.01:
-                                        price_str = '{:.6f}'.format(price)
-                                    else:
-                                        price_str = '{:.4f}'.format(price)
-                                    price_str = price_str.rstrip('0').rstrip('.')
-                                    
-                                    # 处理价格变化
-                                    price_change = float(price_data.get('24hrPercentChange', 0))
-                                    price_change_str = '{:+.2f}%'.format(price_change)
-                                    
-                                    token_data.update({
-                                        'price_usd': price_str,
-                                        'price_change_24h': price_change_str
-                                    })
-                                except (ValueError, TypeError) as e:
-                                    logger.error(f"处理价格数据失败: {str(e)}")
-                                    token_data.update({
-                                        'price_usd': '0',
-                                        'price_change_24h': '+0.00%'
-                                    })
-                    
-                    # 更新数据库
-                    if token:
-                        # 使用 update_or_create 而不是直接更新
-                        await sync_to_async(Token.objects.update_or_create)(
-                            chain='SOL',
-                            address=token_address,
-                            defaults={
-                                'name': token_data['name'],
-                                'symbol': token_data['symbol'],
-                                'decimals': token_data['decimals'],
-                                'logo': token_data['logo'],
-                                'description': token_data['description'],
-                                'website': token_data['website'],
-                                'twitter': token_data['twitter'],
-                                'telegram': token_data['telegram'],
-                                'discord': token_data['discord'],
-                                'github': token_data['github'],
-                                'medium': token_data['medium'],
-                                'total_supply': token_data['total_supply'],
-                                'total_supply_formatted': token_data['total_supply_formatted'],
-                                'verified': token_data['verified'],
-                                'last_price': token_data['price_usd'],
-                                'last_price_change': token_data['price_change_24h'],
-                                'updated_at': timezone.now()
-                            }
-                        )
-                    else:
-                        # 创建新的代币记录
-                        await sync_to_async(Token.objects.create)(
-                            chain='SOL',
-                            address=token_address,
-                            name=token_data['name'],
-                            symbol=token_data['symbol'],
-                            decimals=token_data['decimals'],
-                            logo=token_data['logo'],
-                            description=token_data['description'],
-                            website=token_data['website'],
-                            twitter=token_data['twitter'],
-                            telegram=token_data['telegram'],
-                            discord=token_data['discord'],
-                            github=token_data['github'],
-                            medium=token_data['medium'],
-                            total_supply=token_data['total_supply'],
-                            total_supply_formatted=token_data['total_supply_formatted'],
-                            verified=token_data['verified'],
-                            last_price=token_data['price_usd'],
-                            last_price_change=token_data['price_change_24h'],
-                            is_native=token_data['is_native'],
-                            type='token',
-                            contract_type='SPL'
-                        )
-                        
-            except Exception as e:
-                logger.error(f"从 Moralis API 获取代币数据失败: {str(e)}")
-            
-            # 如果是原生 SOL 代币，使用固定信息
-            if token_address == 'So11111111111111111111111111111111111111112':
-                token_data.update({
-                    'name': 'Solana',
-                    'symbol': 'SOL',
-                    'decimals': 9,
-                    'logo': 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png',
-                    'description': 'Solana native token',
-                    'website': 'https://solana.com',
-                    'twitter': 'https://twitter.com/solana',
-                    'telegram': 'https://t.me/solana',
-                    'discord': 'https://discord.com/invite/solana',
-                    'github': 'https://github.com/solana-labs',
-                    'medium': 'https://medium.com/solana-labs',
-                    'verified': True,
-                    'is_native': True
-                })
-            
-            return token_data
-            
-        except Exception as e:
-            logger.error(f"获取代币元数据失败: {str(e)}")
-            return {
-                'name': 'Unknown Token',
-                'symbol': 'Unknown',
-                'decimals': 0,
-                'logo': '',
-                'description': '',
-                'website': '',
-                'twitter': '',
-                'telegram': '',
-                'discord': '',
-                'github': '',
-                'medium': '',
-                'total_supply': '0',
-                'total_supply_formatted': '0',
-                'security_score': 0,
-                'verified': False,
-                'possible_spam': False,
-                'is_native': token_address == 'So11111111111111111111111111111111111111112',
-                'price_usd': '0',
-                'price_change_24h': '+0.00%',
-                'from_cache': True
-            }
-
     async def get_token_supply(self, token_address: str) -> Dict:
         """获取代币供应量信息"""
         try:
@@ -532,52 +329,6 @@ class SolanaTokenInfoService:
                 token_obj.save()
         except Exception as e:
             logger.error(f"更新代币信息时出错: {str(e)}")
-
-    async def _fetch_with_retry(self, session, url, method="get", **kwargs):
-        """带重试的HTTP请求函数"""
-        kwargs['headers'] = self.headers
-        # 添加 network 参数
-        if 'params' not in kwargs:
-            kwargs['params'] = {}
-        kwargs['params']['network'] = 'mainnet'
-        
-        logger.info(f"发起请求: {url}")
-        logger.info(f"请求头: {self.headers}")
-        logger.info(f"请求参数: {kwargs}")
-        
-        for attempt in range(3):
-            try:
-                async with getattr(session, method)(url, **kwargs) as response:
-                    response_text = await response.text()
-                    logger.info(f"响应状态码: {response.status}")
-                    logger.info(f"响应内容: {response_text}")
-                    
-                    if response.status == 200:
-                        try:
-                            data = json.loads(response_text)
-                            logger.info(f"解析后的响应数据: {json.dumps(data, indent=2)}")
-                            return data
-                        except json.JSONDecodeError as e:
-                            logger.error(f"JSON解析错误: {str(e)}")
-                            return None
-                    elif response.status == 429:  # Rate limit
-                        retry_after = int(response.headers.get('Retry-After', 2))
-                        logger.warning(f"请求频率限制，等待 {retry_after} 秒后重试")
-                        await asyncio.sleep(retry_after)
-                        continue
-                    else:
-                        logger.error(f"请求失败: {url}, 状态码: {response.status}")
-                        logger.error(f"错误响应内容: {response_text}")
-                        return None
-            except Exception as e:
-                if attempt < 2:
-                    wait_time = 2 * (attempt + 1)
-                    logger.warning(f"请求出错: {str(e)}, {wait_time} 秒后重试")
-                    await asyncio.sleep(wait_time)
-                    continue
-                logger.error(f"请求最终失败: {str(e)}")
-                return None
-        return None
 
     async def get_token_ohlcv(
         self,

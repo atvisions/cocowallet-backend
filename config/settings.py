@@ -12,6 +12,17 @@ import mimetypes
 env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
 load_dotenv(env_path)
 
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = True
+
+#domain
+PRODUCTION_DOMAIN = 'https://www.cocowallet.io'
+DEVELOPMENT_DOMAIN = 'http://192.168.3.16:8000'
+
+# 根据环境设置域名
+API_DOMAIN = PRODUCTION_DOMAIN if not DEBUG else DEVELOPMENT_DOMAIN
+
+
 # 获取 API keys
 MORALIS_API_KEY = os.getenv('MORALIS_API_KEY')
 ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
@@ -26,9 +37,6 @@ SECRET_KEY = 'django-insecure-your-secret-key'
 
 # 钱包加密密钥 (32位)
 WALLET_ENCRYPTION_KEY = b'mAQJ/L2HaZOZ4Ix7+g4WNA00zVGEr5XQ66ICVhwMKGk='
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
 
 ALLOWED_HOSTS = ["*"]
 
@@ -66,7 +74,16 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:8000',
     'https://www.cocowallet.io',
     'https://cocowallet.io',
+    'https://api.cocowallet.io',
     'app://cocowallet.io'
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    'http://192.168.3.16:8000',
+    'http://localhost:8000',
+    'https://www.cocowallet.io',
+    'https://cocowallet.io',
+    'https://api.cocowallet.io'
 ]
 
 # 添加允许的请求头和方法
@@ -108,12 +125,27 @@ if not DEBUG:
     ]
     
     # 生产环境的安全设置
-    SECURE_SSL_REDIRECT = True
+    SECURE_SSL_REDIRECT = False
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = 31536000  # 1 year
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
+    
+    # 额外的安全头部设置
+    SECURE_BROWSER_XSS_FILTER = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = 'DENY'
+    
+    # SSL配置
+    SECURE_SSL_REDIRECT_EXEMPT = []
+    SECURE_REDIRECT_EXEMPT = []
+    
+    # 会话安全设置
+    SESSION_COOKIE_HTTPONLY = True
+    CSRF_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    CSRF_COOKIE_SAMESITE = 'Lax'
 
 ROOT_URLCONF = 'config.urls'
 
@@ -174,7 +206,14 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = '/static/'
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, 'static'),
+]
+
+STATICFILES_FINDERS = [
+    'django.contrib.staticfiles.finders.FileSystemFinder',
+    'django.contrib.staticfiles.finders.AppDirectoriesFinder',
+]
 
 # Media files
 MEDIA_URL = '/media/'
@@ -262,17 +301,6 @@ CHANNEL_LAYERS = {
         'BACKEND': 'channels.layers.InMemoryChannelLayer'
     }
 }
-
-# 使用绝对路径
-STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, 'static'),
-]
-
-# 添加这个配置
-STATICFILES_FINDERS = [
-    'django.contrib.staticfiles.finders.FileSystemFinder',
-    'django.contrib.staticfiles.finders.AppDirectoriesFinder',
-]
 
 # 添加APK文件的MIME类型
 mimetypes.add_type('application/vnd.android.package-archive', '.apk')

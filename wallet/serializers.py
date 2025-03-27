@@ -62,9 +62,9 @@ class WalletSerializer(serializers.ModelSerializer):
         if obj.avatar:
             # 根据 DEBUG 配置返回不同的 URL
             if settings.DEBUG:
-                return f'http://192.168.3.16:8000{obj.avatar.url}'
+                return f'{settings.DEVELOPMENT_DOMAIN}{obj.avatar.url}'
             else:
-                return f'https://www.cocowallet.io{obj.avatar.url}'
+                return f'{settings.PRODUCTION_DOMAIN}{obj.avatar.url}'
         return None
     
 class MnemonicBackupSerializer(serializers.ModelSerializer):
@@ -188,7 +188,7 @@ class ReferralLinkSerializer(serializers.ModelSerializer):
     def get_full_link(self, obj):
         """获取完整的推荐链接"""
         # 根据 DEBUG 配置返回不同的基础 URL
-        base_url = "http://192.168.3.16:8000/" if settings.DEBUG else "https://www.cocowallet.io/"
+        base_url = f"{settings.DEVELOPMENT_DOMAIN}/" if settings.DEBUG else f"{settings.PRODUCTION_DOMAIN}/"
         return f"{base_url}?ref={obj.code}"
 
 class ReferralRelationshipSerializer(serializers.ModelSerializer):
