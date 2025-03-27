@@ -9,6 +9,7 @@ from wallet.models import Token, TokenCategory
 from django.core.cache import cache
 from asgiref.sync import sync_to_async
 from django.conf import settings
+from wallet.services import ChainServiceFactory
 
 logger = logging.getLogger(__name__)
 
@@ -85,30 +86,44 @@ class Command(BaseCommand):
             }
 
     async def handle_async(self, *args, **options):
-        """异步处理命令"""
-        source = options.get('source', 'jupiter')
-        address = options.get('address')
-        chain = options.get('chain')
-        
-        self.update_sync_status(status='running', progress=0, message=f'开始从 {source} 同步代币元数据')
-        
         try:
-            if address and chain:
-                # 同步单个代币
-                await self._sync_single_token(address)
-            else:
-                # 同步所有代币
-                if source == 'jupiter':
-                    await self._sync_from_jupiter()
-                else:
-                    self.update_sync_status(status='error', message=f'不支持的数据源: {source}')
-                    return
-                
-            self.update_sync_status(status='completed', progress=100, message='同步完成')
+            address = options.get('address')
+            chain = options.get('chain')
+            
+            # 获取代币服务
+            token_service = ChainServiceFactory.get_token_info_service(chain)
+            if not token_service:
+                raise ValueError(f'不支持的链类型: {chain}')
+            
+            # 获取代币元数据
+            token_data = await token_service.get_token_metadata(address)
+            if not token_data:
+                raise ValueError(f'未找到代币数据')
+            
+            # 更新或创建代币记录
+            token, created = await sync_to_async(Token.objects.update_or_create)(
+                chain=chain,
+                address=address,
+                defaults={
+                    'name': token_data.get('name', ''),
+                    'symbol': token_data.get('symbol', ''),
+                    'decimals': token_data.get('decimals', 0),
+                    'logo': token_data.get('logo', ''),
+                    'website': token_data.get('website', ''),
+                    'twitter': token_data.get('twitter', ''),
+                    'telegram': token_data.get('telegram', ''),
+                    'discord': token_data.get('discord', ''),
+                    'description': token_data.get('description', ''),
+                    'metaplex_data': token_data.get('metaplex_data', None),  # 添加 metaplex_data
+                    'is_verified': True
+                }
+            )
+            
+            return token_data
+            
         except Exception as e:
-            logger.error(f"同步失败: {str(e)}")
-            self.update_sync_status(status='error', message=f'同步失败: {str(e)}')
-            raise  # 重新抛出异常以便上层捕获
+            logger.error(f"同步代币 {address} 失败: {str(e)}")
+            raise
 
     async def _sync_from_jupiter(self):
         """从 Jupiter 同步代币元数据"""

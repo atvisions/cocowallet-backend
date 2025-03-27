@@ -323,6 +323,9 @@ class Token(models.Model):
         verbose_name='Token Category'
     )
 
+    # 确保只有一个 metaplex_data 字段定义
+    metaplex_data = models.JSONField(null=True, blank=True, verbose_name='Metaplex Data')
+
     class Meta:
         verbose_name = '代币'
         verbose_name_plural = '代币'
@@ -957,24 +960,19 @@ class TaskHistory(models.Model):
         return f"{self.device_id} - {self.task.name}"
 
 class ShareTaskToken(models.Model):
-    """分享任务代币"""
-    token = models.ForeignKey('Token', on_delete=models.CASCADE)
-    points = models.IntegerField(default=0, verbose_name='奖励积分')
-    daily_limit = models.IntegerField(default=1, verbose_name='每日限制次数')
-    is_active = models.BooleanField(default=True, verbose_name='是否激活')
-    official_tweet_id = models.CharField(
-        max_length=100, 
-        help_text="官方推文ID", 
-        verbose_name='官方推文ID',
-        null=True,  # 允许为空
-        blank=True  # 允许为空
-    )
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+    """分享代币任务"""
+    token = models.ForeignKey('Token', on_delete=models.CASCADE, related_name='share_tasks')
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='share_token_tasks', null=True)
+    points = models.IntegerField(default=0)
+    daily_limit = models.IntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+    official_tweet_id = models.CharField(max_length=100, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = "代币分享任务"
-        verbose_name_plural = verbose_name
+        verbose_name = '分享代币任务'
+        verbose_name_plural = '分享代币任务'
 
     def __str__(self):
         return f"{self.token.symbol} 分享任务"
