@@ -86,43 +86,43 @@
             lastScrollPosition = currentScrollPosition;
         });
 
-        // 修改下载链接事件处理
+        // Download link event handling
         document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(link => {
             link.addEventListener('click', async function(e) {
                 e.preventDefault();
                 
-                // 防止重复点击
+                // Prevent duplicate clicks
                 if (this.getAttribute('data-downloading') === 'true') {
                     return;
                 }
                 
-                // 标记为正在下载
+                // Mark as downloading
                 this.setAttribute('data-downloading', 'true');
                 document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
                     btn.style.opacity = '0.5';
                     btn.style.pointerEvents = 'none';
                 });
                 
-                // 显示下载中状态
+                // Show downloading status
                 const originalText = this.innerHTML;
-                this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 下载中...';
+                this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Downloading...';
                 
                 try {
-                    // 获取推荐码
+                    // Get referral code
                     const urlParams = new URLSearchParams(window.location.search);
                     const refCode = urlParams.get('ref');
                     
-                    // 构建下载URL，只带推荐码参数
+                    // Build download URL with referral code parameter
                     const downloadUrl = refCode ? 
                         `/download/app?ref=${refCode}` : 
                         '/download/app';
                     
-                    // 开始下载
+                    // Start download
                     window.location.href = downloadUrl;
                     
                 } catch (error) {
                     console.error('Download failed:', error);
-                    // 恢复按钮状态
+                    // Restore button state
                     this.innerHTML = originalText;
                     document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
                         btn.style.opacity = '1';

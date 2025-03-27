@@ -169,6 +169,7 @@ AUTH_PASSWORD_VALIDATORS = [
 LANGUAGE_CODE = 'zh-hans'
 TIME_ZONE = 'Asia/Shanghai'
 USE_I18N = True
+USE_L10N = True
 USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
@@ -176,7 +177,7 @@ STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # Media files
-MEDIA_URL = 'media/'
+MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 # Default primary key field type
@@ -295,3 +296,63 @@ CSRF_TRUSTED_ORIGINS = [
 CSRF_COOKIE_DOMAIN = '.cocowallet.io'  # 允许所有子域名共享CSRF cookie
 CSRF_USE_SESSIONS = False  # 使用cookie存储CSRF而非session
 CSRF_COOKIE_SAMESITE = 'Lax'  # 或根据需要设置为'None'，但必须确保HTTPS
+
+# 在现有配置后添加任务奖励配置
+TASK_REWARDS = {
+    'DAILY_CHECK_IN': {
+        'name': 'Daily Check-in',
+        'description': 'Get points reward by logging in daily',
+        'points': 10,
+        'is_repeatable': False,
+        'stages_config': {}
+    },
+    'FIRST_TRANSFER': {
+        'name': 'First Transfer',
+        'description': 'Get points reward for completing your first transfer',
+        'points': 50,
+        'is_repeatable': False,
+        'stages_config': {}
+    },
+    'FIRST_SWAP': {
+        'name': 'First Swap',
+        'description': 'Get points reward for completing your first token swap',
+        'points': 50,
+        'is_repeatable': False,
+        'stages_config': {}
+    },
+    'INVITE_DOWNLOAD': {
+        'name': 'Invite Friends',
+        'description': 'Get points reward for inviting friends to download the app',
+        'points': 50,
+        'is_repeatable': True,
+        'stages_config': {
+            'stages': [
+                {'target': 5, 'points': 50},   # 50 points per invite for first 5 invites
+                {'target': 10, 'points': 100}, # 100 points per invite for 6-10 invites
+                {'target': 20, 'points': 200}  # 200 points per invite for 11+ invites
+            ]
+        }
+    },
+    'SHARE_TOKEN': {
+        'name': 'Share Token',
+        'description': 'Get points reward for sharing tokens on social media',
+        'points': 20,
+        'is_repeatable': True,
+        'stages_config': {}
+    }
+}
+
+# Twitter API Settings
+TWITTER_API_KEY = os.getenv('TWITTER_API_KEY', default='')
+TWITTER_API_SECRET = os.getenv('TWITTER_API_SECRET', default='')
+TWITTER_ACCESS_TOKEN = os.getenv('TWITTER_ACCESS_TOKEN', default='')
+TWITTER_ACCESS_TOKEN_SECRET = os.getenv('TWITTER_ACCESS_TOKEN_SECRET', default='')
+TWITTER_BEARER_TOKEN = os.getenv('TWITTER_BEARER_TOKEN', default='')
+
+# 在现有配置后添加 Celery 配置
+CELERY_BROKER_URL = 'redis://localhost:6379/0'  # 使用 Redis 作为消息代理
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'Asia/Shanghai'  # 使用与项目相同的时区

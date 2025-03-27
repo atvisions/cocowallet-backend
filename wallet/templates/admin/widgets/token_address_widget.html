@@ -1,0 +1,8 @@
+{% include 'django/forms/widgets/text.html' %}
+<button type="button" 
+        class="sync-metadata-btn" 
+        data-url="{% url 'admin:wallet_token_sync_metadata' %}"
+        style="margin-left: 10px;">
+    同步元数据
+</button>
+<span class="sync-status" style="margin-left: 10px;"></span> 

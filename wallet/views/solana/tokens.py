@@ -22,7 +22,7 @@ import json
 from django.core.paginator import Paginator
 
 from ...models import Wallet, Token, Transaction, PaymentPassword
-from ...serializers import WalletSerializer
+from ...serializers import WalletSerializer, TokenSerializer
 from ...services.factory import ChainServiceFactory
 from ...services.solana_config import RPCConfig, MoralisConfig, HeliusConfig
 from ...decorators import verify_payment_password
@@ -99,48 +99,36 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
             if not device_id:
                 return Response({
                     'status': 'error',
-                    'message': '缺少device_id参数'
+                    'message': 'Device ID is required'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # 获取并验证钱包
             wallet = await self.get_wallet_async(int(pk), device_id)
-            logger.debug(f"请求获取代币余额，钱包地址: {wallet.address}, device_id: {device_id}")
             
             if wallet.chain != 'SOL':
                 return Response({
                     'status': 'error',
-                    'message': '该接口仅支持SOL链钱包'
+                    'message': 'This API only supports SOL chain wallets'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # 获取SOL余额服务
             balance_service = ChainServiceFactory.get_balance_service('SOL')
             if not balance_service:
                 return Response({
                     'status': 'error',
-                    'message': 'SOL余额服务不可用'
+                    'message': 'SOL balance service unavailable'
                 }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
-            # 获取所有代币余额
-            logger.debug(f"开始获取代币余额，钱包地址: {wallet.address}")
             result = await balance_service.get_all_token_balances(wallet.address, include_hidden=False)
             
-            # 返回结果
             return Response({
                 'status': 'success',
                 'data': result
             })
             
-        except ObjectDoesNotExist as e:
+        except Exception as e:
+            logger.error(f"Failed to get token balances: {str(e)}")
             return Response({
                 'status': 'error',
                 'message': str(e)
-            }, status=status.HTTP_404_NOT_FOUND)
-            
-        except Exception as e:
-            logger.error(f"获取代币余额失败: {str(e)}")
-            return Response({
-                'status': 'error',
-                'message': '获取代币余额失败'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'], url_path='tokens/toggle-visibility')
@@ -703,81 +691,32 @@ class SolanaWalletViewSet(viewsets.ModelViewSet):
                 'message': f'转账失败: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    @action(detail=False, methods=['get'], url_path='recommended-tokens')
-    @async_to_sync_api
-    async def recommended_tokens(self, request):
+    @action(detail=False, methods=['GET'], url_path='recommended-tokens')
+    def recommended_tokens(self, request):
         """获取推荐代币列表"""
         try:
-            # 从请求参数获取链类型
             chain = request.query_params.get('chain', 'SOL')
             
-            # 验证链类型
-            if chain not in ['SOL', 'ETH', 'BASE']:
-                return Response({
-                    'status': 'error',
-                    'message': '不支持的链类型'
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            # 从数据库获取推荐代币
-            recommended_tokens = await sync_to_async(list)(Token.objects.filter(
+            # 获取推荐的代币
+            tokens = Token.objects.filter(
                 chain=chain,
                 is_recommended=True,
+                is_verified=True,
                 is_visible=True
-            ).order_by('-created_at'))
-
-            # 转换为列表
-            tokens = []
-            for token in recommended_tokens:
-                # 格式化价格
-                price_usd = token.last_price or '0'
-                try:
-                    price = float(price_usd)
-                    if price < 0.00001:
-                        formatted_price = '{:.8f}'.format(price)
-                    elif price < 0.01:
-                        formatted_price = '{:.6f}'.format(price)
-                    else:
-                        formatted_price = '{:.4f}'.format(price)
-                    formatted_price = formatted_price.rstrip('0').rstrip('.')
-                except (ValueError, TypeError):
-                    formatted_price = '0'
-
-                # 格式化价格变化
-                price_change = token.last_price_change or '0'
-                try:
-                    change = float(price_change)
-                    formatted_change = '{:+.2f}%'.format(change)
-                except (ValueError, TypeError):
-                    formatted_change = '+0.00%'
-
-                tokens.append({
-                    'token_address': token.address,
-                    'symbol': token.symbol,
-                    'name': token.name,
-                    'decimals': token.decimals,
-                    'logo': token.logo,
-                    'price_usd': formatted_price,
-                    'price_change_24h': formatted_change,
-                    'is_native': token.is_native,
-                    'verified': token.verified,
-                    'description': token.description,
-                    'website': token.website,
-                    'twitter': token.twitter,
-                    'telegram': token.telegram,
-                    'discord': token.discord
-                })
-
+            ).order_by('-created_at')
+            
+            serializer = TokenSerializer(tokens, many=True)
             return Response({
                 'status': 'success',
-                'data': tokens
+                'data': serializer.data
             })
-
+            
         except Exception as e:
             logger.error(f"获取推荐代币失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': '获取推荐代币失败'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                'message': str(e)
+            }, status=500)
 
     @action(detail=True, methods=['get'])
     def token_transfers(self, request, pk=None):

@@ -142,38 +142,30 @@ class SolanaHistoryViewSet(viewsets.ViewSet):
     # 注意这里使用 list 方法，而不是 action 装饰器
     def list(self, request, wallet_id=None):
         """获取代币转账记录"""
-        logger.info("======== SolanaHistoryViewSet.list 方法被调用 ========")
-        logger.info(f"wallet_id: {wallet_id}, request.path: {request.path}")
         try:
             device_id = request.query_params.get('device_id')
             page = int(request.query_params.get('page', 1))
             page_size = int(request.query_params.get('page_size', 20))
             
             if not device_id:
-                return Response(
-                    {'status': 'error', 'message': '缺少设备ID'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({
+                    'status': 'error', 
+                    'message': 'Device ID is required'
+                }, status=status.HTTP_400_BAD_REQUEST)
             
-            # 获取钱包
             wallet = get_object_or_404(Wallet, id=wallet_id)
             if not self.check_wallet_access(wallet, device_id):
-                return Response(
-                    {'status': 'error', 'message': '无权访问该钱包'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+                return Response({
+                    'status': 'error',
+                    'message': 'No access to this wallet'
+                }, status=status.HTTP_403_FORBIDDEN)
             
-            # 添加日志记录
-            logger.info(f"查询钱包 {wallet_id} 的交易记录，钱包地址: {wallet.address}")
-            
-            # 直接查询数据库
             transactions = Transaction.objects.filter(
                 wallet=wallet
             ).order_by('-block_timestamp')
             
             # 记录查询到的总交易数
             total_count = transactions.count()
-            logger.info(f"查询到总共 {total_count} 条交易记录")
             
             # 分页
             paginator = Paginator(transactions, page_size)
@@ -202,9 +194,6 @@ class SolanaHistoryViewSet(viewsets.ViewSet):
             # 序列化交易记录
             serialized_transactions = []
             for tx in current_page.object_list:
-                # 记录每条交易的类型
-                logger.info(f"处理交易: tx_hash={tx.tx_hash}, tx_type={tx.tx_type}")
-                
                 # 基本交易信息
                 tx_data = {
                     'tx_hash': tx.tx_hash,
@@ -268,14 +257,8 @@ class SolanaHistoryViewSet(viewsets.ViewSet):
                         'to_token_decimals': to_token_info['decimals'],
                         'to_token_logo': to_token_info['logo']
                     }
-                    
-                    # 记录 SWAP 交易的额外信息
-                    logger.info(f"添加 SWAP 信息: to_token_address={to_token_address}")
                 
                 serialized_transactions.append(tx_data)
-            
-            # 记录最终返回的交易数量
-            logger.info(f"返回 {len(serialized_transactions)} 条交易记录")
             
             # 直接返回结果，不使用缓存
             return Response({
@@ -289,8 +272,8 @@ class SolanaHistoryViewSet(viewsets.ViewSet):
             })
             
         except Exception as e:
-            logger.error(f"获取代币转账记录失败: {str(e)}")
-            return Response(
-                {'status': 'error', 'message': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            ) 
+            logger.error(f"Failed to get transaction history: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 

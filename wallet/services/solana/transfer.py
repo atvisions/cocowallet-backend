@@ -24,6 +24,7 @@ from ...models import Wallet, Transaction as DBTransaction, Token
 from ...exceptions import InsufficientBalanceError, InvalidAddressError, TransferError
 from ..solana_config import RPCConfig , MoralisConfig
 import json
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -260,39 +261,95 @@ class SolanaTransferService:
             return Keypair.from_seed(private_key[:32])  # 只使用前32字节作为种子
         except Exception as e:
             logger.error(f"获取钱包密钥对失败: {str(e)}")
-            raise TransferError("无法获取钱包密钥对")
+            raise TransferError("Failed to get wallet keypair")
 
     async def _get_token_decimals(self, token_address: str) -> int:
         """获取代币精度"""
         try:
-            # 从数据库获取代币信息
-            token = await Token.objects.aget(chain='SOL', address=token_address)
-            if token and token.decimals is not None:
-                return token.decimals
-                
-            # 如果数据库中没有，从链上获取
-            try:
-                response = await self.client.get_token_supply(token_address)
-                if response and 'result' in response and 'decimals' in response['result']:
-                    decimals = int(response['result']['decimals'])
-                    # 更新数据库
-                    await Token.objects.aupdate_or_create(
-                        chain='SOL',
-                        address=token_address,
-                        defaults={'decimals': decimals}
-                    )
-                    return decimals
-            except Exception as e:
-                logger.error(f"从链上获取代币精度失败: {str(e)}")
-                
-            raise TransferError("无法获取代币精度")
+            # 使用缓存键
+            cache_key = f"solana_token_decimals_{token_address}"
             
-        except Token.DoesNotExist:
-            logger.error(f"代币 {token_address} 不存在")
-            raise TransferError("代币不存在")
+            # 首先尝试从缓存获取
+            cached_decimals = cache.get(cache_key)
+            if cached_decimals is not None:
+                logger.info(f"从缓存获取代币精度: {token_address} = {cached_decimals}")
+                return cached_decimals
+
+            # 从数据库获取代币信息
+            try:
+                token = await Token.objects.aget(chain='SOL', address=token_address)
+                if token and token.decimals is not None:
+                    logger.info(f"从数据库获取代币精度: {token_address} = {token.decimals}")
+                    cache.set(cache_key, token.decimals, timeout=3600)  # 缓存1小时
+                    return token.decimals
+            except Token.DoesNotExist:
+                logger.warning(f"数据库中未找到代币: {token_address}")
+            
+            # 从 Moralis API 获取
+            try:
+                url = MoralisConfig.SOLANA_TOKEN_METADATA_URL.format(token_address)
+                headers = {
+                    'accept': 'application/json',
+                    'X-API-Key': MoralisConfig.API_KEY
+                }
+                
+                session = await self._get_session()
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if 'decimals' in data:
+                            decimals = int(data['decimals'])
+                            logger.info(f"从 Moralis 获取代币精度: {token_address} = {decimals}")
+                            # 更新数据库
+                            await Token.objects.aupdate_or_create(
+                                chain='SOL',
+                                address=token_address,
+                                defaults={
+                                    'decimals': decimals,
+                                    'name': data.get('name', ''),
+                                    'symbol': data.get('symbol', ''),
+                                    'logo': data.get('logo', '')
+                                }
+                            )
+                            cache.set(cache_key, decimals, timeout=3600)
+                            return decimals
+                    else:
+                        logger.warning(f"Moralis API 请求失败: {response.status}")
+                    
+            except Exception as e:
+                logger.warning(f"从 Moralis 获取代币精度失败: {str(e)}")
+            
+            # 从链上获取
+            try:
+                # 使用 getTokenSupply 获取代币信息
+                response = await self._fetch_with_retry(
+                    'getTokenSupply',
+                    params=[token_address]
+                )
+                
+                if response and isinstance(response, dict):
+                    value = response.get('value', {})
+                    if isinstance(value, dict) and 'decimals' in value:
+                        decimals = int(value['decimals'])
+                        logger.info(f"从链上获取代币精度: {token_address} = {decimals}")
+                        # 更新数据库
+                        await Token.objects.aupdate_or_create(
+                            chain='SOL',
+                            address=token_address,
+                            defaults={'decimals': decimals}
+                        )
+                        cache.set(cache_key, decimals, timeout=3600)
+                        return decimals
+                    
+            except Exception as e:
+                logger.warning(f"从链上获取代币精度失败: {str(e)}")
+            
+            # 如果所有方法都失败，抛出异常
+            raise TransferError(f"无法获取代币 {token_address} 的精度")
+            
         except Exception as e:
             logger.error(f"获取代币精度失败: {str(e)}")
-            raise TransferError(f"无法获取代币精度: {str(e)}")
+            raise TransferError(f"获取代币精度失败: {str(e)}")
 
     async def _get_associated_token_address(self, wallet_address: str, token_address: str) -> str:
         """获取关联代币账户地址"""
@@ -310,7 +367,7 @@ class SolanaTransferService:
             return str(ata)
         except Exception as e:
             logger.error(f"获取关联代币账户失败: {str(e)}")
-            raise TransferError("无法获取关联代币账户")
+            raise TransferError("Failed to get associated token account")
 
     async def _check_token_account_exists(self, account_address: str) -> bool:
         """检查代币账户是否存在"""
@@ -540,7 +597,7 @@ class SolanaTransferService:
             try:
                 to_pubkey = PublicKey(to_address)
             except Exception:
-                raise InvalidAddressError("无效的接收地址")
+                raise InvalidAddressError("Invalid address format")
             
             # 获取密钥对
             keypair = Keypair.from_seed(base58.b58decode(private_key)[:32])
@@ -704,25 +761,84 @@ class SolanaTransferService:
     async def transfer_token(self, from_address: str, to_address: str, token_address: str, amount: Decimal, private_key: str) -> Dict[str, Any]:
         """SPL代币转账"""
         try:
-            logger.info(f"开始处理转账请求: from={from_address}, to={to_address}, token={token_address}, amount={amount}")
+            logger.info("==================== 开始代币转账 ====================")
+            logger.info(f"转账参数: {{\n" +
+                       f"  发送地址: {from_address},\n" +
+                       f"  接收地址: {to_address},\n" +
+                       f"  代币地址: {token_address},\n" +
+                       f"  转账金额: {amount},\n" +
+                       f"  金额类型: {type(amount)}\n" +
+                       f"}}")
             
             # 验证地址
             if not self._is_valid_address(to_address):
                 logger.error(f"无效的接收地址: {to_address}")
-                raise InvalidAddressError("无效的接收地址")
+                raise InvalidAddressError("Invalid address format")
             
             # 获取代币精度
             decimals = await self._get_token_decimals(token_address)
             logger.info(f"代币精度: {decimals}")
             
-            # 将金额转换为最小单位
-            amount_in_smallest = int(amount * Decimal(str(10 ** decimals)))
-            logger.info(f"转换后的金额: {amount_in_smallest}")
-            
             # 获取发送方代币账户地址
             from_token_account = await self._get_associated_token_address(from_address, token_address)
             logger.info(f"发送方代币账户: {from_token_account}")
             
+            # 检查发送方账户余额
+            try:
+                balance_response = await self._fetch_with_retry(
+                    'getTokenAccountBalance',
+                    params=[
+                        from_token_account,
+                        {"commitment": "confirmed"}
+                    ]
+                )
+                logger.info(f"余额响应: {balance_response}")
+                
+                if balance_response and isinstance(balance_response, dict):
+                    balance_info = balance_response.get('value', {})
+                    if balance_info:
+                        current_balance = int(balance_info.get('amount', '0'))
+                        logger.info(f"账户余额信息: {{\n" +
+                                  f"  当前余额: {current_balance},\n" +
+                                  f"  UI余额: {balance_info.get('uiAmount')},\n" +
+                                  f"  精度: {balance_info.get('decimals')}\n" +
+                                  f"}}")
+                        
+                        # 转换并检查转账金额
+                        try:
+                            # 确保 amount 是字符串或 Decimal
+                            if not isinstance(amount, (str, Decimal)):
+                                amount = str(amount)
+                            
+                            # 转换金额
+                            amount_in_smallest = int(amount)
+                            logger.info(f"转账金额详情: {{\n" +
+                                      f"  原始金额: {amount},\n" +
+                                      f"  转换后金额: {amount_in_smallest},\n" +
+                                      f"  账户余额: {current_balance}\n" +
+                                      f"}}")
+                            
+                            # 检查余额是否足够
+                            if amount_in_smallest > current_balance:
+                                logger.error(f"余额不足: {{\n" +
+                                           f"  需要金额: {amount_in_smallest},\n" +
+                                           f"  当前余额: {current_balance},\n" +
+                                           f"  差额: {amount_in_smallest - current_balance}\n" +
+                                           f"}}")
+                                raise InsufficientBalanceError("Insufficient balance for transfer")
+                            
+                        except ValueError as e:
+                            logger.error(f"金额转换失败: {str(e)}")
+                            raise TransferError(f"Invalid amount format: {str(e)}")
+                        
+                else:
+                    logger.error("无法获取账户余额信息")
+                    raise TransferError("Failed to get account balance")
+                
+            except Exception as e:
+                logger.error(f"检查余额失败: {str(e)}")
+                raise TransferError(f"Failed to check balance: {str(e)}")
+
             # 获取接收方代币账户地址
             to_token_account = await self._get_associated_token_address(to_address, token_address)
             logger.info(f"接收方代币账户: {to_token_account}")
@@ -862,7 +978,7 @@ class SolanaTransferService:
             return Decimal('0.000005')  # 普通转账费用
         except Exception as e:
             logger.error(f"估算转账费用失败: {str(e)}")
-            raise TransferError(f"估算费用失败: {str(e)}")
+            raise TransferError("Failed to estimate fees")
 
     def _is_valid_address(self, address: str) -> bool:
         """验证 Solana 地址是否有效"""

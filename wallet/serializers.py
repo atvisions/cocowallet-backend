@@ -1,7 +1,11 @@
 from rest_framework import serializers
 from .models import (
-    Wallet, MnemonicBackup, PaymentPassword,
-    ReferralLink, ReferralRelationship, UserPoints, PointsHistory
+    Wallet, Token, NFTCollection, Transaction,
+    MnemonicBackup, PaymentPassword, TokenIndex,
+    TokenIndexSource, TokenIndexMetrics, TokenIndexGrade,
+    TokenIndexReport, TokenCategory,
+    ReferralRelationship, UserPoints, PointsHistory, ReferralLink,
+    Task, TaskHistory, ShareTaskToken
 )
 from django.conf import settings
 from PIL import Image, ImageDraw
@@ -234,3 +238,69 @@ class ReferralStatsSerializer(serializers.Serializer):
     total_referrals = serializers.IntegerField()
     total_points = serializers.IntegerField()
     download_points = serializers.IntegerField()
+
+class TaskSerializer(serializers.ModelSerializer):
+    """任务序列化器"""
+    class Meta:
+        model = Task
+        fields = [
+            'id', 'name', 'code', 'description', 
+            'points', 'daily_limit', 'is_repeatable',
+            'is_active', 'stages_config'
+        ]
+
+class TaskHistorySerializer(serializers.ModelSerializer):
+    """任务历史记录序列化器"""
+    task = TaskSerializer()
+    
+    class Meta:
+        model = TaskHistory
+        fields = ['task', 'device_id', 'completed_at', 'points_awarded']
+
+class ShareTaskTokenSerializer(serializers.ModelSerializer):
+    token_symbol = serializers.CharField(source='token.symbol', read_only=True)
+    token_name = serializers.CharField(source='token.name', read_only=True)
+    token_logo = serializers.URLField(source='token.logo', read_only=True)
+    token_price = serializers.CharField(source='token.last_price', read_only=True)
+    token_price_change = serializers.CharField(source='token.last_price_change', read_only=True)
+
+    class Meta:
+        model = ShareTaskToken
+        fields = ['id', 'token', 'token_symbol', 'token_name', 'token_logo', 
+                 'token_price', 'token_price_change', 'points', 'daily_limit', 
+                 'is_active', 'start_time', 'end_time']
+
+class TokenSerializer(serializers.ModelSerializer):
+    """代币序列化器"""
+    logo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Token
+        fields = [
+            'id',
+            'chain',
+            'address',
+            'name',
+            'symbol',
+            'decimals',
+            'logo',
+            'website',
+            'twitter',
+            'telegram',
+            'discord',
+            'description',
+            'total_supply',
+            'is_verified',
+            'is_recommended',
+            'is_visible',
+            'created_at',
+            'updated_at'
+        ]
+
+    def get_logo(self, obj):
+        """返回完整的logo URL"""
+        if obj.logo:
+            if obj.logo.startswith('http'):
+                return obj.logo
+            return f"{settings.MEDIA_URL}{obj.logo}"
+        return None

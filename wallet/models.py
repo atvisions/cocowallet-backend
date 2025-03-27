@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
 from solana.keypair import Keypair
 from eth_account import Account
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +113,8 @@ class Wallet(models.Model):
             return False
 
     class Meta:
-        verbose_name = 'Wallet'
-        verbose_name_plural = 'Wallets'
+        verbose_name = '钱包'
+        verbose_name_plural = '钱包'
         ordering = ['-created_at']
         unique_together = ['device_id', 'chain', 'address']
 
@@ -296,7 +297,7 @@ class Token(models.Model):
     fully_diluted_valuation = models.CharField(max_length=255, null=True, blank=True, verbose_name='Fully Diluted Valuation')
     categories = models.JSONField(default=list, null=True, blank=True, verbose_name='Categories')
     security_score = models.IntegerField(null=True, blank=True, verbose_name='Security Score')
-    verified = models.BooleanField(default=False, verbose_name='Is Verified')
+    is_verified = models.BooleanField(default=False, verbose_name='Is Verified')
     possible_spam = models.BooleanField(default=False, verbose_name='Is Possible Spam')
     block_number = models.CharField(max_length=255, null=True, blank=True, verbose_name='Block Height')
     validated = models.IntegerField(default=0, verbose_name='Validation Status')
@@ -323,13 +324,13 @@ class Token(models.Model):
     )
 
     class Meta:
-        verbose_name = 'Token'
-        verbose_name_plural = 'Tokens'
+        verbose_name = '代币'
+        verbose_name_plural = '代币'
         unique_together = ('chain', 'address')
         indexes = [
             models.Index(fields=['chain', 'address']),
         ]
-        ordering = ['-is_recommended', '-verified', '-created_at']
+        ordering = ['-is_recommended', '-is_verified', '-created_at']
 
     def __str__(self):
         return f"{self.chain} - {self.symbol} ({self.address})"
@@ -354,8 +355,8 @@ class NFTCollection(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
 
     class Meta:
-        verbose_name = 'NFT Collection'
-        verbose_name_plural = 'NFT Collections'
+        verbose_name = 'NFT合集'
+        verbose_name_plural = 'NFT合集'
         ordering = ['-floor_price_usd', '-created_at']
         unique_together = ['chain', 'contract_address']
 
@@ -399,8 +400,8 @@ class Transaction(models.Model):
     to_token_address = models.CharField(max_length=255, null=True, blank=True, help_text="Target Token Address (for Swap transaction)")
 
     class Meta:
-        verbose_name = 'Transaction Record'
-        verbose_name_plural = 'Transaction Records'
+        verbose_name = '交易记录'
+        verbose_name_plural = '交易记录'
         ordering = ['-block_timestamp']
         unique_together = ['chain', 'tx_hash', 'wallet']
 
@@ -480,8 +481,8 @@ class MnemonicBackup(models.Model):
             raise ValueError(f"Failed to decrypt mnemonic: {str(e)}")
 
     class Meta:
-        verbose_name = 'Mnemonic Backup'
-        verbose_name_plural = 'Mnemonic Backups'
+        verbose_name = '助记词备份'
+        verbose_name_plural = '助记词备份'
         ordering = ['-created_at']
         unique_together = ['device_id', 'chain']
 
@@ -498,8 +499,8 @@ class PaymentPassword(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
 
     class Meta:
-        verbose_name = 'Payment Password'
-        verbose_name_plural = 'Payment Passwords'
+        verbose_name = '支付密码'
+        verbose_name_plural = '支付密码'
 
     def __str__(self):
         return f"Payment password for device {self.device_id}"
@@ -644,8 +645,8 @@ class TokenIndex(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
 
     class Meta:
-        verbose_name = 'Token Index'
-        verbose_name_plural = 'Token Indexes'
+        verbose_name = '代币索引'
+        verbose_name_plural = '代币索引'
         unique_together = ('chain', 'address')
         indexes = [
             models.Index(fields=['chain', 'address']),
@@ -664,8 +665,8 @@ class TokenIndexSource(models.Model):
     is_active = models.BooleanField(default=True, verbose_name='Is Active')
     
     class Meta:
-        verbose_name = 'Token Data Source'
-        verbose_name_plural = 'Token Data Sources'
+        verbose_name = '代币数据源'
+        verbose_name_plural = '代币数据源'
         ordering = ['priority']
         
     def __str__(self):
@@ -682,8 +683,8 @@ class TokenIndexMetrics(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
     
     class Meta:
-        verbose_name = 'Token Metrics'
-        verbose_name_plural = 'Token Metrics'
+        verbose_name = '代币指标'
+        verbose_name_plural = '代币指标'
         
     def __str__(self):
         return f"{self.token.symbol} Metrics"
@@ -703,8 +704,8 @@ class TokenIndexGrade(models.Model):
     evaluation_reason = models.TextField(null=True, blank=True, verbose_name='Evaluation Reason')
     
     class Meta:
-        verbose_name = 'Token Grade'
-        verbose_name_plural = 'Token Grades'
+        verbose_name = '代币评级'
+        verbose_name_plural = '代币评级'
         
     def __str__(self):
         return f"{self.token.symbol} ({self.grade} Grade)"
@@ -721,8 +722,8 @@ class TokenIndexReport(models.Model):
     details = models.JSONField(default=dict, verbose_name='Details')
     
     class Meta:
-        verbose_name = 'Index Library Report'
-        verbose_name_plural = 'Index Library Reports'
+        verbose_name = '代币库报告'
+        verbose_name_plural = '代币库报告'
         ordering = ['-report_date']
         
     def __str__(self):
@@ -740,8 +741,8 @@ class TokenCategory(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
 
     class Meta:
-        verbose_name = 'Token Category'
-        verbose_name_plural = 'Token Categories'
+        verbose_name = '代币分类'
+        verbose_name_plural = '代币分类'
         ordering = ['priority', 'name']
 
     def __str__(self):
@@ -757,6 +758,8 @@ class ReferralRelationship(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        verbose_name = '推荐关系'
+        verbose_name_plural = '推荐关系'
         unique_together = ['referrer_device_id', 'referred_device_id']
 
 class UserPoints(models.Model):
@@ -767,8 +770,8 @@ class UserPoints(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
 
     class Meta:
-        verbose_name = 'User Points'
-        verbose_name_plural = 'User Points'
+        verbose_name = '用户积分'
+        verbose_name_plural = '用户积分'
         indexes = [
             models.Index(fields=['device_id']),
         ]
@@ -822,8 +825,8 @@ class PointsHistory(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
 
     class Meta:
-        verbose_name = 'Points History'
-        verbose_name_plural = 'Points History'
+        verbose_name = '积分历史'
+        verbose_name_plural = '积分历史'
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['device_id']),
@@ -845,8 +848,8 @@ class ReferralLink(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
 
     class Meta:
-        verbose_name = 'Recommendation Link'
-        verbose_name_plural = 'Recommendation Links'
+        verbose_name = '推荐链接'
+        verbose_name_plural = '推荐链接'
         indexes = [
             models.Index(fields=['device_id']),
             models.Index(fields=['code']),
@@ -910,4 +913,76 @@ class ReferralLink(models.Model):
             relationship.save()
             
         return True
+
+# 在现有模型后添加任务相关模型
+class Task(models.Model):
+    """任务模型"""
+    name = models.CharField('任务名称', max_length=100)
+    code = models.CharField('任务代码', max_length=50, unique=True, default='DEFAULT_TASK')
+    task_type = models.CharField('任务类型', max_length=50, default='OTHER')
+    description = models.TextField('任务描述', blank=True)
+    points = models.IntegerField('奖励积分', default=0)
+    daily_limit = models.IntegerField('每日限制次数', default=1)
+    is_repeatable = models.BooleanField('是否可重复', default=False)
+    is_active = models.BooleanField('是否激活', default=True)
+    stages_config = models.JSONField('阶段配置', default=dict, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '任务'
+        verbose_name_plural = '任务'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+
+class TaskHistory(models.Model):
+    """任务完成历史"""
+    device_id = models.CharField('设备ID', max_length=100)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, verbose_name='任务')
+    completed_at = models.DateTimeField('完成时间', auto_now_add=True)
+    points_awarded = models.IntegerField('获得积分', default=0)
+    extra_data = models.JSONField('额外数据', default=dict, blank=True)
+
+    class Meta:
+        verbose_name = '任务历史'
+        verbose_name_plural = '任务历史'
+        ordering = ['-completed_at']
+        indexes = [
+            models.Index(fields=['device_id', 'task', 'completed_at'])
+        ]
+
+    def __str__(self):
+        return f"{self.device_id} - {self.task.name}"
+
+class ShareTaskToken(models.Model):
+    """分享任务代币"""
+    token = models.ForeignKey('Token', on_delete=models.CASCADE)
+    points = models.IntegerField(default=0, verbose_name='奖励积分')
+    daily_limit = models.IntegerField(default=1, verbose_name='每日限制次数')
+    is_active = models.BooleanField(default=True, verbose_name='是否激活')
+    official_tweet_id = models.CharField(
+        max_length=100, 
+        help_text="官方推文ID", 
+        verbose_name='官方推文ID',
+        null=True,  # 允许为空
+        blank=True  # 允许为空
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        verbose_name = "代币分享任务"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"{self.token.symbol} 分享任务"
+
+    def is_valid(self):
+        """检查任务是否在有效期内"""
+        now = timezone.now()
+        if self.end_time and now > self.end_time:
+            return False
+        return self.is_active
 

@@ -7,8 +7,11 @@ import logging
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from rest_framework.permissions import AllowAny
+from django.utils import timezone
+from django.conf import settings
+from django.core.paginator import Paginator
 
-from ..models import ReferralLink, ReferralRelationship, UserPoints, PointsHistory
+from ..models import ReferralLink, ReferralRelationship, UserPoints, PointsHistory, Task, TaskHistory
 from ..serializers import (
     ReferralLinkSerializer, ReferralRelationshipSerializer,
     UserPointsSerializer, PointsHistorySerializer, ReferralStatsSerializer
@@ -52,7 +55,7 @@ class ReferralViewSet(viewsets.ViewSet):
         
         if not device_id:
             return Response(
-                {'status': 'error', 'message': '缺少设备ID参数'},
+                {'status': 'error', 'message': 'Device ID is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -79,7 +82,7 @@ class ReferralViewSet(viewsets.ViewSet):
         
         if not code:
             return Response(
-                {'status': 'error', 'message': '缺少推荐码参数'},
+                {'status': 'error', 'message': 'Referral code is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -111,7 +114,7 @@ class ReferralViewSet(viewsets.ViewSet):
             if not all([referrer_code, device_id]):
                 return Response({
                     'status': 'error',
-                    'message': '缺少必要参数'
+                    'message': 'Device ID is required'
                 }, status=400)
             
             # 查找推荐链接
@@ -133,16 +136,56 @@ class ReferralViewSet(viewsets.ViewSet):
             
             # 如果未发放过下载奖励
             if not relationship.download_points_awarded:
-                # 获取推荐人的积分账户
-                user_points = UserPoints.get_or_create_user_points(
-                    referral_link.device_id
+                # 获取邀请下载任务配置
+                task_config = settings.TASK_REWARDS.get('INVITE_DOWNLOAD')
+                if not task_config:
+                    raise ValueError('Invite download task configuration not found')
+                
+                # 查找或创建邀请下载任务
+                invite_task, _ = Task.objects.get_or_create(
+                    code='INVITE_DOWNLOAD',
+                    defaults={
+                        'name': task_config['name'],
+                        'task_type': 'INVITE_DOWNLOAD',
+                        'description': task_config['description'],
+                        'points': task_config['points'],
+                        'is_repeatable': task_config['is_repeatable'],
+                        'stages_config': task_config.get('stages', [])
+                    }
                 )
                 
-                # 添加积分奖励
+                # 获取当前邀请总数
+                current_invites = ReferralRelationship.objects.filter(
+                    referrer_device_id=referral_link.device_id,
+                    download_completed=True
+                ).count()
+                
+                # 获取阶段奖励
+                stage_reward = invite_task.get_stage_reward(current_invites)
+                points_to_award = stage_reward['points'] if stage_reward else task_config['regular_points']
+                reward_description = stage_reward['description'] if stage_reward else '邀请好友下载奖励'
+                
+                # 创建任务记录
+                TaskHistory.objects.create(
+                    device_id=referral_link.device_id,
+                    task=invite_task,
+                    status='COMPLETED',
+                    completed_at=timezone.now(),
+                    points_awarded=True,
+                    extra_data={
+                        'referred_device_id': device_id,
+                        'referral_code': referrer_code,
+                        'current_invites': current_invites,
+                        'is_stage_reward': bool(stage_reward)
+                    }
+                )
+                
+                # 获取推荐人的积分账户并添加积分
+                user_points = UserPoints.get_or_create_user_points(referral_link.device_id)
                 user_points.add_points(
-                    points=5,  # 下载奖励5积分
-                    action_type='DOWNLOAD_REFERRAL',
-                    description=f'User {device_id} downloaded the app',
+                    points=points_to_award,
+                    action_type='INVITE_DOWNLOAD',
+                    description=reward_description,
                     related_device_id=device_id
                 )
                 
@@ -150,29 +193,26 @@ class ReferralViewSet(viewsets.ViewSet):
                 relationship.download_points_awarded = True
                 relationship.save()
                 
-                logger.info(f"已发放下载奖励: 推荐人={referral_link.device_id}, 被推荐人={device_id}, 积分=5")
-                
                 return Response({
                     'status': 'success',
-                    'message': 'Download recorded and points awarded'
+                    'message': 'Download recorded and points awarded',
+                    'data': {
+                        'points_awarded': points_to_award,
+                        'current_invites': current_invites,
+                        'is_stage_reward': bool(stage_reward)
+                    }
                 })
             else:
                 return Response({
                     'status': 'success',
                     'message': 'Download recorded, points already awarded previously'
                 })
-        except ReferralLink.DoesNotExist:
-            logger.error(f"推荐码不存在: {referrer_code}")
-            return Response({
-                'status': 'error',
-                'message': '无效的推荐码'
-            }, status=404)
         except Exception as e:
             logger.error(f"记录下载失败: {str(e)}", exc_info=True)
             return Response({
                 'status': 'error',
                 'message': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            }, status=500)
     
     @action(detail=False, methods=['post'])
     def record_wallet_creation(self, request):
@@ -181,7 +221,7 @@ class ReferralViewSet(viewsets.ViewSet):
         
         if not device_id:
             return Response(
-                {'status': 'error', 'message': '缺少设备ID参数'},
+                {'status': 'error', 'message': 'Device ID is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -262,7 +302,7 @@ class ReferralViewSet(viewsets.ViewSet):
         
         if not device_id:
             return Response(
-                {'status': 'error', 'message': '缺少设备ID参数'},
+                {'status': 'error', 'message': 'Device ID is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -282,45 +322,52 @@ class ReferralViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['GET'])
     def get_points_history(self, request):
         """获取积分历史"""
-        device_id = request.query_params.get('device_id')
-        page = int(request.query_params.get('page', 1))
-        page_size = int(request.query_params.get('page_size', 10))
-        
-        if not device_id:
-            return Response(
-                {'status': 'error', 'message': '缺少设备ID参数'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         try:
-            # 获取积分历史记录
-            history = PointsHistory.objects.filter(device_id=device_id)
+            device_id = request.query_params.get('device_id')
+            page = int(request.query_params.get('page', 1))
+            page_size = int(request.query_params.get('page_size', 10))
             
-            # 简单分页
-            start = (page - 1) * page_size
-            end = start + page_size
-            paginated_history = history[start:end]
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': 'Device ID is required'
+                }, status=400)
             
-            serializer = PointsHistorySerializer(paginated_history, many=True)
+            histories = PointsHistory.objects.filter(
+                device_id=device_id
+            ).order_by('-created_at')
+            
+            # 分页
+            paginator = Paginator(histories, page_size)
+            current_page = paginator.page(page)
+            
+            data = []
+            for history in current_page:
+                data.append({
+                    'points': history.points,
+                    'action_type': history.action_type,
+                    'description': history.description,
+                    'created_at': history.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                })
             
             return Response({
                 'status': 'success',
                 'data': {
-                    'total': history.count(),
-                    'page': page,
-                    'page_size': page_size,
-                    'results': serializer.data
+                    'items': data,
+                    'total': paginator.count,
+                    'pages': paginator.num_pages,
+                    'current_page': page
                 }
             })
+            
         except Exception as e:
-            logger.error(f"获取积分历史失败: {str(e)}")
-            return Response(
-                {'status': 'error', 'message': f'获取积分历史失败: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=500)
     
     @action(detail=False, methods=['get'])
     def get_referrals(self, request):
@@ -331,7 +378,7 @@ class ReferralViewSet(viewsets.ViewSet):
         
         if not device_id:
             return Response(
-                {'status': 'error', 'message': '缺少设备ID参数'},
+                {'status': 'error', 'message': 'Device ID is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -371,7 +418,7 @@ class ReferralViewSet(viewsets.ViewSet):
         
         if not device_id:
             return Response(
-                {'status': 'error', 'message': '缺少设备ID参数'},
+                {'status': 'error', 'message': 'Device ID is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -399,7 +446,7 @@ class ReferralViewSet(viewsets.ViewSet):
         
         if not all([old_device_id, new_device_id]):
             return Response(
-                {'status': 'error', 'message': '缺少必要参数'},
+                {'status': 'error', 'message': 'Device ID is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -439,7 +486,7 @@ class ReferralViewSet(viewsets.ViewSet):
             if not all([referrer_code, device_id]):
                 return Response({
                     'status': 'error',
-                    'message': '缺少必要参数'
+                    'message': 'Device ID is required'
                 }, status=400)
             
             # 查找推荐链接

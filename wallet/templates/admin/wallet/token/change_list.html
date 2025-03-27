@@ -1,0 +1,86 @@
+{% extends "admin/change_list.html" %}
+{% load static %}
+
+{% block object-tools-items %}
+{{ block.super }}
+<script type="text/javascript">
+function toggleRecommend(tokenId, button) {
+    fetch(`/admin/wallet/token/toggle-recommend/${tokenId}/`, {
+        method: 'POST',
+        headers: {
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            // 更新按钮状态和文本
+            if (data.is_recommended) {
+                button.textContent = '取消推荐';
+                button.classList.add('recommended');
+            } else {
+                button.textContent = '推荐';
+                button.classList.remove('recommended');
+            }
+        } else {
+            alert('操作失败: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('操作失败');
+    });
+}
+</script>
+
+<style>
+.recommend-btn {
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-left: 5px;
+    background-color: #f8f9fa;
+    border: 1px solid #ddd;
+    color: #333;
+}
+.recommend-btn.recommended {
+    background-color: #28a745;
+    border-color: #28a745;
+    color: white;
+}
+</style>
+{% endblock %}
+
+{% block result_list %}
+    {{ block.super }}
+    <script type="text/javascript">
+        // 为每行添加推荐按钮
+        document.addEventListener('DOMContentLoaded', function() {
+            const rows = document.querySelectorAll('#result_list tbody tr');
+            rows.forEach(row => {
+                // 获取ID列的值
+                const idCell = row.querySelector('th.field-id');
+                if (!idCell) return;
+                
+                const tokenId = idCell.textContent.trim();
+                // 获取推荐状态
+                const isRecommendedCell = row.querySelector('td.field-is_recommended img');
+                const isRecommended = isRecommendedCell && isRecommendedCell.alt === 'True';
+                
+                // 创建按钮
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = `recommend-btn ${isRecommended ? 'recommended' : ''}`;
+                button.textContent = isRecommended ? '取消推荐' : '推荐';
+                button.onclick = () => toggleRecommend(tokenId, button);
+                
+                // 添加到最后一个单元格
+                const cells = row.querySelectorAll('td');
+                const lastCell = cells[cells.length - 1];
+                if (lastCell) {
+                    lastCell.appendChild(button);
+                }
+            });
+        });
+    </script>
+{% endblock %} 

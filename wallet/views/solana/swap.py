@@ -91,7 +91,7 @@ class SolanaSwapViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=False, methods=['get'], url_path='quote')
+    @action(detail=False, methods=['get'], url_path='quote', url_name='quote')
     def quote(self, request, wallet_id=None):
         """
         获取兑换报价
@@ -133,19 +133,7 @@ class SolanaSwapViewSet(viewsets.ViewSet):
                 amount=amount,
                 slippage=slippage
             )
-            return Response({
-                'status': 'success',
-                'data': quote
-            })
-        except Wallet.DoesNotExist:
-            return Response(
-                {
-                    'status': 'error',
-                    'message': '钱包不存在',
-                    'code': 'WALLET_NOT_FOUND'
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response(quote)
         except Exception as e:
             logger.error(f"获取兑换报价失败: {str(e)}")
             return Response(

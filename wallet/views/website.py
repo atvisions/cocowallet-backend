@@ -47,13 +47,13 @@ def download_app(request):
             referrer_downloads = cache.get(f"referrer_ip_{client_ip}_{ref_code}") or []
             if client_ip in referrer_downloads:
                 logger.warning(f"检测到重复下载: ip={client_ip}, ref={ref_code}")
-                return HttpResponse('请不要重复下载', status=400)
+                return HttpResponse('Please do not download repeatedly', status=400)
             
             # 检查24小时内该IP的下载次数
             ip_download_count = cache.get(f"ip_downloads_{client_ip}") or 0
             if ip_download_count >= 3:  # 每个IP 24小时内最多3次下载
                 logger.warning(f"IP下载次数超限: ip={client_ip}, count={ip_download_count}")
-                return HttpResponse('下载次数超出限制，请24小时后再试', status=400)
+                return HttpResponse('Download limit exceeded, please try again in 24 hours', status=400)
             
             # 增加点击次数
             referral_link.increment_clicks()
@@ -109,7 +109,7 @@ def download_app(request):
     # 检查文件是否存在
     if not os.path.exists(apk_path):
         logger.error(f"APK文件未找到: {apk_path}")
-        return HttpResponse('抱歉，APK文件未找到。请联系客服。', status=404)
+        return HttpResponse('APK file not found. Please contact support.', status=404)
     
     # 返回文件响应
     try:

@@ -13,13 +13,14 @@ class RPCConfig:
     
     # Solana RPC 节点配置
     SOLANA_MAINNET_RPC_URL: str = os.getenv('SOLANA_MAINNET_RPC_URL', 
-        # 主要RPC节点
         f'https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}' if ALCHEMY_API_KEY else 
-        # 公共RPC节点
         'https://api.mainnet-beta.solana.com'
     )
     SOLANA_TESTNET_RPC_URL: str = os.getenv('SOLANA_TESTNET_RPC_URL', 'https://api.testnet.solana.com')
     SOLANA_DEVNET_RPC_URL: str = os.getenv('SOLANA_DEVNET_RPC_URL', 'https://api.devnet.solana.com')
+    
+    # 使用 Alchemy 端点作为默认 ENDPOINT
+    ENDPOINT = f'https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}' if ALCHEMY_API_KEY else 'https://api.mainnet-beta.solana.com'
     
     @classmethod
     def get_rpc_endpoints(cls) -> Dict:

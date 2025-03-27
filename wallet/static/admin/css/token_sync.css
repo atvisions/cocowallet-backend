@@ -1,0 +1,21 @@
+.sync-metadata-btn {
+    padding: 5px 10px;
+    background-color: #417690;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.sync-metadata-btn:hover {
+    background-color: #2b5173;
+}
+
+.sync-metadata-btn:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
+.sync-status {
+    font-size: 14px;
+} 

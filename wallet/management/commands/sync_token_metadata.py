@@ -8,6 +8,7 @@ from django.utils import timezone
 from wallet.models import Token, TokenCategory
 from django.core.cache import cache
 from asgiref.sync import sync_to_async
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,16 @@ class Command(BaseCommand):
             type=str,
             default='jupiter',
             help='数据源: jupiter, solscan (默认: jupiter)'
+        )
+        parser.add_argument(
+            '--address',
+            type=str,
+            help='代币地址'
+        )
+        parser.add_argument(
+            '--chain',
+            type=str,
+            help='链类型'
         )
 
     def handle(self, *args, **options):
@@ -76,20 +87,28 @@ class Command(BaseCommand):
     async def handle_async(self, *args, **options):
         """异步处理命令"""
         source = options.get('source', 'jupiter')
+        address = options.get('address')
+        chain = options.get('chain')
         
         self.update_sync_status(status='running', progress=0, message=f'开始从 {source} 同步代币元数据')
         
         try:
-            if source == 'jupiter':
-                await self._sync_from_jupiter()
+            if address and chain:
+                # 同步单个代币
+                await self._sync_single_token(address)
             else:
-                self.update_sync_status(status='error', message=f'不支持的数据源: {source}')
-                return
+                # 同步所有代币
+                if source == 'jupiter':
+                    await self._sync_from_jupiter()
+                else:
+                    self.update_sync_status(status='error', message=f'不支持的数据源: {source}')
+                    return
                 
             self.update_sync_status(status='completed', progress=100, message='同步完成')
         except Exception as e:
             logger.error(f"同步失败: {str(e)}")
             self.update_sync_status(status='error', message=f'同步失败: {str(e)}')
+            raise  # 重新抛出异常以便上层捕获
 
     async def _sync_from_jupiter(self):
         """从 Jupiter 同步代币元数据"""
@@ -182,3 +201,90 @@ class Command(BaseCommand):
             logger.error(f"从 Jupiter 同步代币元数据失败: {str(e)}")
             self.update_sync_status(status='error', message=f'同步失败: {str(e)}')
             raise 
+
+    async def _sync_single_token(self, address):
+        """同步单个代币的元数据"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                # 从 Moralis 获取数据
+                url = f'https://solana-gateway.moralis.io/token/mainnet/{address}/metadata'
+                headers = {
+                    'Accept': 'application/json',
+                    'X-API-Key': settings.MORALIS_API_KEY
+                }
+                
+                logger.info(f"开始从 Moralis 获取代币 {address} 的元数据")
+                
+                async with session.get(url, headers=headers) as response:
+                    if response.status != 200:
+                        raise Exception(f"Moralis API 请求失败: {response.status}")
+                    
+                    data = await response.json()
+                    logger.info(f"Moralis API 返回数据: {json.dumps(data, indent=2)}")
+
+                    # 根据实际返回的数据结构处理
+                    token_data = {
+                        'name': data.get('name', ''),
+                        'symbol': data.get('symbol', ''),
+                        'decimals': int(data.get('decimals', 0)),
+                        'logo': data.get('logo', ''),
+                        'is_native': address == 'So11111111111111111111111111111111111111112',
+                        'is_visible': True,
+                        'is_verified': True,
+                        
+                        # 详细信息
+                        'description': data.get('description', ''),
+                        'website': data.get('links', {}).get('website', ''),
+                        'twitter': data.get('links', {}).get('twitter', ''),
+                        'discord': data.get('links', {}).get('discord', ''),
+                        'reddit': data.get('links', {}).get('reddit', ''),
+                        'telegram': data.get('links', {}).get('telegram', ''),
+                        
+                        # 市场数据
+                        'total_supply': data.get('totalSupply', ''),
+                        'total_supply_formatted': data.get('totalSupplyFormatted', ''),
+                        'fully_diluted_valuation': data.get('fullyDilutedValue', ''),
+                        
+                        # 其他信息
+                        'contract_type': data.get('standard', 'Unknown'),
+                        'metaplex_data': data.get('metaplex', {}),  # 保存 metaplex 相关数据
+                    }
+
+                    # 设置代币分类 - 可以根据名称或其他特征来判断
+                    category_code = 'other'
+                    name_lower = token_data['name'].lower()
+                    if 'usd' in name_lower or 'usdt' in name_lower or 'usdc' in name_lower:
+                        category_code = 'stablecoin'
+                    elif 'bonk' in name_lower or 'doge' in name_lower or 'shib' in name_lower:
+                        category_code = 'meme'
+                    elif 'wrapped' in name_lower:
+                        category_code = 'wrapped'
+                    elif 'game' in name_lower:
+                        category_code = 'gamefi'
+                    elif 'nft' in name_lower:
+                        category_code = 'nft'
+
+                    try:
+                        category = await sync_to_async(TokenCategory.objects.get)(code=category_code)
+                        token_data['category'] = category
+                    except TokenCategory.DoesNotExist:
+                        token_data['category'] = None
+
+                    logger.info(f"处理后的代币数据: {json.dumps(token_data, indent=2)}")
+
+                    # 更新代币信息
+                    await sync_to_async(Token.objects.update_or_create)(
+                        chain='SOL',
+                        address=address,
+                        defaults=token_data
+                    )
+
+                    self.update_sync_status(
+                        status='completed', 
+                        progress=100, 
+                        message=f'代币 {address} 同步完成'
+                    )
+
+        except Exception as e:
+            logger.error(f"同步代币 {address} 失败: {str(e)}")
+            raise
