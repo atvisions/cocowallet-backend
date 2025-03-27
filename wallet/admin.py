@@ -160,7 +160,11 @@ class TokenAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/token_sync.css',)
         }
-        js = ('admin/js/token_sync.js',)
+        js = (
+            'admin/js/vendor/jquery/jquery.min.js',  # 添加 jQuery
+            'admin/js/jquery.init.js',               # 添加 jQuery 初始化
+            'admin/js/token_sync.js',                # 我们的自定义 JS
+        )
     
     def get_urls(self):
         urls = super().get_urls()
