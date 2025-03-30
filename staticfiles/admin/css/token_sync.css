@@ -1,0 +1,33 @@
+.sync-button {
+    display: inline-block !important;
+    padding: 6px 12px !important;
+    background-color: #417690 !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 4px !important;
+    cursor: pointer !important;
+    font-size: 13px !important;
+    line-height: 1.2 !important;
+    vertical-align: middle !important;
+}
+
+.sync-button:hover {
+    background-color: #2b5172 !important;
+}
+
+.sync-button:disabled {
+    background-color: #ccc !important;
+    cursor: not-allowed !important;
+}
+
+.sync-status {
+    margin-left: 10px;
+    font-size: 13px;
+}
+
+/* 调整输入框样式 */
+.field-address .vTextField {
+    width: 400px !important;
+    display: inline-block !important;
+    margin-right: 10px !important;
+} 

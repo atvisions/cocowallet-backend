@@ -91,44 +91,36 @@
             link.addEventListener('click', async function(e) {
                 e.preventDefault();
                 
-                // Prevent duplicate clicks
                 if (this.getAttribute('data-downloading') === 'true') {
                     return;
                 }
                 
-                // Mark as downloading
                 this.setAttribute('data-downloading', 'true');
-                document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
-                    btn.style.opacity = '0.5';
-                    btn.style.pointerEvents = 'none';
-                });
-                
-                // Show downloading status
                 const originalText = this.innerHTML;
                 this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Downloading...';
                 
                 try {
-                    // Get referral code
                     const urlParams = new URLSearchParams(window.location.search);
                     const refCode = urlParams.get('ref');
-                    
-                    // Build download URL with referral code parameter
                     const downloadUrl = refCode ? 
                         `/download/app?ref=${refCode}` : 
                         '/download/app';
                     
-                    // Start download
-                    window.location.href = downloadUrl;
+                    // 先触发下载处理（处理推荐码逻辑）
+                    await fetch(downloadUrl);
+                    
+                    // 然后直接访问静态文件URL
+                    window.location.href = '/static/website/apk/cocowallet-1.0.0.apk';
                     
                 } catch (error) {
                     console.error('Download failed:', error);
-                    // Restore button state
-                    this.innerHTML = originalText;
-                    document.querySelectorAll('.download-link, .download-btn, [id="heroDownloadBtn"]').forEach(btn => {
-                        btn.style.opacity = '1';
-                        btn.style.pointerEvents = 'auto';
-                        btn.removeAttribute('data-downloading');
-                    });
+                    // 如果出错，直接尝试静态文件下载
+                    window.location.href = '/static/website/apk/cocowallet-1.0.0.apk';
+                } finally {
+                    setTimeout(() => {
+                        this.innerHTML = originalText;
+                        this.removeAttribute('data-downloading');
+                    }, 2000);
                 }
             });
         });

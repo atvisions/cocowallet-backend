@@ -1,0 +1,10 @@
+.sync-tasks-button {
+    background: #79aec8;
+    padding: 10px 15px;
+    border-radius: 4px;
+    color: #fff;
+}
+
+.sync-tasks-button:hover {
+    background: #609ab6;
+} 

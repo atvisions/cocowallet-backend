@@ -215,6 +215,9 @@ STATICFILES_FINDERS = [
     'django.contrib.staticfiles.finders.AppDirectoriesFinder',
 ]
 
+# 静态文件收集目录
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+
 # Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')

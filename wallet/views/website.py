@@ -2,7 +2,7 @@ from django.shortcuts import render
 from django.views.decorators.http import require_GET
 from ..models import ReferralLink, ReferralRelationship, UserPoints
 import os
-from django.http import FileResponse, HttpResponse
+from django.http import FileResponse, HttpResponse, HttpResponseRedirect
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 import logging
@@ -37,10 +37,12 @@ def download_app(request):
     
     logger.info(f"收到下载请求: ref={ref_code}, ip={client_ip}")
     
-    # 如果有推荐码，记录下载并奖励积分
+    # 直接重定向到静态文件URL
+    static_apk_url = f"{settings.API_DOMAIN}/static/website/apk/cocowallet-1.0.0.apk"
+    
+    # 如果有推荐码，先处理推荐逻辑
     if ref_code:
         try:
-            # 查找推荐链接
             referral_link = ReferralLink.objects.get(code=ref_code, is_active=True)
             
             # 检查是否是自己推荐自己（IP检查）
@@ -102,28 +104,5 @@ def download_app(request):
         except Exception as e:
             logger.error(f"处理推荐下载失败: {str(e)}")
     
-    # APK文件路径
-    apk_path = os.path.join(settings.STATIC_ROOT if not settings.DEBUG else settings.STATICFILES_DIRS[0], 
-                           'website/apk/cocowallet-1.0.0.apk')
-    
-    # 检查文件是否存在
-    if not os.path.exists(apk_path):
-        logger.error(f"APK文件未找到: {apk_path}")
-        return HttpResponse('APK file not found. Please contact support.', status=404)
-    
-    # 返回文件响应
-    try:
-        response = FileResponse(
-            open(apk_path, 'rb'),
-            content_type='application/vnd.android.package-archive'
-        )
-        response['Content-Disposition'] = 'attachment; filename="cocowallet-1.0.0.apk"'
-        
-        # 记录成功的下载响应
-        file_size = os.path.getsize(apk_path)
-        logger.info(f"成功提供APK下载: size={file_size} bytes")
-        
-        return response
-    except Exception as e:
-        logger.error(f"提供APK下载时出错: {str(e)}")
-        return HttpResponse('下载过程中出现错误，请稍后重试。', status=500) 
+    # 最后重定向到APK文件
+    return HttpResponseRedirect(static_apk_url)

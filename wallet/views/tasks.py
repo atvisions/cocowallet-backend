@@ -9,6 +9,7 @@ from django.conf import settings
 from django.db.models import Count
 from ..utils.twitter import TwitterValidator
 from django.core.cache import cache
+from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ class TaskViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['POST'])
     def daily_check_in(self, request):
-        """每日签到"""
+        """Daily check-in"""
         try:
             device_id = request.data.get('device_id')
             if not device_id:
@@ -26,7 +27,7 @@ class TaskViewSet(viewsets.ViewSet):
                     'message': 'Device ID is required'
                 }, status=400)
 
-            # 获取签到任务
+            # Get check-in task
             try:
                 task = Task.objects.get(code='DAILY_CHECK_IN', is_active=True)
             except Task.DoesNotExist:
@@ -35,7 +36,7 @@ class TaskViewSet(viewsets.ViewSet):
                     'message': 'Daily check-in task not found'
                 }, status=404)
 
-            # 检查今日是否已签到
+            # Check if already checked in today
             today = timezone.now().date()
             today_check_in = TaskHistory.objects.filter(
                 device_id=device_id,
@@ -44,19 +45,24 @@ class TaskViewSet(viewsets.ViewSet):
             ).exists()
 
             if today_check_in:
+                # Calculate next check-in time (tomorrow at 00:00)
+                tomorrow = (timezone.now() + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
                 return Response({
                     'status': 'error',
-                    'message': 'Already checked in today'
+                    'message': 'Already checked in today. Please come back tomorrow.',
+                    'next_check_in': tomorrow
                 }, status=400)
 
-            # 记录签到历史
+            # Record check-in history
             TaskHistory.objects.create(
                 device_id=device_id,
                 task=task,
                 points_awarded=task.points
             )
 
-            # 添加积分
+            # Add points
             user_points = UserPoints.get_or_create_user_points(device_id)
             user_points.add_points(
                 points=task.points,
@@ -65,11 +71,17 @@ class TaskViewSet(viewsets.ViewSet):
                 related_device_id=device_id
             )
 
+            # Calculate next check-in time
+            next_check_in = (timezone.now() + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+
             return Response({
                 'status': 'success',
-                'message': f'Check-in successful! Earned {task.points} points',
+                'message': f'Check-in successful! You earned {task.points} points',
                 'data': {
-                    'points_awarded': task.points
+                    'points_awarded': task.points,
+                    'next_check_in': next_check_in
                 }
             })
 
@@ -77,7 +89,7 @@ class TaskViewSet(viewsets.ViewSet):
             logger.error(f"Daily check-in failed: {str(e)}", exc_info=True)
             return Response({
                 'status': 'error',
-                'message': 'Check-in failed'
+                'message': 'Check-in failed. Please try again.'
             }, status=500)
     
     @action(detail=False, methods=['GET'])
@@ -93,71 +105,54 @@ class TaskViewSet(viewsets.ViewSet):
                     'message': 'Device ID is required'
                 }, status=400)
 
-            # 1. Get all active tasks except SHARE_TOKEN
+            # Get all active tasks
             tasks = Task.objects.filter(
                 is_active=True
             ).exclude(
                 code='SHARE_TOKEN'
             )
-            logger.info("[list_tasks] Found %d active tasks", tasks.count())
-            
-            # 2. Get task history records
+
+            # Get task histories
             task_histories = TaskHistory.objects.filter(
                 device_id=device_id
             ).select_related('task')
-            
-            # Print original query and parameters
-            logger.info("[list_tasks] Device ID for query: %s", device_id)
-            logger.info("[list_tasks] Found %d history records", task_histories.count())
-            
-            # Print each history record
-            for history in task_histories:
-                logger.info(
-                    "[list_tasks] History: task_id=%d, device_id=%s, task_code=%s, completed_at=%s",
-                    history.task_id,
-                    history.device_id,
-                    history.task.code,
-                    history.completed_at
-                )
-            
-            # 3. Get today's records
-            today = timezone.now().date()
-            today_histories = task_histories.filter(completed_at__date=today)
-            
-            # 4. Get completed non-repeatable tasks
-            completed_tasks = task_histories.filter(
-                task__is_repeatable=False
-            ).values_list('task_id', flat=True).distinct()
-            
-            logger.info("[list_tasks] Completed task IDs: %s", list(completed_tasks))
-            
-            # 5. Prepare task data
+
+            # Prepare task list
             task_list = []
+            now = timezone.now()
+            today = now.date()
+            
             for task in tasks:
                 task_data = TaskSerializer(task).data
                 
-                # Check completion status
-                if task.is_repeatable:
-                    is_completed = today_histories.filter(task_id=task.id).exists()
+                if task.code == 'DAILY_CHECK_IN':
+                    # Check if checked in today
+                    is_completed = task_histories.filter(
+                        task=task,
+                        completed_at__date=today
+                    ).exists()
+                    
+                    if is_completed:
+                        # Set next available time to tomorrow at 00:00
+                        next_available = (now + timedelta(days=1)).replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
+                        task_data['next_available'] = next_available.isoformat()
                 else:
-                    is_completed = task.id in completed_tasks
+                    # Logic for other tasks
+                    if task.is_repeatable:
+                        is_completed = task_histories.filter(
+                            task=task,
+                            completed_at__date=today
+                        ).exists()
+                    else:
+                        is_completed = task_histories.filter(
+                            task=task
+                        ).exists()
                 
                 task_data['is_completed'] = is_completed
-                logger.info(
-                    "[list_tasks] Task %s (ID: %d): is_repeatable=%s, is_completed=%s, in_completed_tasks=%s",
-                    task.code,
-                    task.id,
-                    task.is_repeatable,
-                    is_completed,
-                    task.id in completed_tasks
-                )
-                
-                # Get today's completion count
-                today_count = today_histories.filter(task_id=task.id).count()
-                task_data['today_count'] = today_count
-                
                 task_list.append(task_data)
-            
+
             return Response({
                 'status': 'success',
                 'data': task_list
@@ -167,7 +162,7 @@ class TaskViewSet(viewsets.ViewSet):
             logger.error("[list_tasks] Error: %s", str(e), exc_info=True)
             return Response({
                 'status': 'error',
-                'message': str(e)
+                'message': 'Failed to get task list. Please try again.'
             }, status=500)
 
     @action(detail=False, methods=['GET'])
@@ -221,7 +216,7 @@ class TaskViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['POST'])
     def complete_task(self, request):
-        """完成任务"""
+        """Complete task"""
         try:
             device_id = request.data.get('device_id')
             task_code = request.data.get('task_code')
@@ -232,7 +227,7 @@ class TaskViewSet(viewsets.ViewSet):
                     'message': 'Missing required parameters'
                 }, status=400)
             
-            # 获取任务
+            # Get task
             try:
                 task = Task.objects.get(code=task_code, is_active=True)
             except Task.DoesNotExist:
@@ -241,7 +236,7 @@ class TaskViewSet(viewsets.ViewSet):
                     'message': 'Task not found'
                 }, status=404)
             
-            # 检查是否已完成（对于不可重复的任务）
+            # Check if already completed (for non-repeatable tasks)
             if not task.is_repeatable:
                 completed = TaskHistory.objects.filter(
                     device_id=device_id,
@@ -250,10 +245,10 @@ class TaskViewSet(viewsets.ViewSet):
                 if completed:
                     return Response({
                         'status': 'error',
-                        'message': f'Task {task.name} already completed'
+                        'message': f'Task {task.name} has already been completed'
                     }, status=400)
             
-            # 检查今日完成次数
+            # Check daily completion count
             today = timezone.now().date()
             today_count = TaskHistory.objects.filter(
                 device_id=device_id,
@@ -264,17 +259,17 @@ class TaskViewSet(viewsets.ViewSet):
             if today_count >= task.daily_limit:
                 return Response({
                     'status': 'error',
-                    'message': 'Daily limit reached'
+                    'message': 'Daily limit reached. Please try again tomorrow.'
                 }, status=400)
             
-            # 记录任务完成
+            # Record task completion
             TaskHistory.objects.create(
                 device_id=device_id,
                 task=task,
                 points_awarded=task.points
             )
             
-            # 添加积分
+            # Add points
             user_points = UserPoints.get_or_create_user_points(device_id)
             user_points.add_points(
                 points=task.points,
@@ -285,7 +280,7 @@ class TaskViewSet(viewsets.ViewSet):
             
             return Response({
                 'status': 'success',
-                'message': f'Task completed! Earned {task.points} points',
+                'message': f'Task completed! You earned {task.points} points',
                 'data': {
                     'points_awarded': task.points
                 }
@@ -295,7 +290,7 @@ class TaskViewSet(viewsets.ViewSet):
             logger.error(f"Task completion failed: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': 'Task completion failed'
+                'message': 'Task completion failed. Please try again later.'
             }, status=500)
 
     @action(detail=False, methods=['POST'], url_path='verify_share')
