@@ -1,6 +1,7 @@
-from django.shortcuts import render
+from django.shortcuts import render, redirect
+from django.http import JsonResponse
 from django.views.decorators.http import require_GET
-from ..models import ReferralLink, ReferralRelationship, UserPoints
+from tasks.models import ReferralLink, ReferralRelationship, UserPoints
 import os
 from django.http import FileResponse, HttpResponse, HttpResponseRedirect
 from django.views.decorators.csrf import csrf_exempt
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 @csrf_exempt
 @require_GET
 def home(request):
-    """网站主页"""
+    """首页"""
     ref_code = request.GET.get('ref')
     
     # 如果有推荐码，尝试查找对应的推荐链接
@@ -26,12 +27,12 @@ def home(request):
     context = {
         'referrer_code': ref_code
     }
-    return render(request, 'wallet/home.html', context)
+    return render(request, 'website/home.html', context)
 
 @csrf_exempt
 @require_GET
 def download_app(request):
-    """处理应用下载请求"""
+    """下载页面"""
     ref_code = request.GET.get('ref')
     client_ip = request.META.get('HTTP_X_FORWARDED_FOR') or request.META.get('REMOTE_ADDR')
     
@@ -106,3 +107,37 @@ def download_app(request):
     
     # 最后重定向到APK文件
     return HttpResponseRedirect(static_apk_url)
+
+@csrf_exempt
+def track_download(request):
+    """跟踪下载"""
+    if request.method == 'POST':
+        try:
+            data = request.POST
+            device_id = data.get('device_id')
+            referrer_code = data.get('referrer_code')
+            
+            if not device_id:
+                return JsonResponse({'status': 'error', 'message': 'Missing device_id'}, status=400)
+            
+            # 检查是否已经下载过
+            if ReferralRelationship.objects.filter(referred_device_id=device_id).exists():
+                return JsonResponse({'status': 'error', 'message': 'Already downloaded'}, status=400)
+            
+            # 如果有推荐码，创建推荐关系
+            if referrer_code:
+                try:
+                    referrer_link = ReferralLink.objects.get(code=referrer_code)
+                    ReferralRelationship.objects.create(
+                        referrer_device_id=referrer_link.device_id,
+                        referred_device_id=device_id
+                    )
+                except ReferralLink.DoesNotExist:
+                    pass
+            
+            return JsonResponse({'status': 'success'})
+        except Exception as e:
+            logger.error(f"Track download error: {str(e)}")
+            return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+    
+    return JsonResponse({'status': 'error', 'message': 'Method not allowed'}, status=405)

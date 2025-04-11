@@ -1,6 +1,9 @@
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
+from rest_framework.authentication import SessionAuthentication, BasicAuthentication
+from rest_framework.permissions import AllowAny
+from rest_framework.parsers import JSONParser
 from hdwallet import HDWallet
 from hdwallet.utils import generate_mnemonic
 from mnemonic import Mnemonic
@@ -18,19 +21,27 @@ from solana.keypair import Keypair
 from base58 import b58encode, b58decode
 from eth_account import Account
 from cryptography.fernet import Fernet
+from wallet.models import Wallet, PaymentPassword, Chain
+from wallet.serializers import WalletSerializer, WalletCreateSerializer, WalletSetupSerializer, ChainSelectionSerializer, VerifyMnemonicSerializer
+from wallet.utils.validators import validate_device_id, validate_payment_password
+from wallet.utils.encryption import encrypt_string, decrypt_string
+from wallet.utils.exceptions import WalletError
+from wallet.decorators import verify_payment_password
+from wallet.services.factory import ChainServiceFactory
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import os
 
-from ..models import Wallet, PaymentPassword
-from ..serializers import (
-    WalletSerializer, 
-    WalletCreateSerializer,
-    WalletSetupSerializer,
-    ChainSelectionSerializer # type: ignore
-)
-from ..decorators import verify_payment_password
+# 启用 eth_account 的助记词功能
+Account.enable_unaudited_hdwallet_features()
 
 logger = logging.getLogger(__name__)
 
 class WalletViewSet(viewsets.ModelViewSet):
+    """钱包视图集"""
+    permission_classes = [AllowAny]
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+    parser_classes = [JSONParser]
     queryset = Wallet.objects.filter(is_active=True)
     serializer_class = WalletSerializer
 
@@ -52,17 +63,9 @@ class WalletViewSet(viewsets.ModelViewSet):
     def encrypt_data(self, data, key):
         """使用 Fernet 加密数据"""
         try:
-            logger.debug(f"开始加密数据，输入数据类型: {type(data)}")
-            
             # 确保输入数据是字符串类型
             if not isinstance(data, str):
                 data = str(data)
-            
-            # 确保密钥是字符串类型
-            if not isinstance(key, str):
-                key = str(key)
-            
-            logger.debug(f"处理后的数据长度: {len(data)}, 密钥长度: {len(key)}")
             
             # 使用 SHA256 生成固定长度的密钥
             key_bytes = hashlib.sha256(key.encode()).digest()
@@ -70,23 +73,22 @@ class WalletViewSet(viewsets.ModelViewSet):
             
             # 加密数据
             encrypted = f.encrypt(data.encode())
-            result = base64.b64encode(encrypted).decode('utf-8')
-            
-            logger.debug(f"加密完成，结果长度: {len(result)}")
-            return result
+            return base64.b64encode(encrypted).decode('utf-8')
                 
         except Exception as e:
-            logger.error(f"加密数据失败: {str(e)}, 数据类型: {type(data)}")
+            logger.error(f"加密数据失败: {str(e)}")
             raise ValueError(f"加密失败: {str(e)}")
 
     def decrypt_data(self, encrypted_text, key):
         """使用 Fernet 解密数据"""
         try:
+            # 输入验证
+            if not encrypted_text:
+                raise ValueError("加密文本不能为空")
+            if not key:
+                raise ValueError("密钥不能为空")
+                
             logger.debug(f"开始解密数据，加密文本长度: {len(encrypted_text)}")
-            
-            # 确保密钥是字符串类型
-            if not isinstance(key, str):
-                key = str(key)
             
             # 使用 SHA256 生成固定长度的密钥
             key_bytes = hashlib.sha256(key.encode()).digest()
@@ -98,11 +100,14 @@ class WalletViewSet(viewsets.ModelViewSet):
                 
                 # 解密数据
                 decrypted = f.decrypt(encrypted_bytes)
-                result = decrypted.decode('utf-8')
+                logger.debug(f"解密完成，解密后字节长度: {len(decrypted)}")
                 
-                logger.debug(f"解密完成，结果长度: {len(result)}")
-                return result
+                # 返回原始字节数据
+                return decrypted
                 
+            except base64.binascii.Error as e:
+                logger.error(f"Base64 解码失败: {str(e)}")
+                raise ValueError("无效的 Base64 编码")
             except Exception as e:
                 logger.error(f"解密失败: {str(e)}")
                 raise ValueError(f"解密失败: {str(e)}")
@@ -111,8 +116,162 @@ class WalletViewSet(viewsets.ModelViewSet):
             logger.error(f"解密数据失败: {str(e)}")
             raise ValueError(f"解密失败: {str(e)}")
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], url_path='verify_mnemonic')
+    def verify_mnemonic(self, request):
+        """验证助记词"""
+        serializer = VerifyMnemonicSerializer(data=request.data)
+        if not serializer.is_valid():
+            logger.error(f"验证助记词参数错误: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        device_id = serializer.validated_data['device_id']
+        chain = serializer.validated_data['chain']
+        mnemonic = serializer.validated_data['mnemonic']
+        payment_password = request.data.get('payment_password')
+        
+        if not payment_password:
+            return Response({
+                'status': 'error',
+                'message': '请提供支付密码'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 验证支付密码
+        try:
+            payment_pwd = PaymentPassword.objects.get(device_id=device_id)
+            if not payment_pwd.verify_password(payment_password):
+                return Response({
+                    'status': 'error',
+                    'message': '支付密码错误'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        except PaymentPassword.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': '请先设置支付密码'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 验证助记词
+        try:
+            if chain == 'SOL':
+                # 使用助记词生成 Solana 钱包
+                try:
+                    # 使用助记词生成种子
+                    seed = hashlib.pbkdf2_hmac(
+                        'sha512',
+                        mnemonic.encode('utf-8'),
+                        'mnemonic'.encode('utf-8'),
+                        2048
+                    )
+                    
+                    # 使用种子的前32字节作为私钥
+                    private_key_bytes = seed[:32]
+                    
+                    # 从私钥创建Solana密钥对
+                    keypair = Keypair.from_seed(private_key_bytes)
+                    address = str(keypair.public_key)
+                    
+                    # 加密私钥
+                    key_bytes = hashlib.sha256(payment_password.encode()).digest()
+                    f = Fernet(base64.urlsafe_b64encode(key_bytes))
+                    encrypted = f.encrypt(private_key_bytes)
+                    encrypted_private_key = base64.b64encode(encrypted).decode('utf-8')
+                    
+                    logger.debug(f"生成的私钥长度: {len(private_key_bytes)}")
+                except Exception as e:
+                    logger.error(f"生成 Solana 钱包失败: {str(e)}")
+                    raise
+            else:
+                # 使用助记词生成 EVM 钱包
+                try:
+                    account = Account.from_mnemonic(mnemonic)
+                    address = account.address
+                    private_key_bytes = account.key
+                    
+                    # 加密私钥
+                    key_bytes = hashlib.sha256(payment_password.encode()).digest()
+                    f = Fernet(base64.urlsafe_b64encode(key_bytes))
+                    encrypted = f.encrypt(private_key_bytes)
+                    encrypted_private_key = base64.b64encode(encrypted).decode('utf-8')
+                    
+                    logger.debug(f"生成的 EVM 地址: {address}")
+                except Exception as e:
+                    logger.error(f"生成 EVM 钱包失败: {str(e)}")
+                    raise
+            
+            # 检查是否已存在相同地址的钱包
+            existing_wallet = Wallet.objects.filter(
+                device_id=device_id,
+                chain=chain,
+                address=address
+            ).first()
+            
+            if existing_wallet:
+                if existing_wallet.is_active:
+                    logger.warning(f"钱包已存在且处于激活状态: {address}")
+                    return Response({
+                        'status': 'error',
+                        'message': '该钱包已存在且处于激活状态'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    # 如果钱包存在但已被删除，重新激活它
+                    logger.info(f"重新激活已存在的钱包: {address}")
+                    existing_wallet.is_active = True
+                    existing_wallet.encrypted_private_key = encrypted_private_key
+                    existing_wallet.save()
+                    return Response({
+                        'status': 'success',
+                        'message': '钱包已重新激活',
+                        'wallet': WalletSerializer(existing_wallet).data
+                    })
+            
+            # 生成随机头像
+            try:
+                from ..serializers import generate_avatar
+                avatar_image = generate_avatar()
+                avatar_io = BytesIO()
+                avatar_image.save(avatar_io, format='PNG')
+                avatar_content = avatar_io.getvalue()
+                logger.debug(f"生成的头像大小: {len(avatar_content)} bytes")
+            except Exception as e:
+                logger.error(f"生成头像失败: {str(e)}")
+                raise
+            
+            # 创建钱包
+            try:
+                wallet = Wallet.objects.create(
+                    device_id=device_id,
+                    name=f"{chain} Wallet 1",
+                    chain=chain,
+                    address=address,
+                    encrypted_private_key=encrypted_private_key
+                )
+                logger.info(f"创建新钱包成功: {address}")
+            except Exception as e:
+                logger.error(f"创建钱包记录失败: {str(e)}")
+                raise
+            
+            # 保存头像
+            try:
+                wallet.avatar.save(f'wallet_avatar_{wallet.pk}.png', ContentFile(avatar_content))
+                logger.info(f"保存头像成功: {wallet.avatar.name}")
+            except Exception as e:
+                logger.error(f"保存头像失败: {str(e)}")
+                raise
+            
+            return Response({
+                'status': 'success',
+                'message': '助记词验证成功',
+                'wallet': WalletSerializer(wallet).data
+            })
+        except Exception as e:
+            logger.error(f"助记词验证失败: {str(e)}", exc_info=True)
+            return Response({
+                'status': 'error',
+                'message': f'助记词验证失败: {str(e)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='set_password')
     def set_password(self, request):
+        """设置支付密码"""
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -138,21 +297,129 @@ class WalletViewSet(viewsets.ModelViewSet):
             'message': '支付密码设置成功'
         })
 
+    @action(detail=False, methods=['get'], url_path='payment_password/status/(?P<device_id>[^/.]+)')
+    def payment_password_status(self, request, device_id=None):
+        """查询支付密码状态"""
+        try:
+            if not device_id:
+                return Response({
+                    'status': 'error',
+                    'message': '缺少device_id参数'
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+            payment_password = PaymentPassword.objects.filter(device_id=device_id).first()
+            return Response({
+                'status': 'success',
+                'data': {
+                    'has_payment_password': payment_password is not None,
+                    'device_id': device_id
+                }
+            })
+        except Exception as e:
+            logger.error(f"查询支付密码状态失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'查询支付密码状态失败: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['post'])
+    def verify_password(self, request):
+        """验证支付密码"""
+        device_id = request.data.get('device_id')
+        payment_password = request.data.get('payment_password')
+        
+        if not all([device_id, payment_password]):
+            return Response({'error': '缺少必要参数'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            payment_password_obj = PaymentPassword.objects.get(device_id=device_id)
+        except PaymentPassword.DoesNotExist:
+            return Response({'error': '未设置支付密码'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 验证密码
+        if not payment_password_obj.verify_password(payment_password):
+            return Response({'error': '支付密码错误'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response({'message': '支付密码验证成功'})
+
+    @action(detail=False, methods=['post'])
+    def change_password(self, request):
+        """修改支付密码"""
+        device_id = request.data.get('device_id')
+        old_password = request.data.get('old_password')
+        new_password = request.data.get('new_password')
+        confirm_password = request.data.get('confirm_password')
+        
+        if not all([device_id, old_password, new_password, confirm_password]):
+            return Response({'error': '缺少必要参数'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if new_password != confirm_password:
+            return Response({'error': '两次输入的新密码不一致'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            payment_password = PaymentPassword.objects.get(device_id=device_id)
+        except PaymentPassword.DoesNotExist:
+            return Response({'error': '未设置支付密码'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 验证旧密码
+        if not payment_password.verify_password(old_password):
+            return Response({'error': '旧密码错误'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # 更新密码
+        payment_password.set_password(new_password)
+        payment_password.save()
+        
+        return Response({'message': '支付密码修改成功'})
+
+    @action(detail=False, methods=['get'])
+    def get_supported_chains(self, request):
+        """获取支持的链列表"""
+        try:
+            supported_chains = {
+                "ETH": {
+                    "chain_id": "ETH",
+                    "name": "Ethereum",
+                    "symbol": "ETH",
+                    "network": "Mainnet",
+                    "status": "active",
+                    "logo": "https://assets.coingecko.com/coins/images/279/large/ethereum.png"
+                },
+                "BASE": {
+                    "chain_id": "BASE",
+                    "name": "Base",
+                    "symbol": "ETH",
+                    "network": "Mainnet",
+                    "status": "active",
+                    "logo": "https://cdn.bitkeep.vip/operation/u_b_52a61660-82d7-11ee-beed-414173dd7838.png"
+                },
+                "SOL": {
+                    "chain_id": "SOL",
+                    "name": "Solana",
+                    "symbol": "SOL",
+                    "network": "Mainnet",
+                    "status": "active",
+                    "logo": "https://assets.coingecko.com/coins/images/4128/large/solana.png"
+                }
+            }
+            
+            return Response({
+                'status': 'success',
+                'message': '获取支持的链列表成功',
+                'data': {
+                    'supported_chains': supported_chains
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"获取支持的链列表失败: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'获取支持的链列表失败: {str(e)}'
+            }, status=500)
+
     @action(detail=False, methods=['post'])
     def select_chain(self, request):
-        """选择链
-        
-        支持的链:
-        1. ETH (Ethereum) - 以太坊主网
-        2. BSC (BNB Chain) - 币安智能链
-        3. MATIC (Polygon) - Polygon主网
-        4. AVAX (Avalanche) - Avalanche C-Chain
-        5. BASE (Base) - Base主网
-        6. ARBITRUM (Arbitrum) - Arbitrum One
-        7. OPTIMISM (Optimism) - Optimism主网
-        8. SOL (Solana) - Solana主网
-        9. BTC (Bitcoin) - 比特币主网 (即将支持)
-        """
+        """选择链"""
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -231,7 +498,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # 生成助记词
-        mnemonic = generate_mnemonic(language="english", strength=128)
+        mnemonic = Mnemonic("english").generate(strength=128)
         
         return Response({
             'status': 'success',
@@ -243,136 +510,39 @@ class WalletViewSet(viewsets.ModelViewSet):
             }
         })
 
-    @action(detail=False, methods=['post'])
-    def generate_mnemonic(self, request):
-        device_id = request.data.get('device_id')
-        payment_password = request.data.get('payment_password')
+    def create(self, request, *args, **kwargs):
+        """创建钱包"""
+        serializer = WalletCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         
-        if not device_id or not payment_password:
+        device_id = serializer.validated_data['device_id']
+        chain = serializer.validated_data['chain']
+        payment_password = serializer.validated_data['payment_password']
+        
+        # 验证设备ID
+        if not validate_device_id(device_id):
             return Response({
                 'status': 'error',
-                'message': '缺少必要参数'
+                'message': '无效的设备ID'
             }, status=status.HTTP_400_BAD_REQUEST)
             
         # 验证支付密码
-        try:
-            PaymentPassword.objects.get(device_id=device_id, password=payment_password)
-        except PaymentPassword.DoesNotExist:
+        if not validate_payment_password(payment_password):
             return Response({
                 'status': 'error',
-                'message': '支付密码错误'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # 生成助记词
-        mnemonic = generate_mnemonic(language="english", strength=128)
-        encrypted_mnemonic = self.encrypt_data(mnemonic, payment_password)
-        
-        return Response({
-            'status': 'success',
-            'mnemonic': mnemonic,
-            'encrypted_mnemonic': encrypted_mnemonic
-        })
-
-    @action(detail=False, methods=['post'])
-    def verify_mnemonic(self, request):
-        device_id = request.data.get('device_id')
-        chain = request.data.get('chain')
-        mnemonic = request.data.get('mnemonic')
-        
-        if not all([device_id, chain, mnemonic]):
-            return Response({
-                'status': 'error',
-                'message': '缺少必要参数'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # 验证助记词格式
-        if not Mnemonic("english").check(mnemonic):
-            return Response({
-                'status': 'error',
-                'message': '助记词格式错误'
+                'message': '支付密码格式错误'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            # 获取或创建支付密码
-            payment_pwd, created = PaymentPassword.objects.get_or_create(
-                device_id=device_id,
-                defaults={'encrypted_password': self.encrypt_data('123456', device_id)}
-            )
+            # 生成助记词
+            mnemonic = generate_mnemonic()
             
-            # 创建 HD 钱包
-            hdwallet = HDWallet()
-            hdwallet.from_mnemonic(mnemonic)
+            # 创建HD钱包
+            hd_wallet = HDWallet(symbol=chain)
+            hd_wallet.from_mnemonic(mnemonic=mnemonic)
             
-            # 根据不同链设置路径和获取地址
-            if chain in ["ETH", "BSC", "MATIC", "AVAX", "BASE", "ARBITRUM", "OPTIMISM"]:
-                # 使用 BIP44 路径生成 EVM 链钱包
-                hdwallet.from_path("m/44'/60'/0'/0/0")
-                private_key = hdwallet.private_key()
-                # 确保私钥是32字节
-                private_key_bytes = bytes.fromhex(private_key)
-                if len(private_key_bytes) != 32:
-                    logger.error(f"生成的私钥长度不正确: {len(private_key_bytes)}字节")
-                    raise ValueError(f"生成的私钥长度不正确: {len(private_key_bytes)}字节")
-                # 使用 web3.eth.account 来生成地址
-                account = Account.from_key(private_key_bytes)
-                address = account.address
-                # 存储十六进制格式的私钥
-                private_key_to_store = '0x' + private_key_bytes.hex()
-            elif chain == "SOL":
-                # 使用助记词生成种子
-                seed = hashlib.pbkdf2_hmac(
-                    'sha512',
-                    mnemonic.encode('utf-8'),
-                    'mnemonic'.encode('utf-8'),
-                    2048
-                )
-                
-                # 使用种子的前32字节作为私钥
-                private_key_bytes = seed[:32]
-                
-                # 从私钥创建Solana密钥对
-                keypair = Keypair.from_seed(private_key_bytes)
-                address = str(keypair.public_key)
-                
-                # 创建88字节格式的私钥（32字节私钥 + 32字节公钥 + 24字节额外数据）
-                public_key_bytes = bytes(keypair.public_key)
-                extra_bytes = bytes([0] * 24)  # 24字节的额外数据
-                extended_key = private_key_bytes + public_key_bytes + extra_bytes
-                
-                # 将完整的88字节数据转换为Base58格式存储
-                private_key_to_store = b58encode(extended_key).decode()
-            else:
-                return Response({
-                    'status': 'error',
-                    'message': '不支持的链类型'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # 检查是否已存在相同地址的钱包
-            existing_wallet = Wallet.objects.filter(
-                device_id=device_id,
-                chain=chain,
-                address=address
-            ).first()
-            
-            if existing_wallet:
-                if existing_wallet.is_active:
-                    return Response({
-                        'status': 'error',
-                        'message': '该钱包已存在且处于激活状态'
-                    }, status=status.HTTP_400_BAD_REQUEST)
-                else:
-                    # 如果钱包存在但已被删除，重新激活它
-                    existing_wallet.is_active = True
-                    decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
-                    # 确保 decrypted_password 是字符串类型
-                    if isinstance(decrypted_password, bytes):
-                        decrypted_password = decrypted_password.decode('utf-8')
-                    existing_wallet.encrypted_private_key = self.encrypt_data(private_key_to_store, decrypted_password)
-                    existing_wallet.save()
-                    return Response({
-                        'status': 'success',
-                        'wallet': WalletSerializer(existing_wallet).data
-                    })
+            # 获取第一个账户
+            hd_wallet.from_path("m/44'/60'/0'/0/0")
             
             # 生成随机头像
             from ..serializers import generate_avatar
@@ -381,55 +551,42 @@ class WalletViewSet(viewsets.ModelViewSet):
             avatar_image.save(avatar_io, format='PNG')
             avatar_file = ContentFile(avatar_io.getvalue())
             
-            # 使用支付密码加密私钥
-            decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
-            # 确保 decrypted_password 是字符串类型
-            if isinstance(decrypted_password, bytes):
-                decrypted_password = decrypted_password.decode('utf-8')
-            
-            # 创建钱包
+            # 创建钱包记录
             wallet = Wallet.objects.create(
                 device_id=device_id,
-                name=f"{chain} Wallet 1",
+                name=f"Wallet {Wallet.objects.filter(device_id=device_id).count() + 1}",
                 chain=chain,
-                address=address,
-                encrypted_private_key=self.encrypt_data(private_key_to_store, decrypted_password)
+                address=hd_wallet.address(),
+                encrypted_private_key=encrypt_string(hd_wallet.private_key()),
+                is_active=True,
+                is_watch_only=False,
+                is_imported=False
             )
             
             # 保存头像
             wallet.avatar.save(f'wallet_avatar_{wallet.pk}.png', avatar_file, save=True)
             
+            # 创建支付密码
+            PaymentPassword.objects.create(
+                device_id=device_id,
+                encrypted_password=encrypt_string(payment_password)
+            )
+            
             return Response({
                 'status': 'success',
-                'wallet': WalletSerializer(wallet).data
+                'message': '钱包创建成功',
+                'data': {
+                    'wallet': WalletSerializer(wallet).data,
+                    'mnemonic': mnemonic  # 返回助记词给用户
+                }
             })
             
         except Exception as e:
             logger.error(f"创建钱包失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': f'创建钱包失败: {str(e)}'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        device_id = serializer.validated_data['device_id']
-        payment_password = serializer.validated_data['payment_password']
-        
-        try:
-            PaymentPassword.objects.get(device_id=device_id, password=payment_password)
-        except PaymentPassword.DoesNotExist:
-            return Response({
-                'status': 'error',
-                'message': '支付密码错误'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        self.perform_create(serializer)
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+                'message': '创建钱包失败'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
@@ -468,177 +625,6 @@ class WalletViewSet(viewsets.ModelViewSet):
         instance.is_active = False
         instance.save()
         return Response(status=status.HTTP_204_NO_CONTENT)
-
-    @action(detail=False, methods=['post'], url_path='verify_password')
-    def verify_password(self, request):
-        """验证支付密码"""
-        device_id = request.data.get('device_id')
-        payment_password = request.data.get('payment_password')
-        
-        if not device_id or not payment_password:
-            return Response({
-                'status': 'error',
-                'message': '缺少必要参数'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            # 获取支付密码记录
-            payment_pwd = PaymentPassword.objects.filter(device_id=device_id).first()
-            if not payment_pwd:
-                return Response({
-                    'status': 'error',
-                    'message': '设备未设置支付密码'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # 验证密码
-            if payment_pwd.verify_password(payment_password):
-                return Response({
-                    'status': 'success',
-                    'message': '支付密码验证成功'
-                })
-            else:
-                return Response({
-                    'status': 'error',
-                    'message': '支付密码错误'
-                }, status=status.HTTP_400_BAD_REQUEST)
-                
-        except Exception as e:
-            return Response({
-                'status': 'error',
-                'message': f'验证支付密码失败: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    @action(detail=False, methods=['get'], url_path=r'payment_password/status/(?P<device_id>[^/.]+)')  # 修改URL路径格式
-    def payment_password_status(self, request, device_id=None):  # 添加device_id参数
-        """查询支付密码状态"""
-        try:
-            if not device_id:  # 使用URL路径中的device_id
-                return Response({
-                    'status': 'error',
-                    'message': '缺少device_id参数'
-                }, status=status.HTTP_400_BAD_REQUEST)
-                
-            payment_password = PaymentPassword.objects.filter(device_id=device_id).first()
-            return Response({
-                'status': 'success',
-                'data': {
-                    'has_payment_password': payment_password is not None,
-                    'device_id': device_id
-                }
-            })
-        except Exception as e:
-            logger.error(f"查询支付密码状态失败: {str(e)}")
-            return Response({
-                'status': 'error',
-                'message': f'查询支付密码状态失败: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    @action(detail=False, methods=['post'])
-    def verify_old_password(self, request):
-        """验证旧密码"""
-        device_id = request.data.get('device_id')
-        payment_password = request.data.get('payment_password')
-        
-        if not device_id or not payment_password:
-            return Response({
-                'status': 'error',
-                'message': '缺少必要参数'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            # 获取支付密码记录
-            payment_pwd = PaymentPassword.objects.filter(device_id=device_id).first()
-            if not payment_pwd:
-                return Response({
-                    'status': 'error',
-                    'message': '设备未设置支付密码'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # 验证密码
-            is_valid = payment_pwd.verify_password(payment_password)
-            
-            return Response({
-                'status': 'success',
-                'data': {
-                    'is_valid': is_valid
-                }
-            })
-            
-        except Exception as e:
-            logger.error(f"验证旧密码失败: {str(e)}")
-            return Response({
-                'status': 'error',
-                'message': f'验证旧密码失败: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    @action(detail=False, methods=['post'])
-    def change_password(self, request):
-        """修改支付密码"""
-        device_id = request.data.get('device_id')
-        old_password = request.data.get('old_password')
-        new_password = request.data.get('new_password')
-        confirm_password = request.data.get('confirm_password')
-        
-        if not all([device_id, old_password, new_password, confirm_password]):
-            return Response({
-                'status': 'error',
-                'message': '缺少必要参数'
-            }, status=status.HTTP_400_BAD_REQUEST)
-            
-        if new_password != confirm_password:
-            return Response({
-                'status': 'error',
-                'message': '新密码和确认密码不一致'
-            }, status=status.HTTP_400_BAD_REQUEST)
-            
-        if not re.match(r'^\d{6}$', new_password):
-            return Response({
-                'status': 'error',
-                'message': '新密码必须是6位数字'
-            }, status=status.HTTP_400_BAD_REQUEST)
-            
-        try:
-            # 验证旧密码
-            payment_password = PaymentPassword.objects.get(device_id=device_id)
-            if not payment_password.verify_password(old_password):
-                logger.error(f"旧密码验证失败，设备ID: {device_id}")
-                return Response({
-                    'status': 'error',
-                    'message': '旧密码错误'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # 更新密码
-            payment_password.encrypted_password = self.encrypt_data(new_password, device_id)
-            payment_password.save()
-            
-            # 重新加密所有钱包的私钥
-            wallets = Wallet.objects.filter(device_id=device_id, is_active=True)
-            for wallet in wallets:
-                try:
-                    # 使用旧密码解密私钥
-                    decrypted_key = self.decrypt_data(wallet.encrypted_private_key, old_password)
-                    # 使用新密码加密私钥
-                    wallet.encrypted_private_key = self.encrypt_data(decrypted_key, new_password)
-                    wallet.save()
-                except Exception as e:
-                    logger.error(f"重新加密钱包私钥失败: {str(e)}")
-            
-            return Response({
-                'status': 'success',
-                'message': '支付密码修改成功'
-            })
-            
-        except PaymentPassword.DoesNotExist:
-            return Response({
-                'status': 'error',
-                'message': '设备未设置支付密码'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            logger.error(f"修改密码失败: {str(e)}")
-            return Response({
-                'status': 'error',
-                'message': f'修改密码失败: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'])
     def rename_wallet(self, request, pk=None):
@@ -729,118 +715,102 @@ class WalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def import_private_key(self, request):
-        """通过私钥导入钱包"""
-        device_id = request.data.get('device_id')
-        chain = request.data.get('chain')
-        private_key = request.data.get('private_key')
-        name = request.data.get('name')
-        payment_password = request.data.get('payment_password')
-        
-        # 如果未提供name参数，生成默认的钱包名称
-        if not name:
-            # 获取同类型钱包的数量
-            existing_count = Wallet.objects.filter(
-                device_id=device_id,
-                chain=chain,
-                is_active=True
-            ).count()
-            name = f"{chain} Wallet {existing_count + 1}"
-        
-        if not all([device_id, chain, private_key, payment_password]):
-            return Response({
-                'status': 'error',
-                'message': '缺少必要参数'
-            }, status=status.HTTP_400_BAD_REQUEST)
-            
-        # 获取支付密码
-        payment_pwd = PaymentPassword.objects.filter(device_id=device_id).first()
-        if not payment_pwd:
-            return Response({
-                'status': 'error',
-                'message': '未设置支付密码'
-            }, status=status.HTTP_400_BAD_REQUEST)
-            
-        # 验证密码
-        if not payment_pwd.verify_password(payment_password):
-            return Response({
-                'status': 'error',
-                'message': '支付密码错误'
-            }, status=status.HTTP_400_BAD_REQUEST)
-            
+        """导入私钥"""
         try:
-            # 根据不同链处理私钥
-            if chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
-                # 所有 EVM 兼容链使用相同的私钥处理逻辑
-                # 移除0x前缀（如果有）
-                private_key_str = private_key[2:] if private_key.startswith('0x') else private_key
-                # 移除所有非十六进制字符
-                private_key_str = ''.join(c for c in private_key_str if c in '0123456789abcdefABCDEF')
-                # 确保私钥长度为64个字符（32字节）
-                if len(private_key_str) < 64:
-                    private_key_str = private_key_str.zfill(64)
-                elif len(private_key_str) > 64:
-                    raise ValueError('私钥长度超过64个字符')
-                
-                # 验证私钥是否有效
+            device_id = request.data.get('device_id')
+            private_key = request.data.get('private_key')
+            chain = request.data.get('chain')
+            payment_password = request.data.get('payment_password')
+            name = request.data.get('name')
+            
+            if not all([device_id, private_key, chain, payment_password]):
+                return Response({
+                    'status': 'error',
+                    'message': '缺少必要参数'
+                }, status=400)
+            
+            # 验证支付密码
+            try:
+                payment_pwd = PaymentPassword.objects.get(device_id=device_id)
+                if not payment_pwd.verify_password(payment_password):
+                    return Response({
+                        'status': 'error',
+                        'message': '支付密码错误'
+                    }, status=400)
+            except PaymentPassword.DoesNotExist:
+                return Response({
+                    'status': 'error',
+                    'message': '请先设置支付密码'
+                }, status=400)
+            
+            # 根据链类型处理私钥
+            if chain == 'SOL':
                 try:
-                    account = Account.from_key('0x' + private_key_str)
-                    address = account.address
-                except Exception as e:
-                    raise ValueError(f'无效的私钥: {str(e)}')
-                
-                # 转换为字节类型存储
-                private_key_to_store = bytes.fromhex(private_key_str)
-                
-            elif chain == "SOL":
-                try:
-                    # 尝试解码 Base58 格式的私钥
-                    private_key_bytes = b58decode(private_key)
+                    # 尝试解码 Base58
+                    private_key_bytes = base58.b58decode(private_key)
                     
-                    # 如果是88字节的扩展格式，提取前64字节
+                    # 处理不同长度的私钥
                     if len(private_key_bytes) == 88:
-                        keypair_bytes = private_key_bytes[:64]
-                    # 如果已经是64字节的格式，直接使用
+                        # 88字节格式：提取前32字节作为私钥
+                        private_key_bytes = private_key_bytes[:32]
                     elif len(private_key_bytes) == 64:
-                        keypair_bytes = private_key_bytes
-                    # 如果是32字节的私钥，创建完整的密钥对
+                        # 64字节格式：使用前32字节作为私钥
+                        private_key_bytes = private_key_bytes[:32]
                     elif len(private_key_bytes) == 32:
-                        keypair = Keypair.from_seed(private_key_bytes)
-                        keypair_bytes = keypair.seed + bytes(keypair.public_key)
+                        # 32字节格式：直接使用
+                        pass
                     else:
-                        raise ValueError(f"无效的私钥长度: {len(private_key_bytes)}")
+                        return Response({
+                            'status': 'error',
+                            'message': f'无效的 Solana 私钥长度: {len(private_key_bytes)}'
+                        }, status=400)
                     
-                    # 验证生成的地址
-                    keypair = Keypair.from_seed(keypair_bytes[:32])
+                    # 创建 Solana 钱包
+                    keypair = Keypair.from_secret_key(private_key_bytes)
                     address = str(keypair.public_key)
-                    logger.debug(f"生成的地址: {address}")
                     
-                    # 创建88字节格式的私钥（32字节私钥 + 32字节公钥 + 24字节额外数据）
-                    public_key_bytes = bytes(keypair.public_key)
-                    extra_bytes = bytes([0] * 24)  # 24字节的额外数据
-                    private_key_to_store = keypair_bytes[:32] + public_key_bytes + extra_bytes
-                    
-                    # 将完整的88字节数据转换为Base58格式存储
-                    private_key_to_store = b58encode(private_key_to_store).decode()
+                    # 加密私钥
+                    key_bytes = hashlib.sha256(payment_password.encode()).digest()
+                    f = Fernet(base64.urlsafe_b64encode(key_bytes))
+                    encrypted = f.encrypt(private_key_bytes)
+                    encrypted_private_key = base64.b64encode(encrypted).decode('utf-8')
                     
                 except Exception as e:
-                    logger.error(f"处理Solana私钥失败: {str(e)}")
-                    raise ValueError(f"无效的Solana私钥: {str(e)}")
-            elif chain == "BTC":
-                # TODO: 添加比特币私钥导入支持
-                return Response({
-                    'status': 'error',
-                    'message': 'BTC 导入功能即将支持'
-                }, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({
+                        'status': 'error',
+                        'message': f'无效的 Solana 私钥格式: {str(e)}'
+                    }, status=400)
             else:
-                return Response({
-                    'status': 'error',
-                    'message': '不支持的链类型'
-                }, status=status.HTTP_400_BAD_REQUEST)
-                
+                try:
+                    # 移除可能的 0x 前缀
+                    private_key_str = private_key[2:] if private_key.startswith('0x') else private_key
+                    # 转换为字节
+                    private_key_bytes = bytes.fromhex(private_key_str)
+                    if len(private_key_bytes) != 32:
+                        return Response({
+                            'status': 'error',
+                            'message': '无效的私钥长度'
+                        }, status=400)
+                    
+                    # 创建 EVM 钱包
+                    account = Account.from_key(private_key_bytes)
+                    address = account.address
+                    
+                    # 加密私钥
+                    key_bytes = hashlib.sha256(payment_password.encode()).digest()
+                    f = Fernet(base64.urlsafe_b64encode(key_bytes))
+                    encrypted = f.encrypt(private_key_bytes)
+                    encrypted_private_key = base64.b64encode(encrypted).decode('utf-8')
+                    
+                except Exception as e:
+                    return Response({
+                        'status': 'error',
+                        'message': f'无效的私钥格式: {str(e)}'
+                    }, status=400)
+            
             # 检查钱包是否已存在
             existing_wallet = Wallet.objects.filter(
                 device_id=device_id,
-                chain=chain,
                 address=address
             ).first()
             
@@ -848,34 +818,44 @@ class WalletViewSet(viewsets.ModelViewSet):
                 if existing_wallet.is_active:
                     return Response({
                         'status': 'error',
-                        'message': '该钱包已存在且处于激活状态'
-                    }, status=status.HTTP_400_BAD_REQUEST)
+                        'message': '钱包已存在且处于激活状态'
+                    }, status=400)
                 else:
                     # 如果钱包存在但已被删除，重新激活它
                     existing_wallet.is_active = True
-                    decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
-                    # 确保 decrypted_password 是字符串类型
-                    if isinstance(decrypted_password, bytes):
-                        decrypted_password = decrypted_password.decode('utf-8')
-                    existing_wallet.encrypted_private_key = self.encrypt_data(private_key_to_store, decrypted_password)
+                    existing_wallet.encrypted_private_key = encrypted_private_key
+                    if name:
+                        existing_wallet.name = name
                     existing_wallet.save()
                     return Response({
                         'status': 'success',
-                        'wallet': WalletSerializer(existing_wallet).data
+                        'message': '钱包已重新激活',
+                        'data': {
+                            'wallet_id': existing_wallet.id,
+                            'address': address,
+                            'chain': chain
+                        }
                     })
             
             # 生成随机头像
-            from ..serializers import generate_avatar
-            avatar_image = generate_avatar()
-            avatar_io = BytesIO()
-            avatar_image.save(avatar_io, format='PNG')
-            avatar_file = ContentFile(avatar_io.getvalue())
+            try:
+                from ..serializers import generate_avatar
+                avatar_image = generate_avatar()
+                avatar_io = BytesIO()
+                avatar_image.save(avatar_io, format='PNG')
+                avatar_content = avatar_io.getvalue()
+            except Exception as e:
+                logger.error(f"生成头像失败: {str(e)}")
+                raise
             
-            # 使用支付密码加密私钥
-            decrypted_password = self.decrypt_data(payment_pwd.encrypted_password, device_id)
-            # 确保 decrypted_password 是字符串类型
-            if isinstance(decrypted_password, bytes):
-                decrypted_password = decrypted_password.decode('utf-8')
+            # 如果未提供名称，生成默认名称
+            if not name:
+                existing_wallets_count = Wallet.objects.filter(
+                    device_id=device_id,
+                    chain=chain,
+                    is_active=True
+                ).count()
+                name = f"{chain} Wallet {existing_wallets_count + 1}"
             
             # 创建钱包
             wallet = Wallet.objects.create(
@@ -883,25 +863,29 @@ class WalletViewSet(viewsets.ModelViewSet):
                 name=name,
                 chain=chain,
                 address=address,
-                encrypted_private_key=self.encrypt_data(str(private_key_to_store), decrypted_password),
+                encrypted_private_key=encrypted_private_key,
                 is_imported=True
             )
             
             # 保存头像
-            wallet.avatar.save(f'wallet_avatar_{wallet.pk}.png', avatar_file, save=True)
+            wallet.avatar.save(f'wallet_avatar_{wallet.pk}.png', ContentFile(avatar_content), save=True)
             
             return Response({
                 'status': 'success',
-                'message': '钱包导入成功',
-                'wallet': WalletSerializer(wallet).data
+                'message': '导入钱包成功',
+                'data': {
+                    'wallet_id': wallet.id,
+                    'address': address,
+                    'chain': chain
+                }
             })
             
         except Exception as e:
-            logger.error(f"导入私钥失败: {str(e)}")
+            logger.error(f"导入钱包失败: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': f'导入私钥失败: {str(e)}'
-            }, status=status.HTTP_400_BAD_REQUEST)
+                'message': f'导入钱包失败: {str(e)}'
+            }, status=500)
 
     @action(detail=False, methods=['post'])
     def import_watch_only(self, request):
@@ -1023,21 +1007,23 @@ class WalletViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def show_private_key(self, request, pk=None):
-        """显示钱包私钥"""
+        """显示私钥"""
         try:
             # 获取钱包
             wallet = self.get_object()
             
-            # 验证设备ID
+            # 获取设备ID和支付密码
             device_id = request.data.get('device_id')
-            if not device_id or device_id != wallet.device_id:
+            payment_password = request.data.get('payment_password')
+            
+            # 验证设备ID
+            if not device_id or not wallet.check_device_id(device_id):
                 return Response({
                     'status': 'error',
                     'message': '设备ID不匹配'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # 验证支付密码
-            payment_password = request.data.get('payment_password')
             if not payment_password:
                 return Response({
                     'status': 'error',
@@ -1051,20 +1037,45 @@ class WalletViewSet(viewsets.ModelViewSet):
                     'message': '支付密码错误'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # 设置支付密码用于解密
+            # 设置支付密码
             wallet.payment_password = payment_password
             
             # 解密私钥
             private_key = wallet.decrypt_private_key()
             
-            # 如果返回的是字节类型，则需要转换
-            if isinstance(private_key, bytes):
-                if wallet.chain == 'SOL':
-                    # Solana 使用 Base58 格式
+            # 根据链类型处理私钥
+            if wallet.chain == 'SOL':
+                # Solana 私钥处理
+                if isinstance(private_key, bytes):
+                    # 如果是 32 字节格式，需要转换为 88 字节格式
+                    if len(private_key) == 32:
+                        # 创建 Keypair 以获取完整的私钥
+                        keypair = Keypair.from_secret_key(private_key)
+                        private_key = keypair.secret_key
+                    # 使用 Base58 编码
                     private_key = base58.b58encode(private_key).decode('ascii')
-                else:
-                    # 其他链使用十六进制格式
-                    private_key = private_key.hex()
+                elif isinstance(private_key, str):
+                    # 如果已经是字符串，确保是 Base58 格式
+                    try:
+                        # 验证是否是有效的 Base58 格式
+                        decoded = base58.b58decode(private_key)
+                        if len(decoded) == 32:
+                            # 如果是 32 字节的 Base58 编码，转换为 88 字节格式
+                            keypair = Keypair.from_secret_key(decoded)
+                            private_key = base58.b58encode(keypair.secret_key).decode('ascii')
+                        elif len(decoded) == 88:
+                            # 如果是 88 字节的 Base58 编码，直接使用
+                            pass
+                    except:
+                        # 如果不是 Base58 格式，尝试其他格式
+                        pass
+            else:
+                # EVM 链私钥处理
+                if isinstance(private_key, bytes):
+                    private_key = '0x' + private_key.hex()
+                elif isinstance(private_key, str):
+                    if not private_key.startswith('0x'):
+                        private_key = '0x' + private_key
             
             return Response({
                 'status': 'success',
@@ -1077,6 +1088,7 @@ class WalletViewSet(viewsets.ModelViewSet):
             })
             
         except Exception as e:
+            logger.error(f"显示私钥失败: {str(e)}")
             return Response({
                 'status': 'error',
                 'message': str(e)
@@ -1101,114 +1113,84 @@ class WalletViewSet(viewsets.ModelViewSet):
             'wallets': serializer.data
         })
 
-    @action(detail=False, methods=['get'])
-    def get_supported_chains(self, request):
-        """获取支持的链列表
-        
-        Returns:
-            {
-                'status': 'success',
-                'message': '获取支持的链列表成功',
-                'data': {
-                    'supported_chains': {
-                        'ETH': {
-                            'chain_id': 'ETH',  # 前端选择链时应该使用的标识符
-                            'name': 'Ethereum',
-                            'symbol': 'ETH',
-                            'network': 'Mainnet',
-                            'status': 'active',
-                            'logo': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png'
-                        },
-                        ...
-                    }
-                }
-            }
-        """
+    @action(detail=False, methods=['post'])
+    def import_wallet(self, request):
+        """导入钱包"""
         try:
-            supported_chains = {
-                'ETH': {
-                    'chain_id': 'ETH',  # 添加 chain_id 字段
-                    'name': 'Ethereum',
-                    'symbol': 'ETH',
-                    'network': 'Mainnet',
-                    'status': 'active',
-                    'logo': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png'
-                },
-                'BSC': {
-                    'chain_id': 'BSC',
-                    'name': 'BNB Chain',
-                    'symbol': 'BNB',
-                    'network': 'Mainnet',
-                    'status': 'active',
-                    'logo': 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png'
-                },
-                'MATIC': {
-                    'chain_id': 'MATIC',
-                    'name': 'Polygon',
-                    'symbol': 'MATIC',
-                    'network': 'Mainnet',
-                    'status': 'active',
-                    'logo': 'https://assets.coingecko.com/coins/images/4713/large/matic-token-icon.png'
-                },
-                'AVAX': {
-                    'chain_id': 'AVAX',
-                    'name': 'Avalanche',
-                    'symbol': 'AVAX',
-                    'network': 'Mainnet',
-                    'status': 'active',
-                    'logo': 'https://assets.coingecko.com/coins/images/12559/large/Avalanche_Circle_RedWhite_Trans.png'
-                },
-                'BASE': {
-                    'chain_id': 'BASE',
-                    'name': 'Base',
-                    'symbol': 'ETH',
-                    'network': 'Mainnet',
-                    'status': 'active',
-                    'logo': 'https://cdn.bitkeep.vip/operation/u_b_52a61660-82d7-11ee-beed-414173dd7838.png'
-                },
-                'ARBITRUM': {
-                    'chain_id': 'ARBITRUM',
-                    'name': 'Arbitrum',
-                    'symbol': 'ETH',
-                    'network': 'Mainnet',
-                    'status': 'active'
-                },
-                'OPTIMISM': {
-                    'chain_id': 'OPTIMISM',
-                    'name': 'Optimism',
-                    'symbol': 'ETH',
-                    'network': 'Mainnet',
-                    'status': 'active'
-                },
-                'SOL': {
-                    'chain_id': 'SOL',
-                    'name': 'Solana',
-                    'symbol': 'SOL',
-                    'network': 'Mainnet',
-                    'status': 'active'
-                },
-                'BTC': {
-                    'chain_id': 'BTC',
-                    'name': 'Bitcoin',
-                    'symbol': 'BTC',
-                    'network': 'Mainnet',
-                    'status': 'coming_soon',
-                    'logo': 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png'
-                }
-            }
+            device_id = request.data.get('device_id')
+            name = request.data.get('name')
+            chain = request.data.get('chain')
+            private_key = request.data.get('private_key')
+            payment_password = request.data.get('payment_password')
+            
+            # 验证参数
+            validate_device_id(device_id)
+            validate_payment_password(payment_password)
+            
+            if not name:
+                raise WalletError('钱包名称不能为空')
+            
+            if not chain or chain not in dict(Chain.CHOICES):
+                raise WalletError('无效的区块链类型')
+            
+            if not private_key:
+                raise WalletError('私钥不能为空')
+            
+            # 检查是否已存在相同设备ID的钱包
+            if Wallet.objects.filter(device_id=device_id).exists():
+                raise WalletError('该设备已创建过钱包')
+            
+            # 导入钱包
+            with transaction.atomic():
+                # 创建支付密码
+                payment_password_obj = PaymentPassword.objects.create(
+                    device_id=device_id,
+                    encrypted_password=encrypt_string(payment_password)
+                )
+                
+                # 获取地址
+                service = ChainServiceFactory.get_service(chain, 'wallet')
+                address = service.get_address_from_private_key(private_key)
+                
+                # 创建钱包
+                wallet = Wallet.objects.create(
+                    device_id=device_id,
+                    name=name,
+                    chain=chain,
+                    address=address,
+                    encrypted_private_key=encrypt_string(private_key)
+                )
+                
+                # 返回结果
+                serializer = self.get_serializer(wallet)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+                
+        except WalletError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"导入钱包失败: {str(e)}")
+            return Response({'error': '导入钱包失败'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'])
+    def export_wallet(self, request, pk=None):
+        """导出钱包"""
+        try:
+            wallet = self.get_object()
+            payment_password = request.data.get('payment_password')
+            
+            # 验证支付密码
+            if not wallet.check_payment_password(payment_password):
+                raise WalletError('支付密码错误')
+            
+            # 解密私钥
+            private_key = wallet.decrypt_private_key()
             
             return Response({
-                'status': 'success',
-                'message': '获取支持的链列表成功',
-                'data': {
-                    'supported_chains': supported_chains
-                }
+                'private_key': private_key
             })
             
+        except WalletError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            logger.error(f"获取支持的链列表失败: {str(e)}")
-            return Response({
-                'status': 'error',
-                'message': '获取支持的链列表失败',
-                'error': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error(f"导出钱包失败: {str(e)}")
+            return Response({'error': '导出钱包失败'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

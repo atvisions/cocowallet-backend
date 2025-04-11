@@ -1,422 +1,101 @@
 from django.db import models
-from django.conf import settings
-from decimal import Decimal
+from django.utils import timezone
 from cryptography.fernet import Fernet
 import base64
+from solana.keypair import Keypair
+from eth_account import Account
+import json
+import os
 import logging
 import hashlib
 import base58
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives import serialization
-from solana.keypair import Keypair
-from eth_account import Account
-from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-def decrypt_string(encrypted_text: str, key: str) -> str:
-    """Decrypt string using Fernet"""
+def encrypt_string(text: str) -> str:
+    """使用 Fernet 加密字符串"""
     try:
-        # Generate Fernet key using the provided key
-        key_bytes = hashlib.sha256(key.encode()).digest()
-        f = Fernet(base64.urlsafe_b64encode(key_bytes))
-        # Decrypt
-        decrypted = f.decrypt(encrypted_text.encode())
-        return decrypted.decode()
-    except Exception as e:
-        logger.error(f"Failed to decrypt string: {str(e)}")
-        raise ValueError("Decryption failed")
-
-def encrypt_string(text: str, key: str) -> str:
-    """Encrypt string using Fernet"""
-    try:
-        # Generate Fernet key using the provided key
-        key_bytes = hashlib.sha256(key.encode()).digest()
-        f = Fernet(base64.urlsafe_b64encode(key_bytes))
-        # Encrypt
+        # 从环境变量获取密钥
+        key = os.getenv('ENCRYPTION_KEY', '').encode()
+        if not key:
+            raise ValueError("ENCRYPTION_KEY environment variable is not set")
+        
+        # 确保密钥长度为32字节
+        key = key.ljust(32)[:32]
+        
+        # 创建 Fernet 实例
+        f = Fernet(base64.urlsafe_b64encode(key))
+        
+        # 加密数据
         encrypted = f.encrypt(text.encode())
-        return encrypted.decode()
+        return base64.b64encode(encrypted).decode('utf-8')
+        
     except Exception as e:
-        logger.error(f"Failed to encrypt string: {str(e)}")
-        raise ValueError("Encryption failed")
+        logger.error(f"加密失败: {str(e)}")
+        raise ValueError(f"加密失败: {str(e)}")
 
-class Chain(models.TextChoices):
-    """Supported chain types"""
-    ETH = 'ETH', 'Ethereum'
-    BSC = 'BNB', 'BNB Chain'
-    MATIC = 'MATIC', 'Polygon'
-    AVAX = 'AVAX', 'Avalanche'
-    BASE = 'BASE', 'Base'
-    ARBITRUM = 'ARBITRUM', 'Arbitrum'
-    OPTIMISM = 'OPTIMISM', 'Optimism'
-    SOL = 'SOL', 'Solana'
-    BTC = 'BTC', 'Bitcoin'
+def decrypt_string(encrypted_text: str) -> str:
+    """使用 Fernet 解密字符串"""
+    try:
+        # 从环境变量获取密钥
+        key = os.getenv('ENCRYPTION_KEY', '').encode()
+        if not key:
+            raise ValueError("ENCRYPTION_KEY environment variable is not set")
+        
+        # 确保密钥长度为32字节
+        key = key.ljust(32)[:32]
+        
+        # 创建 Fernet 实例
+        f = Fernet(base64.urlsafe_b64encode(key))
+        
+        # Base64 解码
+        encrypted_bytes = base64.b64decode(encrypted_text)
+        
+        # 解密数据
+        decrypted = f.decrypt(encrypted_bytes)
+        return decrypted.decode('utf-8')
+        
+    except Exception as e:
+        logger.error(f"解密失败: {str(e)}")
+        raise ValueError(f"解密失败: {str(e)}")
+
+class Chain:
+    """支持的区块链类型"""
+    ETH = 'ETH'  # 以太坊主网
+    BSC = 'BSC'  # 币安智能链
+    MATIC = 'MATIC'  # Polygon
+    SOL = 'SOL'  # Solana
+    
+    CHOICES = [
+        (ETH, 'Ethereum'),
+        (BSC, 'BNB Chain'),
+        (MATIC, 'Polygon'),
+        (SOL, 'Solana'),
+    ]
+    
+    @staticmethod
+    def is_evm_chain(chain):
+        """判断是否是EVM兼容链"""
+        return chain in [Chain.ETH, Chain.BSC, Chain.MATIC]
+    
+    @staticmethod
+    def is_solana_chain(chain):
+        """判断是否是Solana链"""
+        return chain == Chain.SOL
 
 class Wallet(models.Model):
-    """Wallet model"""
-    CHAIN_CHOICES = [(key, value['name']) for key, value in settings.SUPPORTED_CHAINS.items()]
-    
-    device_id = models.CharField(max_length=100, verbose_name='Device ID')
-    name = models.CharField(max_length=100, verbose_name='Wallet Name')
-    chain = models.CharField(max_length=20, verbose_name='Blockchain')
-    address = models.CharField(max_length=100, verbose_name='Address')
-    encrypted_private_key = models.TextField(verbose_name='Encrypted Private Key', null=True, blank=True)
-    avatar = models.ImageField(upload_to='wallet_avatars/', verbose_name='Avatar', null=True, blank=True)
-    is_active = models.BooleanField(default=True, verbose_name='Is Active')
-    is_watch_only = models.BooleanField(default=False, verbose_name='Is Watch-Only Wallet')
-    is_imported = models.BooleanField(default=False, verbose_name='Is Imported Wallet')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
-    
-    _payment_password = None  # Add payment password attribute
-    
-    referral_info = models.JSONField(null=True, blank=True)
-    
-    @property
-    def payment_password(self):
-        return self._payment_password
-        
-    @payment_password.setter
-    def payment_password(self, value):
-        self._payment_password = value
-
-    def check_device(self, device_id: str) -> bool:
-        """Check if device ID matches
-        
-        Args:
-            device_id: Device ID
-            
-        Returns:
-            bool: Whether it matches
-        """
-        return self.device_id == device_id
-        
-    def check_payment_password(self, payment_password: str) -> bool:
-        """Check if payment password is correct
-        
-        Args:
-            payment_password: Payment password
-            
-        Returns:
-            bool: Whether it is correct
-        """
-        try:
-            # Get payment password record
-            payment_pwd = PaymentPassword.objects.filter(device_id=self.device_id).first()
-            if not payment_pwd:
-                return False
-            
-            # Verify password
-            return payment_pwd.verify_password(payment_password)
-        except Exception as e:
-            logger.error(f"Failed to verify payment password: {str(e)}")
-            return False
-
-    class Meta:
-        verbose_name = '钱包'
-        verbose_name_plural = '钱包'
-        ordering = ['-created_at']
-        unique_together = ['device_id', 'chain', 'address']
-
-    def __str__(self):
-        return f"{self.name} ({self.address})"
-
-    def decrypt_private_key(self) -> str:
-        """Decrypt private key"""
-        if not self.encrypted_private_key:
-            logger.error("Wallet does not have a private key")
-            raise ValueError("Wallet does not have a private key")
-        
-        if self.is_watch_only:
-            logger.error("Watch-Only wallet does not have a private key")
-            raise ValueError("Watch-Only wallet does not have a private key")
-            
-        try:
-            # Get payment password
-            if not self.payment_password:
-                raise ValueError("Payment password not provided")
-            
-            # Use Fernet to decrypt private key
-            from wallet.views.wallet import WalletViewSet
-            wallet_viewset = WalletViewSet()
-            decrypted = wallet_viewset.decrypt_data(self.encrypted_private_key, self.payment_password)
-            
-            # Ensure decrypted data is string type
-            if isinstance(decrypted, bytes):
-                try:
-                    decrypted = decrypted.decode('utf-8')
-                except UnicodeDecodeError as e:
-                    logger.error(f"UTF-8 decoding failed: {str(e)}")
-                    raise ValueError("Private key decoding failed")
-            elif not isinstance(decrypted, str):
-                logger.error(f"Invalid decrypted private key type: {type(decrypted)}")
-                raise ValueError("Invalid private key type")
-            
-            # Process private key based on chain type
-            if self.chain == 'SOL':
-                try:
-                    # Decode Base58 format data back to bytes
-                    decrypted_bytes = base58.b58decode(decrypted)
-                    
-                    # If it's an 88-byte extended format, extract the first 64 bytes
-                    if len(decrypted_bytes) == 88:
-                        keypair_bytes = decrypted_bytes[:64]
-                    # If it's already in 64-byte format, use directly
-                    elif len(decrypted_bytes) == 64:
-                        keypair_bytes = decrypted_bytes
-                    # If it's a 32-byte private key, create a complete key pair
-                    elif len(decrypted_bytes) == 32:
-                        keypair = Keypair.from_seed(decrypted_bytes)
-                        keypair_bytes = keypair.seed + bytes(keypair.public_key)
-                    else:
-                        raise ValueError(f"Invalid private key length: {len(decrypted_bytes)}")
-                    
-                    # Verify generated address
-                    keypair = Keypair.from_seed(keypair_bytes[:32])
-                    generated_address = str(keypair.public_key)
-                    logger.debug(f"Generated address: {generated_address}")
-                    
-                    if generated_address != self.address:
-                        raise ValueError(f"Private key does not match: Expected={self.address}, Actual={generated_address}")
-                    
-                    # Return Base58 encoded 64-byte key pair
-                    return base58.b58encode(keypair_bytes).decode()
-                    
-                except Exception as e:
-                    logger.error(f"Failed to verify SOL private key: {str(e)}")
-                    raise ValueError(f"Failed to verify SOL private key: {str(e)}")
-                    
-            elif self.chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
-                try:
-                    # If decrypted data is byte type
-                    if isinstance(decrypted, bytes):
-                        private_key_bytes = decrypted
-                    # If it's string type, try to convert to bytes
-                    elif isinstance(decrypted, str):
-                        try:
-                            # If it's hexadecimal format string
-                            if decrypted.startswith('0x'):
-                                private_key_bytes = bytes.fromhex(decrypted[2:])
-                            else:
-                                private_key_bytes = bytes.fromhex(decrypted)
-                        except ValueError:
-                            # If it's not hexadecimal format, it might be a literal value representation of byte string
-                            private_key_bytes = eval(decrypted)
-                    else:
-                        raise ValueError(f"Unsupported private key format: {type(decrypted)}")
-                        
-                    # Verify private key length
-                    if len(private_key_bytes) != 32:
-                        raise ValueError(f"Invalid private key length: {len(private_key_bytes)}")
-                        
-                    # Verify private key matches address
-                    account = Account.from_key(private_key_bytes)
-                    if account.address.lower() != self.address.lower():  # Use lowercase comparison
-                        raise ValueError(f"Private key address does not match: Expected {self.address}, Actual {account.address}")
-                    
-                    # Return hexadecimal format private key
-                    return '0x' + private_key_bytes.hex()
-                    
-                except Exception as e:
-                    logger.error(f"Failed to verify EVM private key: {str(e)}")
-                    raise ValueError(f"Failed to verify EVM private key: {str(e)}")
-            else:
-                raise ValueError(f"Unsupported chain type: {self.chain}")
-                
-        except Exception as e:
-            logger.error(f"Failed to decrypt private key: {str(e)}")
-            raise ValueError(f"Failed to decrypt private key: {str(e)}")
-
-    def _verify_address_match(self, generated_address: str) -> bool:
-        """Verify if generated address matches wallet address"""
-        try:
-            # If address is completely matched
-            if self.address == generated_address:
-                return True
-                
-            # If it's a Solana wallet
-            if self.chain == 'SOL':
-                # If wallet address is compressed public key format (hexadecimal starting with 02 or 03)
-                if (self.address.startswith('02') or self.address.startswith('03')):
-                    try:
-                        # Extract actual public key data from compressed public key (remove prefix)
-                        hex_str = self.address[2:]  # Remove 02/03 prefix
-                        # Convert hexadecimal to bytes
-                        hex_bytes = bytes.fromhex(hex_str)
-                        # Convert to Base58 format
-                        base58_address = base58.b58encode(hex_bytes).decode()
-                        logger.debug(f"Base58 address from compressed public key: {base58_address}")
-                        return base58_address == generated_address
-                    except Exception as e:
-                        logger.error(f"Failed to convert compressed public key: {str(e)}")
-                        return False
-                        
-                # If wallet address is Base58 format
-                try:
-                    wallet_bytes = base58.b58decode(self.address)
-                    generated_bytes = base58.b58decode(generated_address)
-                    return wallet_bytes == generated_bytes
-                except Exception as e:
-                    logger.error(f"Failed to decode Base58: {str(e)}")
-                    return False
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Address verification failed: {str(e)}")
-            return False
-
-class Token(models.Model):
-    """Token model"""
-    chain = models.CharField(max_length=10, verbose_name='Chain')
-    address = models.CharField(max_length=255, verbose_name='Contract Address')
-    name = models.CharField(max_length=255, verbose_name='Name')
-    symbol = models.CharField(max_length=50, verbose_name='Symbol')
-    decimals = models.IntegerField(default=18, verbose_name='Decimal Places')
-    logo = models.URLField(max_length=500, null=True, blank=True, verbose_name='Logo')
-    logo_hash = models.CharField(max_length=255, null=True, blank=True, verbose_name='Logo Hash')
-    thumbnail = models.URLField(max_length=500, null=True, blank=True, verbose_name='Thumbnail')
-    type = models.CharField(max_length=20, default='token', verbose_name='Type')
-    contract_type = models.CharField(max_length=20, default='ERC20', verbose_name='Contract Type')
-    description = models.TextField(null=True, blank=True, verbose_name='Description')
-    website = models.URLField(max_length=500, null=True, blank=True, verbose_name='Website')
-    email = models.EmailField(max_length=255, null=True, blank=True, verbose_name='Email')
-    twitter = models.URLField(max_length=500, null=True, blank=True, verbose_name='Twitter')
-    telegram = models.URLField(max_length=500, null=True, blank=True, verbose_name='Telegram')
-    reddit = models.URLField(max_length=500, null=True, blank=True, verbose_name='Reddit')
-    discord = models.URLField(max_length=500, null=True, blank=True, verbose_name='Discord')
-    instagram = models.URLField(max_length=500, null=True, blank=True, verbose_name='Instagram')
-    github = models.URLField(max_length=500, null=True, blank=True, verbose_name='GitHub')
-    medium = models.URLField(max_length=500, null=True, blank=True, verbose_name='Medium')
-    moralis = models.URLField(max_length=500, null=True, blank=True, verbose_name='Moralis')
-    coingecko_id = models.CharField(max_length=100, null=True, blank=True, verbose_name='CoinGecko ID')
-    total_supply = models.CharField(max_length=255, null=True, blank=True, verbose_name='Total Supply')
-    total_supply_formatted = models.CharField(max_length=255, null=True, blank=True, verbose_name='Formatted Total Supply')
-    circulating_supply = models.CharField(max_length=255, null=True, blank=True, verbose_name='Circulating Supply')
-    market_cap = models.CharField(max_length=255, null=True, blank=True, verbose_name='Market Cap')
-    fully_diluted_valuation = models.CharField(max_length=255, null=True, blank=True, verbose_name='Fully Diluted Valuation')
-    categories = models.JSONField(default=list, null=True, blank=True, verbose_name='Categories')
-    security_score = models.IntegerField(null=True, blank=True, verbose_name='Security Score')
-    is_verified = models.BooleanField(default=False, verbose_name='Is Verified')
-    possible_spam = models.BooleanField(default=False, verbose_name='Is Possible Spam')
-    block_number = models.CharField(max_length=255, null=True, blank=True, verbose_name='Block Height')
-    validated = models.IntegerField(default=0, verbose_name='Validation Status')
-    created_at = models.DateTimeField(null=True, blank=True, verbose_name='Created Time')
-    is_native = models.BooleanField(default=False, verbose_name='Is Native Token')
-    is_visible = models.BooleanField(default=True, verbose_name='Is Visible')
-    is_recommended = models.BooleanField(default=False, verbose_name='Is Recommended')
-    
-    # Cache fields
-    last_balance = models.CharField(max_length=255, null=True, blank=True, verbose_name='Last Balance')
-    last_price = models.CharField(max_length=255, null=True, blank=True, verbose_name='Last Price')
-    last_price_change = models.CharField(max_length=255, null=True, blank=True, verbose_name='Last 24h Price Change')
-    last_value = models.CharField(max_length=255, null=True, blank=True, verbose_name='Last Value')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
-
-    # Add category field
-    category = models.ForeignKey(
-        'TokenCategory', 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        blank=True, 
-        related_name='tokens',
-        verbose_name='Token Category'
-    )
-
-    # 确保只有一个 metaplex_data 字段定义
-    metaplex_data = models.JSONField(null=True, blank=True, verbose_name='Metaplex Data')
-
-    class Meta:
-        verbose_name = '代币'
-        verbose_name_plural = '代币'
-        unique_together = ('chain', 'address')
-        indexes = [
-            models.Index(fields=['chain', 'address']),
-        ]
-        ordering = ['-is_recommended', '-is_verified', '-created_at']
-
-    def __str__(self):
-        return f"{self.chain} - {self.symbol} ({self.address})"
-
-class NFTCollection(models.Model):
-    """NFT Collection model"""
-    chain = models.CharField(max_length=20, verbose_name='Blockchain')
-    contract_address = models.CharField(max_length=100, verbose_name='Contract Address', null=True, blank=True)
-    name = models.CharField(max_length=100, verbose_name='Collection Name')
-    symbol = models.CharField(max_length=100, verbose_name='Collection Symbol')
-    contract_type = models.CharField(max_length=20, default='ERC721', verbose_name='Contract Type')
-    description = models.TextField(verbose_name='Description', null=True, blank=True)
-    logo = models.URLField(verbose_name='Logo URL', null=True, blank=True)
-    banner = models.URLField(verbose_name='Banner URL', null=True, blank=True)
-    is_verified = models.BooleanField(default=False, verbose_name='Is Verified')
-    is_spam = models.BooleanField(default=False, verbose_name='Is Spam')
-    is_visible = models.BooleanField(default=True, verbose_name='Is Visible')
-    floor_price = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='Floor Price', default=Decimal('0'))
-    floor_price_usd = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='Floor Price (USD)', default=Decimal('0'))
-    floor_price_currency = models.CharField(max_length=10, default='eth', verbose_name='Floor Price Currency')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
-
-    class Meta:
-        verbose_name = 'NFT合集'
-        verbose_name_plural = 'NFT合集'
-        ordering = ['-floor_price_usd', '-created_at']
-        unique_together = ['chain', 'contract_address']
-
-    def __str__(self):
-        return f"{self.name} ({self.chain})"
-
-class Transaction(models.Model):
-    """Transaction record model"""
-    TYPE_CHOICES = [
-        ('TRANSFER', 'Transfer'),
-        ('APPROVE', 'Approve'),
-        ('SWAP', 'Swap'),
-        ('MINT', 'Mint'),
-        ('BURN', 'Burn'),
-        ('OTHER', 'Other'),
-    ]
-    
-    STATUS_CHOICES = [
-        ('PENDING', 'Pending'),
-        ('SUCCESS', 'Success'),
-        ('FAILED', 'Failed'),
-    ]
-    
-    wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, verbose_name='Wallet')
-    chain = models.CharField(max_length=20, verbose_name='Blockchain')
-    tx_hash = models.CharField(max_length=100, verbose_name='Transaction Hash')
-    tx_type = models.CharField(max_length=20, choices=TYPE_CHOICES, verbose_name='Transaction Type')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, verbose_name='Status')
-    from_address = models.CharField(max_length=100, verbose_name='From Address')
-    to_address = models.CharField(max_length=100, verbose_name='To Address')
-    amount = models.CharField(max_length=64, default='0')
-    token = models.ForeignKey(Token, null=True, blank=True, on_delete=models.SET_NULL, verbose_name='Token')
-    nft_collection = models.ForeignKey(NFTCollection, null=True, blank=True, on_delete=models.SET_NULL, verbose_name='NFT Collection')
-    nft_token_id = models.CharField(max_length=100, null=True, blank=True, verbose_name='NFT Token ID')
-    token_info = models.JSONField(null=True, blank=True, verbose_name='Token Info')
-    gas_price = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='Gas Price')
-    gas_used = models.DecimalField(max_digits=30, decimal_places=18, verbose_name='Gas Used')
-    block_number = models.IntegerField(verbose_name='Block Height')
-    block_timestamp = models.DateTimeField(verbose_name='Block Time')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    to_token_address = models.CharField(max_length=255, null=True, blank=True, help_text="Target Token Address (for Swap transaction)")
-
-    class Meta:
-        verbose_name = '交易记录'
-        verbose_name_plural = '交易记录'
-        ordering = ['-block_timestamp']
-        unique_together = ['chain', 'tx_hash', 'wallet']
-
-    def __str__(self):
-        return f"{self.tx_hash} ({self.tx_type})"
-
-class MnemonicBackup(models.Model):
-    """Mnemonic backup model"""
-    device_id = models.CharField(max_length=100, verbose_name='Device ID')
-    chain = models.CharField(max_length=20, verbose_name='Blockchain')
-    encrypted_mnemonic = models.TextField(verbose_name='Encrypted Mnemonic')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
+    """钱包模型"""
+    device_id = models.CharField(max_length=100, help_text='设备ID')
+    name = models.CharField(max_length=100, help_text='钱包名称')
+    chain = models.CharField(max_length=10, choices=Chain.CHOICES, help_text='区块链类型')
+    address = models.CharField(max_length=100, help_text='钱包地址')
+    encrypted_private_key = models.CharField(max_length=500, help_text='加密后的私钥')
+    avatar = models.ImageField(upload_to='wallet_avatars/', null=True, blank=True, help_text='钱包头像')
+    is_active = models.BooleanField(default=True, help_text='是否激活')
+    is_watch_only = models.BooleanField(default=False, help_text='是否只读')
+    is_imported = models.BooleanField(default=False, help_text='是否导入')
+    created_at = models.DateTimeField(auto_now_add=True, help_text='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, help_text='更新时间')
     
     _payment_password = None
     
@@ -427,560 +106,454 @@ class MnemonicBackup(models.Model):
     @payment_password.setter
     def payment_password(self, value):
         self._payment_password = value
+
+    class Meta:
+        db_table = 'wallet'
+        verbose_name = '钱包'
+        verbose_name_plural = '钱包'
+        ordering = ['-created_at']
+        unique_together = [['device_id', 'address']]
     
-    def decrypt_mnemonic(self) -> str:
-        """Decrypt mnemonic, process based on different chain type"""
-        if not self.encrypted_mnemonic:
-            logger.error("No encrypted mnemonic")
-            raise ValueError("No encrypted mnemonic")
+    def __str__(self):
+        return f"{self.name} ({self.chain})"
+    
+    def check_device_id(self, device_id: str) -> bool:
+        """检查设备ID是否匹配"""
+        return self.device_id == device_id
+    
+    def check_payment_password(self, payment_password: str) -> bool:
+        """检查支付密码是否正确"""
+        try:
+            pwd = PaymentPassword.objects.get(device_id=self.device_id)
+            return pwd.check_password(payment_password)
+        except PaymentPassword.DoesNotExist:
+            return False
+    
+    def encrypt_private_key(self, private_key, payment_password):
+        """加密私钥"""
+        try:
+            # 确保私钥是字符串类型
+            if isinstance(private_key, bytes):
+                if self.chain == 'SOL':
+                    private_key = base58.b58encode(private_key).decode('ascii')
+                else:
+                    private_key = '0x' + private_key.hex()
+            
+            # 使用支付密码作为密钥
+            key_bytes = hashlib.sha256(payment_password.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
+            
+            # 加密数据
+            encrypted = f.encrypt(private_key.encode())
+            return base64.b64encode(encrypted).decode('utf-8')
+                
+        except Exception as e:
+            logger.error(f"加密私钥失败: {str(e)}")
+            raise ValueError(f"加密私钥失败: {str(e)}")
+
+    def decrypt_private_key(self) -> str:
+        """解密私钥"""
+        if not self.encrypted_private_key:
+            logger.error("Wallet does not have a private key")
+            raise ValueError("Wallet does not have a private key")
+        
+        if self.is_watch_only:
+            logger.error("Watch-Only wallet does not have a private key")
+            raise ValueError("Watch-Only wallet does not have a private key")
             
         try:
-            # Get payment password
+            # 获取支付密码
             if not self.payment_password:
                 raise ValueError("Payment password not provided")
             
-            # Use Fernet to decrypt mnemonic
+            # 使用 Fernet 解密私钥
             from wallet.views.wallet import WalletViewSet
             wallet_viewset = WalletViewSet()
-            decrypted = wallet_viewset.decrypt_data(self.encrypted_mnemonic, self.payment_password)
             
-            # Ensure decrypted data is string type
-            if isinstance(decrypted, bytes):
-                try:
-                    decrypted = decrypted.decode('utf-8')
-                except UnicodeDecodeError as e:
-                    logger.error(f"UTF-8 decoding failed: {str(e)}")
-                    raise ValueError("Mnemonic decoding failed")
-            elif not isinstance(decrypted, str):
-                logger.error(f"Invalid decrypted mnemonic type: {type(decrypted)}")
-                raise ValueError("Invalid mnemonic type")
+            # 记录解密前的数据
+            logger.debug(f"Encrypted private key length: {len(self.encrypted_private_key)}")
+            logger.debug(f"Payment password length: {len(self.payment_password)}")
             
-            # Process mnemonic based on chain type
+            # 解密数据
+            decrypted = wallet_viewset.decrypt_data(self.encrypted_private_key, self.payment_password)
+            
+            # 记录解密后的数据
+            logger.debug(f"Decrypted data type: {type(decrypted)}")
+            logger.debug(f"Decrypted data length: {len(decrypted) if isinstance(decrypted, (str, bytes)) else 'N/A'}")
+            
+            # 根据链类型处理私钥
             if self.chain == 'SOL':
                 try:
-                    # For Solana, mnemonic should be space-separated words
-                    words = decrypted.strip().split()
-                    if len(words) not in [12, 24]:
-                        raise ValueError(f"Invalid mnemonic length: {len(words)} words")
-                    return ' '.join(words)
+                    # 如果是字节类型，尝试转换为原始格式
+                    if isinstance(decrypted, bytes):
+                        # 尝试 Base58 编码
+                        try:
+                            # 验证私钥长度
+                            if len(decrypted) != 32:
+                                raise ValueError(f"Invalid private key length: {len(decrypted)}")
+                            
+                            # 验证生成的地址
+                            keypair = Keypair.from_seed(decrypted)
+                            generated_address = str(keypair.public_key)
+                            logger.debug(f"Generated address: {generated_address}")
+                            
+                            if generated_address != self.address:
+                                raise ValueError(f"Private key does not match: Expected={self.address}, Actual={generated_address}")
+                            
+                            # 返回 Base58 编码的私钥
+                            return base58.b58encode(decrypted).decode('ascii')
+                        except:
+                            # 如果 Base58 编码失败，尝试其他格式
+                            pass
+                    
+                    # 如果是字符串类型，直接返回
+                    if isinstance(decrypted, str):
+                        # 验证私钥格式
+                        try:
+                            # 尝试解码为 Base58
+                            keypair = Keypair.from_secret_key(base58.b58decode(decrypted))
+                            if str(keypair.public_key) != self.address:
+                                raise ValueError("Private key does not match address")
+                            return decrypted
+                        except:
+                            # 如果不是 Base58 格式，尝试其他格式
+                            pass
+                    
+                    # 如果以上都失败，尝试十六进制格式
+                    try:
+                        # 如果是十六进制格式
+                        if isinstance(decrypted, str) and decrypted.startswith('0x'):
+                            private_key_bytes = bytes.fromhex(decrypted[2:])
+                        else:
+                            private_key_bytes = bytes.fromhex(decrypted)
+                        
+                        # 验证私钥长度
+                        if len(private_key_bytes) != 32:
+                            raise ValueError(f"Invalid private key length: {len(private_key_bytes)}")
+                        
+                        # 验证生成的地址
+                        keypair = Keypair.from_seed(private_key_bytes)
+                        if str(keypair.public_key) != self.address:
+                            raise ValueError(f"Private key does not match: Expected={self.address}, Actual={str(keypair.public_key)}")
+                        
+                        # 返回十六进制格式
+                        return '0x' + private_key_bytes.hex()
+                    except:
+                        raise ValueError("Invalid private key format")
+                    
                 except Exception as e:
-                    logger.error(f"Failed to verify SOL mnemonic: {str(e)}")
-                    raise ValueError(f"Failed to verify SOL mnemonic: {str(e)}")
+                    logger.error(f"Failed to verify SOL private key: {str(e)}")
+                    raise ValueError(f"Failed to verify SOL private key: {str(e)}")
+                    
             elif self.chain in ["ETH", "BASE", "BNB", "MATIC", "AVAX", "ARBITRUM", "OPTIMISM"]:
                 try:
-                    # For EVM chains, mnemonic is also space-separated words
-                    words = decrypted.strip().split()
-                    if len(words) not in [12, 15, 18, 21, 24]:
-                        raise ValueError(f"Invalid mnemonic length: {len(words)} words")
-                    return ' '.join(words)
+                    # 如果是字节类型，尝试转换为原始格式
+                    if isinstance(decrypted, bytes):
+                        # 验证私钥长度
+                        if len(decrypted) != 32:
+                            raise ValueError(f"Invalid private key length: {len(decrypted)}")
+                        
+                        # 验证私钥是否匹配地址
+                        account = Account.from_key(decrypted)
+                        if account.address.lower() != self.address.lower():
+                            raise ValueError(f"Private key address does not match: Expected {self.address}, Actual {account.address}")
+                        
+                        # 返回十六进制格式
+                        return '0x' + decrypted.hex()
+                    
+                    # 如果是字符串类型，直接返回
+                    if isinstance(decrypted, str):
+                        # 验证私钥格式
+                        try:
+                            # 如果是十六进制格式
+                            if decrypted.startswith('0x'):
+                                private_key_bytes = bytes.fromhex(decrypted[2:])
+                            else:
+                                private_key_bytes = bytes.fromhex(decrypted)
+                            
+                            # 验证私钥长度
+                            if len(private_key_bytes) != 32:
+                                raise ValueError(f"Invalid private key length: {len(private_key_bytes)}")
+                            
+                            # 验证私钥是否匹配地址
+                            account = Account.from_key(private_key_bytes)
+                            if account.address.lower() != self.address.lower():
+                                raise ValueError(f"Private key address does not match: Expected {self.address}, Actual {account.address}")
+                            
+                            return decrypted
+                        except:
+                            # 如果不是十六进制格式，尝试其他格式
+                            pass
+                    
+                    # 如果以上都失败，尝试 Base58 格式
+                    try:
+                        private_key_bytes = base58.b58decode(decrypted)
+                        
+                        # 验证私钥长度
+                        if len(private_key_bytes) != 32:
+                            raise ValueError(f"Invalid private key length: {len(private_key_bytes)}")
+                        
+                        # 验证私钥是否匹配地址
+                        account = Account.from_key(private_key_bytes)
+                        if account.address.lower() != self.address.lower():
+                            raise ValueError(f"Private key address does not match: Expected {self.address}, Actual {account.address}")
+                        
+                        # 返回十六进制格式
+                        return '0x' + private_key_bytes.hex()
+                    except:
+                        raise ValueError("Invalid private key format")
+                    
                 except Exception as e:
-                    logger.error(f"Failed to verify EVM mnemonic: {str(e)}")
-                    raise ValueError(f"Failed to verify EVM mnemonic: {str(e)}")
+                    logger.error(f"Failed to verify EVM private key: {str(e)}")
+                    raise ValueError(f"Failed to verify EVM private key: {str(e)}")
             else:
                 raise ValueError(f"Unsupported chain type: {self.chain}")
                 
         except Exception as e:
-            logger.error(f"Failed to decrypt mnemonic: {str(e)}")
-            raise ValueError(f"Failed to decrypt mnemonic: {str(e)}")
+            logger.error(f"Failed to decrypt private key: {str(e)}")
+            raise ValueError(f"Failed to decrypt private key: {str(e)}")
+    
+    def get_evm_private_key(self) -> str:
+        """获取EVM私钥（带0x前缀）"""
+        if not Chain.is_evm_chain(self.chain):
+            raise ValueError(f'Chain {self.chain} is not EVM compatible')
+        
+        private_key = self.decrypt_private_key()
+        if not private_key.startswith('0x'):
+            private_key = '0x' + private_key.hex()
+        return private_key
+    
+    def get_solana_keypair(self) -> Keypair:
+        """获取Solana密钥对"""
+        if not Chain.is_solana_chain(self.chain):
+            raise ValueError(f'Chain {self.chain} is not Solana')
+        
+        private_key = self.decrypt_private_key()
+        return Keypair.from_secret_key(private_key)
 
-    class Meta:
-        verbose_name = '助记词备份'
-        verbose_name_plural = '助记词备份'
-        ordering = ['-created_at']
-        unique_together = ['device_id', 'chain']
+    def encrypt_data(self, data, key):
+        """使用 Fernet 加密数据"""
+        try:
+            # 确保输入数据是字符串类型
+            if not isinstance(data, str):
+                data = str(data)
+            
+            # 确保密钥是字符串类型
+            if not isinstance(key, str):
+                key = str(key)
+            
+            # 使用 SHA256 生成固定长度的密钥
+            key_bytes = hashlib.sha256(key.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
+            
+            # 加密数据
+            encrypted = f.encrypt(data.encode())
+            return base64.b64encode(encrypted).decode('utf-8')
+                
+        except Exception as e:
+            logger.error(f"加密数据失败: {str(e)}")
+            raise ValueError(f"加密失败: {str(e)}")
 
-    def __str__(self):
-        return f"Backup for device {self.device_id} on {self.chain}"
+    def decrypt_data(self, encrypted_text, key):
+        """使用 Fernet 解密数据"""
+        try:
+            # 确保密钥是字符串类型
+            if not isinstance(key, str):
+                key = str(key)
+            
+            # 使用 SHA256 生成固定长度的密钥
+            key_bytes = hashlib.sha256(key.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
+            
+            try:
+                # Base64 解码
+                encrypted_bytes = base64.b64decode(encrypted_text)
+                
+                # 解密数据
+                decrypted = f.decrypt(encrypted_bytes)
+                return decrypted.decode('utf-8')
+                
+            except Exception as e:
+                logger.error(f"解密失败: {str(e)}")
+                raise ValueError(f"解密失败: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"解密数据失败: {str(e)}")
+            raise ValueError(f"解密失败: {str(e)}")
 
 class PaymentPassword(models.Model):
-    """Payment password model"""
-    device_id = models.CharField(max_length=100, unique=True, verbose_name='Device ID')
-    encrypted_password = models.CharField(max_length=255, verbose_name='Encrypted Payment Password')
-    is_biometric_enabled = models.BooleanField(default=False, verbose_name='Is Biometric Enabled')
-    biometric_verified_at = models.DateTimeField(null=True, blank=True, verbose_name='Last Biometric Password Verification Time')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
-
+    """支付密码模型"""
+    device_id = models.CharField(max_length=100, unique=True, help_text='设备ID')
+    encrypted_password = models.CharField(max_length=255, help_text='加密后的支付密码')
+    created_at = models.DateTimeField(auto_now_add=True, help_text='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, help_text='更新时间')
+    
     class Meta:
+        db_table = 'payment_password'
         verbose_name = '支付密码'
         verbose_name_plural = '支付密码'
-
+    
     def __str__(self):
-        return f"Payment password for device {self.device_id}"
-
-    @staticmethod
-    async def verify_device_password(device_id: str, password: str) -> bool:
-        """Verify device payment password
-        
-        Args:
-            device_id: Device ID
-            password: Payment password
-            
-        Returns:
-            bool: Whether password is correct
-        """
+        return f"PaymentPassword for {self.device_id}"
+    
+    def verify_password(self, password):
+        """验证密码"""
         try:
-            from asgiref.sync import sync_to_async
+            # 使用设备ID作为密钥解密支付密码
+            key_bytes = hashlib.sha256(self.device_id.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
             
-            # Get payment password record
-            payment_pwd = await sync_to_async(PaymentPassword.objects.filter(
-                device_id=device_id
-            ).first)()
+            # Base64 解码
+            encrypted_bytes = base64.b64decode(self.encrypted_password)
             
-            if not payment_pwd:
-                logger.error(f"Failed to find payment password record for device: {device_id}")
-                return False
-                
-            # Verify password
-            return payment_pwd.verify_password(password)
+            # 解密数据
+            decrypted = f.decrypt(encrypted_bytes)
+            decrypted_password = decrypted.decode('utf-8')
+            
+            # 直接比较解密后的密码
+            return decrypted_password == password
             
         except Exception as e:
-            logger.error(f"Failed to verify payment password: {str(e)}")
+            logger.error(f"验证密码失败: {str(e)}")
             return False
 
-    def verify_password(self, password: str) -> bool:
-        """Verify payment password"""
+    def set_password(self, password):
+        """设置密码"""
         try:
-            # Decrypt stored password
-            from wallet.views.wallet import WalletViewSet
-            wallet_viewset = WalletViewSet()
+            # 使用设备ID作为密钥
+            key_bytes = hashlib.sha256(self.device_id.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
             
-            # Record input password information
-            logger.debug(f"Verifying payment password: device_id={self.device_id}, input password type={type(password)}")
+            # 加密密码
+            encrypted = f.encrypt(password.encode())
             
-            # Ensure password is string type
-            if not isinstance(password, str):
-                logger.error(f"Invalid password type: {type(password)}")
-                return False
+            # Base64 编码存储
+            self.encrypted_password = base64.b64encode(encrypted).decode('utf-8')
+            self.save()
+            
+        except Exception as e:
+            logger.error(f"设置密码失败: {str(e)}")
+            raise ValueError(f"设置密码失败: {str(e)}")
+
+    def encrypt_data(self, data, key):
+        """使用 Fernet 加密数据"""
+        try:
+            # 确保输入数据是字符串类型
+            if not isinstance(data, str):
+                data = str(data)
+            
+            # 确保密钥是字符串类型
+            if not isinstance(key, str):
+                key = str(key)
+            
+            # 使用 SHA256 生成固定长度的密钥
+            key_bytes = hashlib.sha256(key.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
+            
+            # 加密数据
+            encrypted = f.encrypt(data.encode())
+            return base64.b64encode(encrypted).decode('utf-8')
                 
+        except Exception as e:
+            logger.error(f"加密数据失败: {str(e)}")
+            raise ValueError(f"加密失败: {str(e)}")
+
+    def decrypt_data(self, encrypted_text, key):
+        """使用 Fernet 解密数据"""
+        try:
+            # 确保密钥是字符串类型
+            if not isinstance(key, str):
+                key = str(key)
+            
+            # 使用 SHA256 生成固定长度的密钥
+            key_bytes = hashlib.sha256(key.encode()).digest()
+            f = Fernet(base64.urlsafe_b64encode(key_bytes))
+            
             try:
-                # Decrypt stored password
-                decrypted_password = wallet_viewset.decrypt_data(self.encrypted_password, self.device_id)
-                logger.debug(f"Decrypted password type: {type(decrypted_password)}")
+                # Base64 解码
+                encrypted_bytes = base64.b64decode(encrypted_text)
                 
-                # Ensure decrypted password is string type
-                if isinstance(decrypted_password, bytes):
-                    try:
-                        decrypted_password = decrypted_password.decode('utf-8')
-                    except UnicodeDecodeError as e:
-                        logger.error(f"UTF-8 decoding failed: {str(e)}")
-                        return False
-                elif not isinstance(decrypted_password, str):
-                    logger.error(f"Invalid decrypted password type: {type(decrypted_password)}")
-                    return False
-                    
-                # Ensure both passwords are string types and remove possible whitespace characters
-                password = str(password).strip()
-                decrypted_password = str(decrypted_password).strip()
+                # 解密数据
+                decrypted = f.decrypt(encrypted_bytes)
+                return decrypted.decode('utf-8')
                 
-                # Record password comparison state before
-                logger.debug(f"Input password length: {len(password)}, decrypted password length: {len(decrypted_password)}")
-                logger.debug(f"Input password: {password}, decrypted password: {decrypted_password}")
-                
-                # Password comparison
-                is_match = password == decrypted_password
-                logger.debug(f"Password verification result: {is_match}")
-                
-                return is_match
-                
-            except Exception as decrypt_error:
-                logger.error(f"Failed to decrypt password: {str(decrypt_error)}")
-                return False
+            except Exception as e:
+                logger.error(f"解密失败: {str(e)}")
+                raise ValueError(f"解密失败: {str(e)}")
                 
         except Exception as e:
-            logger.error(f"Failed to verify payment password: {str(e)}")
-            return False
+            logger.error(f"解密数据失败: {str(e)}")
+            raise ValueError(f"解密失败: {str(e)}")
 
-    def enable_biometric(self) -> bool:
-        """Enable biometric password
-        
-        Returns:
-            bool: Whether successful enable
-        """
-        try:
-            self.is_biometric_enabled = True
-            self.save()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to enable biometric password: {str(e)}")
-            return False
-
-    def disable_biometric(self) -> bool:
-        """Disable biometric password
-        
-        Returns:
-            bool: Whether successful disable
-        """
-        try:
-            self.is_biometric_enabled = False
-            self.biometric_verified_at = None
-            self.save()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to disable biometric password: {str(e)}")
-            return False
-
-    def update_biometric_verified_time(self) -> bool:
-        """Update biometric password verification time
-        
-        Returns:
-            bool: Whether successful update
-        """
-        try:
-            from django.utils import timezone
-            self.biometric_verified_at = timezone.now()
-            self.save()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to update biometric password verification time: {str(e)}")
-            return False
-
-class TokenIndex(models.Model):
-    """Token index model, only store basic information"""
-    chain = models.CharField(max_length=10, verbose_name='Chain')
-    address = models.CharField(max_length=255, verbose_name='Contract Address')
-    name = models.CharField(max_length=255, verbose_name='Name')
-    symbol = models.CharField(max_length=50, verbose_name='Symbol')
-    decimals = models.IntegerField(default=18, verbose_name='Decimal Places')
-    is_native = models.BooleanField(default=False, verbose_name='Is Native Token')
-    is_verified = models.BooleanField(default=False, verbose_name='Is Verified')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
-
-    class Meta:
-        verbose_name = '代币索引'
-        verbose_name_plural = '代币索引'
-        unique_together = ('chain', 'address')
-        indexes = [
-            models.Index(fields=['chain', 'address']),
-            models.Index(fields=['symbol']),
-            models.Index(fields=['name']),
-        ]
-
-    def __str__(self):
-        return f"{self.chain} - {self.symbol} ({self.address})"
-
-class TokenIndexSource(models.Model):
-    """Token data source record"""
-    name = models.CharField(max_length=50, verbose_name='Data Source Name')
-    priority = models.IntegerField(verbose_name='Priority')
-    last_sync = models.DateTimeField(auto_now=True, verbose_name='Last Sync Time')
-    is_active = models.BooleanField(default=True, verbose_name='Is Active')
+class Token(models.Model):
+    """代币模型"""
+    chain = models.CharField(max_length=10, choices=Chain.CHOICES, help_text='区块链类型')
+    address = models.CharField(max_length=100, help_text='代币合约地址')
+    name = models.CharField(max_length=100, help_text='代币名称')
+    symbol = models.CharField(max_length=20, help_text='代币符号')
+    decimals = models.IntegerField(help_text='小数位数')
+    logo = models.URLField(max_length=500, blank=True, null=True, help_text='代币logo')
+    is_active = models.BooleanField(default=True, help_text='是否激活')
+    is_verified = models.BooleanField(default=False, help_text='是否已验证')
+    is_visible = models.BooleanField(default=True, help_text='是否可见')
+    is_recommended = models.BooleanField(default=False, help_text='是否推荐')
+    created_at = models.DateTimeField(default=timezone.now, help_text='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, help_text='更新时间')
     
     class Meta:
-        verbose_name = '代币数据源'
-        verbose_name_plural = '代币数据源'
-        ordering = ['priority']
-        
-    def __str__(self):
-        return f"{self.name} (Priority: {self.priority})"
-
-class TokenIndexMetrics(models.Model):
-    """Token index metrics data"""
-    token = models.OneToOneField(TokenIndex, on_delete=models.CASCADE, related_name='metrics', verbose_name='Token')
-    daily_volume = models.DecimalField(max_digits=30, decimal_places=18, default=Decimal('0'), verbose_name='24h Transaction Volume (USD)')
-    holder_count = models.IntegerField(default=0, verbose_name='Holder Count')
-    liquidity = models.DecimalField(max_digits=30, decimal_places=18, default=Decimal('0'), verbose_name='Liquidity (USD)')
-    market_cap = models.DecimalField(max_digits=30, decimal_places=18, default=Decimal('0'), verbose_name='Market Cap (USD)')
-    price = models.DecimalField(max_digits=30, decimal_places=18, default=Decimal('0'), verbose_name='Price (USD)')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
+        db_table = 'token'
+        verbose_name = '代币'
+        verbose_name_plural = '代币'
+        unique_together = [['chain', 'address']]
     
-    class Meta:
-        verbose_name = '代币指标'
-        verbose_name_plural = '代币指标'
-        
     def __str__(self):
-        return f"{self.token.symbol} Metrics"
+        return f"{self.name} ({self.symbol})"
 
-class TokenIndexGrade(models.Model):
-    """Token grade evaluation"""
-    GRADE_CHOICES = [
-        ('A', 'A Grade - Core Token'),
-        ('B', 'B Grade - Regular Token'),
-        ('C', 'C Grade - Observation Token'),
+class Transaction(models.Model):
+    """交易记录模型"""
+    TX_TYPE_CHOICES = [
+        ('TRANSFER', '转账'),
+        ('SWAP', '兑换'),
+        ('APPROVE', '授权'),
+        ('CONTRACT', '合约调用'),
     ]
     
-    token = models.OneToOneField(TokenIndex, on_delete=models.CASCADE, related_name='grade', verbose_name='Token')
-    grade = models.CharField(max_length=1, choices=GRADE_CHOICES, verbose_name='Grade')
-    score = models.IntegerField(default=0, verbose_name='Overall Score')
-    last_evaluated = models.DateTimeField(auto_now=True, verbose_name='Last Evaluation Time')
-    evaluation_reason = models.TextField(null=True, blank=True, verbose_name='Evaluation Reason')
+    wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, help_text='关联钱包')
+    tx_hash = models.CharField(max_length=100, unique=True, help_text='交易哈希')
+    tx_type = models.CharField(max_length=20, choices=TX_TYPE_CHOICES, help_text='交易类型')
+    from_address = models.CharField(max_length=100, help_text='发送地址')
+    to_address = models.CharField(max_length=100, help_text='接收地址')
+    amount = models.DecimalField(max_digits=65, decimal_places=0, help_text='交易金额(原始值)')
+    token = models.ForeignKey(Token, null=True, on_delete=models.SET_NULL, help_text='代币')
+    token_info = models.JSONField(null=True, blank=True, help_text='代币信息(SWAP等场景)')
+    to_token_address = models.CharField(max_length=100, null=True, blank=True, help_text='目标代币地址(SWAP场景)')
+    fee = models.DecimalField(max_digits=65, decimal_places=0, default=0, help_text='手续费(原始值)')
+    status = models.BooleanField(default=True, help_text='交易状态')
+    block_number = models.BigIntegerField(help_text='区块号')
+    block_timestamp = models.DateTimeField(help_text='区块时间')
+    created_at = models.DateTimeField(auto_now_add=True, help_text='创建时间')
     
     class Meta:
-        verbose_name = '代币评级'
-        verbose_name_plural = '代币评级'
-        
+        db_table = 'transaction'
+        verbose_name = '交易记录'
+        verbose_name_plural = '交易记录'
+        ordering = ['-block_timestamp']
+    
     def __str__(self):
-        return f"{self.token.symbol} ({self.grade} Grade)"
+        return f"{self.tx_hash} ({self.tx_type})"
 
-class TokenIndexReport(models.Model):
-    """Index library status report"""
-    total_tokens = models.IntegerField(verbose_name='Total Tokens')
-    grade_a_count = models.IntegerField(verbose_name='A Grade Tokens')
-    grade_b_count = models.IntegerField(verbose_name='B Grade Tokens')
-    grade_c_count = models.IntegerField(verbose_name='C Grade Tokens')
-    new_tokens = models.IntegerField(verbose_name='New Tokens')
-    removed_tokens = models.IntegerField(verbose_name='Removed Tokens')
-    report_date = models.DateTimeField(auto_now_add=True, verbose_name='Report Time')
-    details = models.JSONField(default=dict, verbose_name='Details')
+class HiddenToken(models.Model):
+    """隐藏的代币"""
+    wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, help_text='关联钱包')
+    token_address = models.CharField(max_length=100, help_text='代币地址')
+    created_at = models.DateTimeField(auto_now_add=True, help_text='创建时间')
     
     class Meta:
-        verbose_name = '代币库报告'
-        verbose_name_plural = '代币库报告'
-        ordering = ['-report_date']
-        
-    def __str__(self):
-        return f"Token Index Report ({self.report_date.strftime('%Y-%m-%d %H:%M')})"
-
-class TokenCategory(models.Model):
-    """Token category model"""
-    name = models.CharField(max_length=50, verbose_name='Category Name')
-    code = models.CharField(max_length=20, unique=True, verbose_name='Category Code')
-    description = models.TextField(blank=True, null=True, verbose_name='Category Description')
-    icon = models.CharField(max_length=255, blank=True, null=True, verbose_name='Category Icon')
-    priority = models.IntegerField(default=0, verbose_name='Display Priority')
-    is_active = models.BooleanField(default=True, verbose_name='Is Active')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
-
-    class Meta:
-        verbose_name = '代币分类'
-        verbose_name_plural = '代币分类'
-        ordering = ['priority', 'name']
-
-    def __str__(self):
-        return self.name
-
-class ReferralRelationship(models.Model):
-    """推荐关系模型"""
-    referrer_device_id = models.CharField(max_length=100)
-    referred_device_id = models.CharField(max_length=100)
-    download_completed = models.BooleanField(default=True)
-    download_points_awarded = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        verbose_name = '推荐关系'
-        verbose_name_plural = '推荐关系'
-        unique_together = ['referrer_device_id', 'referred_device_id']
-
-class UserPoints(models.Model):
-    """User points model"""
-    device_id = models.CharField(max_length=100, unique=True, verbose_name='Device ID')
-    total_points = models.IntegerField(default=0, verbose_name='Total Points')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
-
-    class Meta:
-        verbose_name = '用户积分'
-        verbose_name_plural = '用户积分'
-        indexes = [
-            models.Index(fields=['device_id']),
-        ]
-
-    def __str__(self):
-        return f"{self.device_id}: {self.total_points} points"
-
-    @classmethod
-    def get_or_create_user_points(cls, device_id):
-        """Get or create user points record"""
-        user_points, created = cls.objects.get_or_create(
-            device_id=device_id,
-            defaults={'total_points': 0}
-        )
-        return user_points
-
-    def add_points(self, points, action_type, description=None, related_device_id=None):
-        """添加积分"""
-        logger.info(f"Adding points: {points} to device: {self.device_id}, "
-                   f"action: {action_type}, related: {related_device_id}")
-        
-        self.total_points += points
-        self.save()
-        
-        # 记录积分历史
-        PointsHistory.objects.create(
-            device_id=self.device_id,
-            points=points,
-            action_type=action_type,
-            description=description,
-            related_device_id=related_device_id
-        )
-        
-        return points
-
-class PointsHistory(models.Model):
-    """Points history model"""
-    ACTION_TYPES = [
-        ('DOWNLOAD_REFERRAL', 'Download Recommendation'),
-        ('WALLET_REFERRAL', 'Wallet Creation Recommendation'),
-        ('POINTS_USED', 'Points Used'),
-        ('ADMIN_ADJUSTMENT', 'Admin Adjustment'),
-        ('OTHER', 'Other'),
-    ]
+        db_table = 'hidden_token'
+        verbose_name = '隐藏代币'
+        verbose_name_plural = '隐藏代币'
+        unique_together = [['wallet', 'token_address']]
     
-    device_id = models.CharField(max_length=100, verbose_name='Device ID')
-    points = models.IntegerField(verbose_name='Points Change')
-    action_type = models.CharField(max_length=20, choices=ACTION_TYPES, verbose_name='Action Type')
-    description = models.TextField(null=True, blank=True, verbose_name='Description')
-    related_device_id = models.CharField(max_length=100, null=True, blank=True, verbose_name='Related Device ID')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-
-    class Meta:
-        verbose_name = '积分历史'
-        verbose_name_plural = '积分历史'
-        ordering = ['-created_at']
-        indexes = [
-            models.Index(fields=['device_id']),
-            models.Index(fields=['action_type']),
-            models.Index(fields=['created_at']),
-        ]
-
     def __str__(self):
-        action = dict(self.ACTION_TYPES).get(self.action_type, self.action_type)
-        return f"{self.device_id}: {self.points} points ({action})"
-
-class ReferralLink(models.Model):
-    """Recommendation link model"""
-    device_id = models.CharField(max_length=100, verbose_name='Device ID')
-    code = models.CharField(max_length=20, unique=True, verbose_name='Recommendation Code')
-    is_active = models.BooleanField(default=True, verbose_name='Is Active')
-    clicks = models.IntegerField(default=0, verbose_name='Click Count')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Created Time')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Updated Time')
-
-    class Meta:
-        verbose_name = '推荐链接'
-        verbose_name_plural = '推荐链接'
-        indexes = [
-            models.Index(fields=['device_id']),
-            models.Index(fields=['code']),
-        ]
-
-    def __str__(self):
-        return f"{self.device_id}: {self.code}"
-
-    @classmethod
-    def generate_code(cls, length=8):
-        """Generate unique recommendation code"""
-        import random
-        import string
-        
-        while True:
-            # Generate random string
-            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
-            
-            # Check if it already exists
-            if not cls.objects.filter(code=code).exists():
-                return code
-
-    @classmethod
-    def get_or_create_link(cls, device_id):
-        """Get or create recommendation link"""
-        referral_link = cls.objects.filter(device_id=device_id, is_active=True).first()
-        
-        if not referral_link:
-            code = cls.generate_code()
-            referral_link = cls.objects.create(
-                device_id=device_id,
-                code=code,
-                is_active=True
-            )
-            
-        return referral_link
-
-    def increment_clicks(self):
-        """Increment click count"""
-        self.clicks += 1
-        self.save()
-        return self.clicks
-
-    def record_download(self, device_id):
-        """记录下载"""
-        # 不能推荐自己
-        if device_id == self.device_id:
-            return False
-            
-        # 创建或更新推荐关系
-        relationship, created = ReferralRelationship.objects.get_or_create(
-            referrer_device_id=self.device_id,
-            referred_device_id=device_id,
-            defaults={
-                'download_completed': True
-            }
-        )
-        
-        if not created:
-            relationship.download_completed = True
-            relationship.save()
-            
-        return True
-
-# 在现有模型后添加任务相关模型
-class Task(models.Model):
-    """任务模型"""
-    name = models.CharField('任务名称', max_length=100)
-    code = models.CharField('任务代码', max_length=50, unique=True, default='DEFAULT_TASK')
-    task_type = models.CharField('任务类型', max_length=50, default='OTHER')
-    description = models.TextField('任务描述', blank=True)
-    points = models.IntegerField('奖励积分', default=0)
-    daily_limit = models.IntegerField('每日限制次数', default=1)
-    is_repeatable = models.BooleanField('是否可重复', default=False)
-    is_active = models.BooleanField('是否激活', default=True)
-    stages_config = models.JSONField('阶段配置', default=dict, blank=True)
-    created_at = models.DateTimeField('创建时间', auto_now_add=True)
-    updated_at = models.DateTimeField('更新时间', auto_now=True)
-
-    class Meta:
-        verbose_name = '任务'
-        verbose_name_plural = '任务'
-        ordering = ['-created_at']
-
-    def __str__(self):
-        return self.name
-
-class TaskHistory(models.Model):
-    """任务完成历史"""
-    device_id = models.CharField('设备ID', max_length=100)
-    task = models.ForeignKey(Task, on_delete=models.CASCADE, verbose_name='任务')
-    completed_at = models.DateTimeField('完成时间', auto_now_add=True)
-    points_awarded = models.IntegerField('获得积分', default=0)
-    extra_data = models.JSONField('额外数据', default=dict, blank=True)
-
-    class Meta:
-        verbose_name = '任务历史'
-        verbose_name_plural = '任务历史'
-        ordering = ['-completed_at']
-        indexes = [
-            models.Index(fields=['device_id', 'task', 'completed_at'])
-        ]
-
-    def __str__(self):
-        return f"{self.device_id} - {self.task.name}"
-
-class ShareTaskToken(models.Model):
-    """分享代币任务"""
-    token = models.ForeignKey('Token', on_delete=models.CASCADE, related_name='share_tasks')
-    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='share_token_tasks', null=True)
-    points = models.IntegerField(default=0)
-    daily_limit = models.IntegerField(default=1)
-    is_active = models.BooleanField(default=True)
-    official_tweet_id = models.CharField(max_length=100, blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        verbose_name = '分享代币任务'
-        verbose_name_plural = '分享代币任务'
-
-    def __str__(self):
-        return f"{self.token.symbol} 分享任务"
-
-    def is_valid(self):
-        """检查任务是否在有效期内"""
-        now = timezone.now()
-        if self.end_time and now > self.end_time:
-            return False
-        return self.is_active
+        return f"{self.wallet.name} - {self.token_address}"
 

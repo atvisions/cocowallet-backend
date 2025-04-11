@@ -22,6 +22,8 @@ DEVELOPMENT_DOMAIN = 'http://192.168.3.16:8000'
 # 根据环境设置域名
 API_DOMAIN = PRODUCTION_DOMAIN if not DEBUG else DEVELOPMENT_DOMAIN
 
+# 推荐链接基础 URL
+REFERRAL_BASE_URL = f"{API_DOMAIN}/referral"
 
 # 获取 API keys
 MORALIS_API_KEY = os.getenv('MORALIS_API_KEY')
@@ -51,6 +53,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'wallet',
+    'tasks',
     'channels',
 ]
 

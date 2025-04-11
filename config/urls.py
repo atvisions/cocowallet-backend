@@ -19,15 +19,18 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from wallet.views.website import home, download_app  # 确保从website导入
+from website.views import home, download_app  # 确保从website导入
 from django.views.decorators.csrf import csrf_exempt
 from wallet.admin import admin_site
+from django.views.generic import TemplateView
 
 urlpatterns = [
     path('', csrf_exempt(home), name='home'),  # 主页视图
     path('download/app', csrf_exempt(download_app), name='download_app'),  # 下载视图
     path('admin/', admin_site.urls),  # 管理后台
-    path('api/v1/', include('wallet.urls')),  # API路径
+    path('api/v1/', include('wallet.urls')),  # 钱包API路径
+    path('api/v1/tasks/', include('tasks.urls')),  # 任务API路径
+    path('', TemplateView.as_view(template_name='index.html')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 # 在开发环境中提供静态文件
